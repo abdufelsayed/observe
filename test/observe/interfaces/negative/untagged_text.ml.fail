@@ -1,0 +1,1 @@
+let _ = Observe.Logs.info (Observe.Logs.text "missing required tag")

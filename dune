@@ -1,0 +1,53 @@
+(alias
+ (name correctness)
+ (deps
+  dune-project
+  (alias test/observe/observe-contracts)
+  (alias observe-installed-surface)))
+
+(alias
+ (name stress)
+ (deps
+  dune-project
+  (alias correctness)
+  (alias_rec discovery)))
+
+(alias
+ (name examples)
+ (deps
+  (alias examples/observe-examples)))
+
+(alias
+ (name runtest)
+ (deps
+  (alias correctness)))
+
+(rule
+ (alias observe-installed-surface)
+ (package observe)
+ (deps
+  observe.install
+  %{lib:observe:observe.cmi}
+  %{lib:observe:observe.mli}
+  %{lib:observe:META}
+  %{lib:observe:dune-package}
+  test/observe/interfaces/check_install_surface.sh
+  test/observe/interfaces/public_consumer.exe
+  test/observe/interfaces/ppx_consumer.exe
+  test/observe/interfaces/public_consumer.ml
+  (source_tree test/observe/interfaces/negative))
+ (action
+  (progn
+   (run
+    bash
+    %{dep:test/observe/interfaces/check_install_surface.sh}
+    %{bin:ocamlfind}
+    %{dep:observe.install}
+    %{lib:observe:observe.cmi}
+    %{lib:observe:observe.mli}
+    %{lib:observe:META}
+    %{lib:observe:dune-package}
+    %{dep:test/observe/interfaces/public_consumer.ml}
+    test/observe/interfaces/negative)
+   (run %{exe:test/observe/interfaces/public_consumer.exe})
+   (run %{exe:test/observe/interfaces/ppx_consumer.exe}))))

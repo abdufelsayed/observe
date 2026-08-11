@@ -1,0 +1,5 @@
+(library
+ (name observe_test_support)
+ (wrapped false)
+ (modules test_runtime)
+ (libraries observe alcotest))

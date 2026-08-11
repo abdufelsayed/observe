@@ -1,0 +1,39 @@
+(executable
+ (name test_public_contracts)
+ (modules test_public_contracts)
+ (libraries observe alcotest))
+
+(executable
+ (name test_public_properties)
+ (modules test_public_properties)
+ (libraries observe alcotest qcheck-core qcheck-alcotest))
+
+(rule
+ (alias observe-public-unit)
+ (package observe)
+ (deps test_public_contracts.exe)
+ (action
+  (run %{exe:test_public_contracts.exe})))
+
+(rule
+ (alias observe-public-properties)
+ (package observe)
+ (deps
+  test_public_properties.exe
+  (env_var OBSERVE_QCHECK_COUNT)
+  (env_var QCHECK_SEED))
+ (action
+  (run %{exe:test_public_properties.exe})))
+
+(alias
+ (name observe-public-contracts)
+ (package observe)
+ (deps
+  (alias observe-public-unit)
+  (alias observe-public-properties)))
+
+(alias
+ (name discovery)
+ (package observe)
+ (deps
+  (alias observe-public-properties)))

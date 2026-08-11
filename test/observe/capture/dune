@@ -1,0 +1,44 @@
+(executable
+ (name test_capture_contracts)
+ (modules test_capture_contracts)
+ (libraries observe observe_test_support alcotest yojson))
+
+(executable
+ (name test_capture_properties)
+ (modules test_capture_properties)
+ (libraries
+  observe
+  observe_test_support
+  alcotest
+  qcheck-core
+  qcheck-alcotest))
+
+(rule
+ (alias observe-capture-unit)
+ (package observe)
+ (deps test_capture_contracts.exe)
+ (action
+  (run %{exe:test_capture_contracts.exe})))
+
+(rule
+ (alias observe-capture-properties)
+ (package observe)
+ (deps
+  test_capture_properties.exe
+  (env_var OBSERVE_QCHECK_COUNT)
+  (env_var QCHECK_SEED))
+ (action
+  (run %{exe:test_capture_properties.exe})))
+
+(alias
+ (name observe-capture-contracts)
+ (package observe)
+ (deps
+  (alias observe-capture-unit)
+  (alias observe-capture-properties)))
+
+(alias
+ (name discovery)
+ (package observe)
+ (deps
+  (alias observe-capture-properties)))

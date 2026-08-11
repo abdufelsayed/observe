@@ -1,0 +1,11 @@
+(executable
+ (name public_consumer)
+ (modules public_consumer)
+ (libraries observe))
+
+(executable
+ (name ppx_consumer)
+ (modules ppx_consumer)
+ (libraries observe)
+ (preprocess
+  (pps observe.ppx)))

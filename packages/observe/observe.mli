@@ -1,0 +1,289 @@
+(** Runtime-neutral structured logging.
+
+    The core owns logging policy and performs no I/O. Runtime adapters provide
+    dynamic context; platform adapters provide the clock and terminal output.
+    Ordinary application code logs through {!Logs}. *)
+
+module Type = Repr
+(** Runtime descriptions used by typed structured logs. *)
+
+module Level : sig
+  type t =
+    | Debug
+    | Info
+    | Warn
+    | Error  (** Ordered as [Debug < Info < Warn < Error]. *)
+
+  val compare : t -> t -> int
+  val equal : t -> t -> bool
+  val to_string : t -> string
+  val pp : Format.formatter -> t -> unit
+  val t : t Type.t
+end
+
+module Instant : sig
+  type t
+  (** A wall-clock occurrence instant expressed as epoch nanoseconds. *)
+
+  val of_epoch_nanoseconds : int64 -> t
+  val to_epoch_nanoseconds : t -> int64
+  val compare : t -> t -> int
+  val equal : t -> t -> bool
+  val pp : Format.formatter -> t -> unit
+  val t : t Type.t
+end
+
+module Value : sig
+  type t
+  (** A free-form structured value. The outer tree is immutable; values added
+      with {!embed} are retained by reference and may themselves be mutable. *)
+
+  val null : t
+  val bool : bool -> t
+  val int : int -> t
+  val float : float -> t
+  val string : string -> t
+  val option : t option -> t
+  val list : t list -> t
+  val object_ : (string * t) list -> t
+
+  val embed : 'a Type.t -> 'a -> t
+  (** Preserve a typed value and its description without eager rendering. *)
+
+  val pp : Format.formatter -> t -> unit
+  val to_string : t -> string
+end
+
+module Log : sig
+  type t
+  (** A completed admitted log. Structured payloads and typed values embedded in
+      free-form payloads are retained by reference, not deeply copied. *)
+
+  type payload =
+    | Text of { tag : string; message : string }
+    | Free of Value.t
+    | Structured : 'a Type.t * 'a -> payload
+        (** The three semantic payload forms. Pattern matching is safe because
+            this type carries no completed-log invariant. *)
+
+  val service : t -> string
+  val environment : t -> string option
+  val version : t -> string option
+  val instant : t -> Instant.t
+  val level : t -> Level.t
+  val payload : t -> payload
+end
+
+module Diagnostics : sig
+  type kind =
+    | Not_initialized
+    | No_output
+    | Scope_raised
+    | Clock_unavailable
+    | Clock_raised
+    | Authoring_raised
+    | Formatting_failed
+    | Formatting_raised
+    | Terminal_rejected
+    | Terminal_raised
+    | Drain_rejected
+    | Drain_raised
+    | Capture_overflow
+    | Capture_closed
+
+  type entry = private { kind : kind; count : int }
+
+  val snapshot : unit -> entry list
+  (** A non-clearing, finite process snapshot in stable order. *)
+end
+
+module Drain : sig
+  type acceptance = Accepted | Rejected
+  type t
+
+  val create : (Log.t -> acceptance) -> t
+  (** Construct an additional output with a synchronous submission callback.
+
+      [Accepted] means immediate ownership acceptance only. A drain retaining
+      work after return must first copy or project everything it needs. Ordinary
+      callback exceptions are contained as [Diagnostics.Drain_raised]; runtime
+      control exceptions are preserved. *)
+end
+
+module Formatter : sig
+  type error = Invalid_utf8 | Non_finite_float | Unsupported_value | Failed
+  type t
+
+  val create : (Log.t -> (string, error) result) -> t
+
+  val format : t -> Log.t -> (string, error) result
+  (** Invoke a formatter. Callback exceptions remain exceptions; the logging
+      engine contains them at the application boundary. *)
+
+  val readable : t
+  val json : t
+  val json_lines : t
+end
+
+module Capture : sig
+  type t
+
+  val default_capacity : int
+
+  val logs : t -> Log.t list
+  (** Retained logs in admission order. Typed values remain by-reference values,
+      not deep snapshots. *)
+
+  val diagnostics : t -> Diagnostics.entry list
+end
+
+module Config : sig
+  type t
+  type field = Service | Environment | Version
+  type problem = Empty | Invalid_utf8
+  type error = { field : field; problem : problem }
+
+  exception Invalid_configuration of error
+
+  val create :
+    service:string ->
+    ?environment:string ->
+    ?version:string ->
+    ?enabled:bool ->
+    ?pretty:bool ->
+    ?silent:bool ->
+    ?min_level:Level.t ->
+    ?drains:Drain.t list ->
+    unit ->
+    (t, error) result
+
+  val create_exn :
+    service:string ->
+    ?environment:string ->
+    ?version:string ->
+    ?enabled:bool ->
+    ?pretty:bool ->
+    ?silent:bool ->
+    ?min_level:Level.t ->
+    ?drains:Drain.t list ->
+    unit ->
+    t
+  (** Like {!create}, but raises [Invalid_configuration error]. *)
+
+  val service : t -> string
+  val environment : t -> string option
+  val version : t -> string option
+  val enabled : t -> bool
+  val pretty : t -> bool
+  val silent : t -> bool
+  val min_level : t -> Level.t
+  val drains : t -> Drain.t list
+  val pp_error : Format.formatter -> error -> unit
+end
+
+module Logs : sig
+  type message
+  (** A pending message. Expensive free-form construction remains deferred until
+      after admission. *)
+
+  val text : tag:string -> string -> message
+
+  val text_lazy : tag:string -> (unit -> string) -> message
+  (** Construct text only after admission. Ordinary exceptions are withheld and
+      diagnosed as [Diagnostics.Authoring_raised]. *)
+
+  val free : (unit -> Value.t) -> message
+  val structured : 'a Type.t -> 'a -> message
+
+  val emit : level:Level.t -> message -> unit
+  (** Emit through the active scoped or production route. Before installation,
+      messages are withheld and diagnosed. Logging does not raise merely because
+      process initialization has not happened. *)
+
+  val debug : message -> unit
+  val info : message -> unit
+  val warn : message -> unit
+  val error : message -> unit
+end
+
+module Platform : sig
+  type clock_error = Unavailable
+  type terminal_acceptance = Accepted | Rejected
+
+  module type S = sig
+    type t
+
+    val now : t -> (Instant.t, clock_error) result
+    (** Return wall-clock epoch time. [Unavailable] means that no timestamp can
+        be supplied. Ordinary exceptions are diagnosed by the core. *)
+
+    val write_terminal : t -> string -> terminal_acceptance
+    (** Write one completely formatted record exactly as supplied. The core owns
+        record termination. [Accepted] promises immediate handoff only, not
+        flushing or durability. Ordinary exceptions are diagnosed by the core.
+    *)
+  end
+end
+
+module Runtime : sig
+  module type S = sig
+    type +'a t
+    type context
+    type 'a key
+
+    val return : 'a -> 'a t
+    val bind : 'a t -> ('a -> 'b t) -> 'b t
+
+    val create_key : unit -> 'a key
+    (** Return a fresh generative dynamic-context key. *)
+
+    val get : context -> 'a key -> 'a option
+    (** Read only the binding associated with the supplied key. *)
+
+    val with_binding : context -> 'a key -> 'a -> (unit -> 'b t) -> 'b t
+    (** Restore the previous binding after success, exception, or native
+        cancellation. *)
+
+    val protect : context -> finally:(unit -> unit) -> (unit -> 'a t) -> 'a t
+    (** Run [finally] exactly once and preserve the callback's original result,
+        exception, or native cancellation. *)
+
+    val is_control_exception : context -> exn -> bool
+    (** Identify native cancellation and other control-flow exceptions that the
+        core must preserve rather than contain. *)
+  end
+
+  type init_error = Already_initialized | Runtime_already_registered
+  type capture_error = Runtime_already_registered | Invalid_capacity of int
+
+  exception Init_error of init_error
+
+  module Make (Runtime : S) (Platform : Platform.S) : sig
+    type +'a io = 'a Runtime.t
+    type t
+
+    val create : runtime_context:Runtime.context -> platform:Platform.t -> t
+    (** Create an inert composition. This does not register or initialize the
+        process route. *)
+
+    val init : t -> Config.t -> (unit, init_error) result
+
+    val init_exn : t -> Config.t -> unit
+    (** [init_exn] raises [Init_error error] when [init] returns [Error error].
+    *)
+
+    val with_capture :
+      t ->
+      Config.t ->
+      ?capacity:int ->
+      (Capture.t -> 'a io) ->
+      ('a, capture_error) result io
+    (** Run with capture as the innermost dynamic route.
+
+        Registration and capacity errors occur before [callback]. The capture
+        suppresses production delivery for the dynamic extent. Prior bindings
+        are restored and the capture is closed exactly once after callback
+        success, exception, or cancellation. The callback outcome is preserved;
+        a retained capture remains readable but closed to further delivery. *)
+  end
+end

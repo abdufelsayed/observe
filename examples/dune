@@ -1,0 +1,22 @@
+(executable
+ (name authoring_shapes)
+ (modules authoring_shapes)
+ (libraries observe)
+ (preprocess
+  (pps observe.ppx)))
+
+(executable
+ (name scoped_capture)
+ (modules scoped_capture)
+ (libraries observe)
+ (preprocess
+  (pps observe.ppx)))
+
+(rule
+ (alias observe-examples)
+ (package observe)
+ (deps authoring_shapes.exe scoped_capture.exe)
+ (action
+  (progn
+   (run %{exe:authoring_shapes.exe})
+   (run %{exe:scoped_capture.exe}))))

@@ -1,0 +1,73 @@
+{0 Observe}
+
+Observe is runtime-neutral structured logging for OCaml. The core owns
+admission, formatting, diagnostics, additional drains, and deterministic
+capture without performing I/O. Runtime adapters provide dynamic context;
+platform adapters provide wall-clock time and terminal output.
+
+The current package provides tagged text, deferred text, free-form values,
+Repr-backed typed values, level filtering, automatic terminal formatting,
+drains, diagnostics, and finite capture. It does not currently provide
+wide-event or metric APIs.
+
+{1 Installation}
+
+Link the core library with [(libraries observe)]. Add
+[(preprocess (pps observe.ppx))] when using the deriver or free-form extension.
+
+{1 Authoring}
+
+Ordinary code logs through {!module:Observe.Logs}:
+
+{[
+Observe.Logs.info
+  (Observe.Logs.text ~tag:"auth" "User logged in");
+
+Observe.Logs.debug
+  (Observe.Logs.text_lazy ~tag:"query" (fun () -> explain_query query));
+
+Observe.Logs.info
+  (Observe.Logs.free
+     [%observe.value { action = "user_login"; user_id = 42 }]);
+
+Observe.Logs.info
+  (Observe.Logs.structured event_t event)
+]}
+
+Text and free-form thunks run only after level admission. Before production
+initialization, logs outside an active capture are withheld and counted rather
+than raising an initialization exception.
+
+{1 Configuration and output}
+
+{!val:Observe.Config.create} returns a validated result;
+{!val:Observe.Config.create_exn} raises
+{!exception:Observe.Config.Invalid_configuration}. The platform terminal is the
+automatic formatted output. {!module:Observe.Drain} values are additional
+application-owned outputs that receive completed {!type:Observe.Log.t} values.
+Silent configuration suppresses the terminal, not drains.
+
+{1 Runtime composition and capture}
+
+{!module-type:Observe.Runtime.S} owns dynamic binding, cleanup, and native
+cancellation. {!module-type:Observe.Platform.S} owns the wall clock and terminal
+write. {!module:Observe.Runtime.Make} composes them without adding a runtime or
+platform dependency to the core.
+
+{!val:Observe.Runtime.Make.with_capture} installs capture as the innermost
+dynamic route, suppresses production delivery for the callback, restores the
+previous binding, and closes the capture exactly once.
+
+{1 Safety boundary}
+
+Structured values and values added with {!val:Observe.Value.embed} remain by
+reference; capture is not a deep snapshot. Drains retaining asynchronous work
+must synchronously copy or project what they need. Ordinary callback failures
+encountered by the logging engine are contained and diagnosed, while runtime
+control exceptions remain native. Arbitrary Repr descriptions do not imply
+bounded traversal, cycle-safe rendering, or redaction.
+
+The planned ready [Observe_lwt_unix] convenience adapter is not shipped. See the
+repository README for a complete direct-runtime capture example and the clearly
+marked future adapter shape.
+

@@ -1,0 +1,2 @@
+let _ = Observe.Logs.structured Observe.Type.int "not an int"
+

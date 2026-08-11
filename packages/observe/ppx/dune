@@ -1,0 +1,6 @@
+(library
+ (name observe_ppx)
+ (public_name observe.ppx)
+ (kind ppx_rewriter)
+ (libraries ppxlib ppx_repr.lib)
+ (ppx_runtime_libraries observe))

@@ -1,0 +1,18 @@
+(library
+ (name observe)
+ (public_name observe)
+ (private_modules
+  observe_capture
+  observe_config
+  observe_diagnostics
+  observe_drain
+  observe_engine
+  observe_formatter
+  observe_instant
+  observe_level
+  observe_log
+  observe_logs
+  observe_runtime
+  observe_value)
+ (libraries
+  (re_export repr)))

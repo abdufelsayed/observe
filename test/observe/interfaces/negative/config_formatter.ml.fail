@@ -1,0 +1,4 @@
+let _ =
+  Observe.Config.create_exn ~service:"consumer"
+    ~formatter:Observe.Formatter.readable ()
+

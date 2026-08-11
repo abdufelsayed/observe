@@ -1,0 +1,31 @@
+(executable
+ (name concurrency_scenario)
+ (modules concurrency_scenario)
+ (libraries observe observe_test_support alcotest threads.posix unix))
+
+(rule
+ (alias observe-concurrency-smoke)
+ (package observe)
+ (deps concurrency_scenario.exe)
+ (action
+  (progn
+   (run %{exe:concurrency_scenario.exe} init-race 8)
+   (run %{exe:concurrency_scenario.exe} capture-conservation 64)
+   (run %{exe:concurrency_scenario.exe} diagnostic-counting 64))))
+
+(rule
+ (alias observe-concurrency-stress)
+ (package observe)
+ (deps
+  concurrency_scenario.exe
+  run_stress.sh
+  (env_var OBSERVE_RACE_TRIALS)
+  (env_var OBSERVE_CONCURRENCY_WORK))
+ (action
+  (run bash %{dep:run_stress.sh} %{exe:concurrency_scenario.exe})))
+
+(alias
+ (name discovery)
+ (package observe)
+ (deps
+  (alias observe-concurrency-stress)))

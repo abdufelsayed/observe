@@ -1,0 +1,96 @@
+(executable
+ (name test_deriver_semantics)
+ (modules test_deriver_semantics)
+ (libraries observe alcotest yojson)
+ (preprocess
+  (pps observe.ppx)))
+
+(executable
+ (name test_value_semantics)
+ (modules test_value_semantics)
+ (libraries observe observe_test_support alcotest yojson)
+ (preprocess
+  (pps observe.ppx)))
+
+(executable
+ (name ppx_compile_surface)
+ (modules ppx_compile_surface)
+ (libraries observe)
+ (preprocess
+  (pps observe.ppx)))
+
+(executable
+ (name inline_signature)
+ (modules inline_signature)
+ (libraries observe)
+ (preprocess
+  (pps observe.ppx)))
+
+(executable
+ (name ppx_driver)
+ (modules ppx_driver)
+ (libraries ppxlib observe.ppx))
+
+(rule
+ (alias observe-ppx-semantics)
+ (package observe)
+ (deps
+  test_deriver_semantics.exe
+  test_value_semantics.exe
+  ppx_compile_surface.exe
+  inline_signature.exe)
+ (action
+  (progn
+   (run %{exe:test_deriver_semantics.exe})
+   (run %{exe:test_value_semantics.exe})
+   (run %{exe:ppx_compile_surface.exe})
+   (run %{exe:inline_signature.exe}))))
+
+(rule
+ (alias observe-ppx-negative)
+ (package observe)
+ (deps
+  check_negative.sh
+  value_unsupported.ml
+  value_suffixed_integer.ml
+  value_record_update.ml
+  ppx_driver.exe)
+ (action
+  (progn
+   (run
+    bash
+    %{dep:check_negative.sh}
+    %{exe:ppx_driver.exe}
+    %{dep:value_unsupported.ml}
+    "[%observe.value]: unsupported expression")
+   (run
+    bash
+    %{dep:check_negative.sh}
+    %{exe:ppx_driver.exe}
+    %{dep:value_suffixed_integer.ml}
+    "[%observe.value]: suffixed integer literals require")
+   (run
+    bash
+    %{dep:check_negative.sh}
+    %{exe:ppx_driver.exe}
+    %{dep:value_record_update.ml}
+    "[%observe.value]: record updates are not valid free-form objects"))))
+
+(rule
+ (alias observe-ppx-expansion)
+ (target inline_expansion.actual)
+ (deps inline_expansion.ml inline_expansion.expected ppx_driver.exe)
+ (action
+  (progn
+   (with-stdout-to
+    %{target}
+    (run %{exe:ppx_driver.exe} --impl %{dep:inline_expansion.ml}))
+   (diff %{dep:inline_expansion.expected} %{target}))))
+
+(alias
+ (name observe-ppx-contracts)
+ (package observe)
+ (deps
+  (alias observe-ppx-semantics)
+  (alias observe-ppx-negative)
+  (alias observe-ppx-expansion)))

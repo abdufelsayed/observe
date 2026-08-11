@@ -1,0 +1,9 @@
+(alias
+ (name observe-contracts)
+ (package observe)
+ (deps
+  (alias public/observe-public-contracts)
+  (alias capture/observe-capture-contracts)
+  (alias runtime/observe-runtime-state)
+  (alias concurrency/observe-concurrency-smoke)
+  (alias ppx/observe-ppx-contracts)))
