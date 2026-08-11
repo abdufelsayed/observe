@@ -31,6 +31,11 @@
  (modules ppx_driver)
  (libraries ppxlib observe.ppx))
 
+(executable
+ (name check_inline_expansion)
+ (modules check_inline_expansion)
+ (libraries ppxlib))
+
 (rule
  (alias observe-ppx-semantics)
  (package observe)
@@ -79,13 +84,13 @@
 (rule
  (alias observe-ppx-expansion)
  (target inline_expansion.actual)
- (deps inline_expansion.ml inline_expansion.expected ppx_driver.exe)
+ (deps inline_expansion.ml ppx_driver.exe check_inline_expansion.exe)
  (action
   (progn
    (with-stdout-to
     %{target}
     (run %{exe:ppx_driver.exe} --impl %{dep:inline_expansion.ml}))
-   (diff %{dep:inline_expansion.expected} %{target}))))
+   (run %{exe:check_inline_expansion.exe} %{target}))))
 
 (alias
  (name observe-ppx-contracts)

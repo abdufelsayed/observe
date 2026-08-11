@@ -1,0 +1,74 @@
+open Ppxlib
+
+let rec longident_name = function
+  | Longident.Lident name -> name
+  | Ldot (path, name) -> longident_name path ^ "." ^ name
+  | Lapply (function_, argument) ->
+      longident_name function_ ^ "(" ^ longident_name argument ^ ")"
+
+let first_string_argument arguments =
+  List.find_map
+    (fun (_, expression) ->
+      match expression.pexp_desc with
+      | Pexp_constant (Pconst_string (value, _, _)) -> Some value
+      | _ -> None)
+    arguments
+
+let call_key path argument =
+  match argument with None -> path | Some value -> path ^ " " ^ value
+
+let fail format = Printf.ksprintf failwith format
+
+let () =
+  if Array.length Sys.argv <> 2 then fail "usage: %s EXPANSION" Sys.argv.(0);
+  let channel = open_in_bin Sys.argv.(1) in
+  let lexbuf = Lexing.from_channel channel in
+  Lexing.set_filename lexbuf Sys.argv.(1);
+  let structure =
+    Fun.protect
+      ~finally:(fun () -> close_in channel)
+      (fun () -> Parse.implementation lexbuf)
+  in
+  let bindings = Hashtbl.create 1 in
+  let calls = Hashtbl.create 16 in
+  let record table key =
+    Hashtbl.replace table key
+      (1 + Option.value ~default:0 (Hashtbl.find_opt table key))
+  in
+  let inspector =
+    object
+      inherit Ast_traverse.iter as super
+
+      method! value_binding binding =
+        (match binding.pvb_pat.ppat_desc with
+        | Ppat_var { txt = name; _ } -> record bindings name
+        | _ -> ());
+        super#value_binding binding
+
+      method! expression expression =
+        (match expression.pexp_desc with
+        | Pexp_apply ({ pexp_desc = Pexp_ident { txt = path; _ }; _ }, arguments)
+          ->
+            record calls
+              (call_key (longident_name path) (first_string_argument arguments))
+        | _ -> ());
+        super#expression expression
+    end
+  in
+  inspector#structure structure;
+  let require table key expected =
+    let actual = Option.value ~default:0 (Hashtbl.find_opt table key) in
+    if actual <> expected then
+      fail "expected %S %d time(s), found %d" key expected actual
+  in
+  require bindings "event_t" 1;
+  require calls "Observe.Type.sealv" 1;
+  require calls "Observe.Type.|~" 2;
+  require calls "Observe.Type.variant event" 1;
+  require calls "Observe.Type.case1 User_login" 1;
+  require calls "Observe.Type.sealr" 1;
+  require calls "Observe.Type.|+" 2;
+  require calls "Observe.Type.record User_login" 1;
+  require calls "Observe.Type.field user_id" 1;
+  require calls "Observe.Type.field method_" 1;
+  require calls "Observe.Type.case0 Idle" 1
