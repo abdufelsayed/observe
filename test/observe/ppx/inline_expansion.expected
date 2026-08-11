@@ -13,14 +13,15 @@ include
               (Observe.Type.variant "event"
                  (fun __observe_case_0 ->
                     fun __observe_case_1 ->
-                      function
-                      | User_login
-                          { user_id = __observe_field_0;
-                            method_ = __observe_field_1 }
-                          ->
-                          __observe_case_0
-                            (__observe_field_0, __observe_field_1)
-                      | Idle -> __observe_case_1))
+                      fun __observe_value ->
+                        match __observe_value with
+                        | User_login
+                            { user_id = __observe_field_0;
+                              method_ = __observe_field_1 }
+                            ->
+                            __observe_case_0
+                              (__observe_field_0, __observe_field_1)
+                        | Idle -> __observe_case_1))
               (Observe.Type.case1 "User_login"
                  (Observe.Type.sealr
                     (Observe.Type.(|+)

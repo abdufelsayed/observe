@@ -300,8 +300,11 @@ let inline_variant_expression (module Engine : Ppx_repr_lib.Engine.S) ~library
           generated.repr :: reprs ))
       cases ([], [], [])
   in
+  let matched_value = "__observe_value" in
   let matcher =
-    lambda ~loc matcher_patterns (pexp_function ~loc matcher_cases)
+    lambda ~loc
+      (matcher_patterns @ [ pvar ~loc matched_value ])
+      (pexp_match ~loc (evar ~loc matched_value) matcher_cases)
   in
   let variant =
     call ~loc
