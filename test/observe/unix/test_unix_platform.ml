@@ -78,6 +78,49 @@ let test_partial_and_interrupted_writes () =
   Alcotest.(check string) "all bytes" "abcdef" (Buffer.contents received);
   Alcotest.(check int) "interruption plus partial writes" 4 !calls
 
+let style ?(isatty = true) ?no_color ?term ?colorterm () =
+  let getenv = function
+    | "NO_COLOR" -> no_color
+    | "TERM" -> term
+    | "COLORTERM" -> colorterm
+    | _ -> None
+  in
+  Terminal.style ~isatty:(fun () -> isatty) ~getenv
+
+let test_terminal_style () =
+  Alcotest.(check bool)
+    "unknown interactive terminal uses ANSI 16" true
+    (style () = Observe.Formatter.Ansi_16);
+  Alcotest.(check bool)
+    "256-color term" true
+    (style ~term:"xterm-256color" () = Observe.Formatter.Ansi_256);
+  Alcotest.(check bool)
+    "truecolor signal" true
+    (style ~term:"xterm-256color" ~colorterm:"truecolor" ()
+    = Observe.Formatter.Truecolor);
+  Alcotest.(check bool)
+    "24-bit signal is case insensitive" true
+    (style ~colorterm:"24BIT" () = Observe.Formatter.Truecolor);
+  Alcotest.(check bool)
+    "Ghostty term" true
+    (style ~term:"xterm-ghostty" () = Observe.Formatter.Truecolor);
+  Alcotest.(check bool)
+    "direct-color term" true
+    (style ~term:"xterm-direct" () = Observe.Formatter.Truecolor);
+  Alcotest.(check bool)
+    "redirected terminal stays plain" true
+    (style ~isatty:false () = Observe.Formatter.Plain);
+  Alcotest.(check bool)
+    "NO_COLOR disables ANSI" true
+    (style ~no_color:"" () = Observe.Formatter.Plain);
+  Alcotest.(check bool)
+    "dumb terminal stays plain" true
+    (style ~term:"DUMB" ~colorterm:"truecolor" () = Observe.Formatter.Plain);
+  Alcotest.(check bool)
+    "probe failure stays plain" true
+    (Terminal.style ~isatty:(fun () -> failwith "probe") ~getenv:(fun _ -> None)
+    = Observe.Formatter.Plain)
+
 let () =
   Alcotest.run "observe-unix"
     [
@@ -88,5 +131,6 @@ let () =
           Alcotest.test_case "terminal bytes" `Quick test_terminal_bytes;
           Alcotest.test_case "partial and interrupted writes" `Quick
             test_partial_and_interrupted_writes;
+          Alcotest.test_case "terminal style" `Quick test_terminal_style;
         ] );
     ]

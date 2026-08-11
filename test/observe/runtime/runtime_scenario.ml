@@ -13,8 +13,10 @@ module Raising_get_system =
 module Inherited_system =
   Observe.Runtime.Make (Test_runtime.Inherited_runtime) (Test_runtime.Platform)
 
-let make_system ?now ?write_terminal () =
-  let platform = Test_runtime.Platform.create ?now ?write_terminal () in
+let make_system ?terminal_style ?now ?write_terminal () =
+  let platform =
+    Test_runtime.Platform.create ?terminal_style ?now ?write_terminal ()
+  in
   System.create ~runtime_context:() ~platform
 
 let config ?enabled ?pretty ?silent ?min_level ?drains () =
@@ -173,13 +175,24 @@ let formatting_failed () =
         Observe.Platform.Accepted)
       ()
   in
-  init_ok system (config ~pretty:false ());
+  init_ok system (config ());
   Observe.Logs.info
     (Observe.Logs.text ~tag:"format" (String.make 1 (Char.chr 0xff)));
   Alcotest.(check int) "invalid output not delivered" 0 !terminal;
   Alcotest.(check int)
     "formatting failure diagnosed" 1
-    (Test_runtime.process_diagnostic_count Observe.Diagnostics.Formatting_failed)
+    (Test_runtime.process_diagnostic_count Observe.Diagnostics.Formatting_failed);
+  let raising_json =
+    ((fun _ _ -> raise Exit), fun _ -> Error (`Msg "unused decoder"))
+  in
+  let raising_description =
+    Observe.Type.like ~json:raising_json Observe.Type.int
+  in
+  Observe.Logs.info (Observe.Logs.structured raising_description 1);
+  Alcotest.(check int) "raised output not delivered" 0 !terminal;
+  Alcotest.(check int)
+    "Repr callback exception diagnosed" 1
+    (Test_runtime.process_diagnostic_count Observe.Diagnostics.Formatting_raised)
 
 let callback_containment () =
   let clock_calls = ref 0 in
@@ -246,6 +259,25 @@ let terminal_raised () =
   Alcotest.(check int)
     "terminal exception diagnosed" 1
     (Test_runtime.process_diagnostic_count Observe.Diagnostics.Terminal_raised)
+
+let ansi_terminal () =
+  let output = Buffer.create 128 in
+  let system =
+    make_system ~terminal_style:Observe.Formatter.Ansi_16
+      ~now:(fun () ->
+        Ok (Observe.Instant.of_epoch_nanoseconds 37_425_612_000_000L))
+      ~write_terminal:(fun value ->
+        Buffer.add_string output value;
+        Observe.Platform.Accepted)
+      ()
+  in
+  init_ok system (config ());
+  Observe.Logs.info (Observe.Logs.text ~tag:"tag" "message");
+  Alcotest.(check string)
+    "engine selects ANSI formatter"
+    "\027[90m10:23:45.612\027[0m \027[1;96mINFO\027[0m \027[1;96m[tag]\027[0m \
+     message\n"
+    (Buffer.contents output)
 
 let disabled () =
   let terminal = ref 0 in
@@ -518,6 +550,7 @@ let scenario = function
   | "formatting-failed" -> formatting_failed
   | "callback-containment" -> callback_containment
   | "terminal-and-drains" -> terminal_and_drains
+  | "ANSI-terminal" -> ansi_terminal
   | "terminal-raised" -> terminal_raised
   | "disabled" -> disabled
   | "no-output" -> no_output

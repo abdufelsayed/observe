@@ -62,6 +62,27 @@ system.
 synchronous and neither calls `Lwt_main.run`. The executable remains
 responsible for starting the Lwt scheduler.
 
+With the default readable presentation, tagged text is compact and structured
+values use an ordered tree:
+
+```text
+10:23:45.612 INFO [startup] service ready
+10:23:45.613 INFO [orders]
+  ├─ action: user_login
+  └─ user_id: 42
+10:23:45.614 INFO [orders]
+  └─ User_login
+     ├─ user_id: 42
+     └─ method_: oauth
+```
+
+The timestamp is UTC with millisecond precision. Every tagged-text record uses
+the same `time LEVEL [tag] message` grammar. An interactive standard-error
+terminal receives one semantic color palette rendered at the best detected
+truecolor, 256-color, or 16-color capability. A redirected terminal,
+`NO_COLOR`, or `TERM=dumb` selects the same presentation without control
+sequences.
+
 ## Authoring logs
 
 Ordinary code emits through the process-wide `Observe.Logs` API. A runtime and
@@ -152,6 +173,8 @@ end
 module Stdlib_platform = struct
   type t = unit
 
+  let terminal_style () = Observe.Formatter.Plain
+
   let now () =
     Ok (Observe.Instant.of_epoch_nanoseconds 1_750_000_000_000_000_000L)
 
@@ -241,12 +264,14 @@ runtime cannot replace the owner.
 The terminal and drains are deliberately different roles.
 
 - The Unix platform adapter writes the automatic terminal path to standard
-  error. The core selects and runs
-  the terminal formatter, including record termination, then supplies one
-  complete string to `write_terminal`.
+  error. It reports the maximum color capability derived from passive terminal
+  signals. The core selects and runs the terminal formatter, including styling
+  and record termination, then supplies one complete string to
+  `write_terminal`. Detection does not query or consume terminal input.
 - Configured drains receive the completed `Observe.Log.t` directly. They can
-  apply `Observe.Formatter.readable`, `.json`, `.json_lines`, or a custom pure
-  formatter before handing data to an application-owned sink.
+  apply `Observe.Formatter.readable Observe.Formatter.Plain`, `.json`,
+  `.json_lines`, or a custom pure formatter before handing data to an
+  application-owned sink.
 - `silent` disables only automatic terminal delivery. Admission and configured
   drains remain active.
 - `Accepted` means immediate handoff only. It does not promise flushing,

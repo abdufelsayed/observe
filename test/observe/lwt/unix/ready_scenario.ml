@@ -74,8 +74,11 @@ let terminal () =
         Observe.Logs.info (Observe.Logs.text ~tag:"startup" "service ready"))
   in
   check
-    (contains output " ready info [startup] service ready\n")
+    (contains output " INFO [startup] service ready\n")
     "unexpected readable output: %S" output;
+  check
+    (not (contains output "\027["))
+    "redirected terminal output contained ANSI styling: %S" output;
   check
     (String.fold_left
        (fun count character -> if character = '\n' then count + 1 else count)
@@ -155,7 +158,7 @@ let capture_then_init () =
         Observe.Logs.info (Observe.Logs.text ~tag:"production" "message"))
   in
   check
-    (contains output " after-capture info [production] message\n")
+    (contains output " INFO [production] message\n")
     "production did not initialize after capture: %S" output
 
 let concurrent_capture () =

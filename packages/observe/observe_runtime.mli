@@ -7,6 +7,7 @@ module Platform : sig
   module type S = sig
     type t
 
+    val terminal_style : t -> Observe_formatter.style
     val now : t -> (Observe_instant.t, clock_error) result
     val write_terminal : t -> string -> terminal_acceptance
   end

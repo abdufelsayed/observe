@@ -1,0 +1,33 @@
+(executable
+ (name test_formatter)
+ (modules test_formatter)
+ (libraries observe observe_test_support alcotest)
+ (preprocess
+  (pps observe.ppx)))
+
+(executable
+ (name test_formatter_properties)
+ (modules test_formatter_properties)
+ (libraries
+  observe
+  observe_test_support
+  alcotest
+  qcheck-core
+  qcheck-alcotest))
+
+(rule
+ (alias observe-formatter-contracts)
+ (package observe)
+ (deps test_formatter.exe)
+ (action
+  (run %{exe:test_formatter.exe})))
+
+(rule
+ (alias observe-formatter-contracts)
+ (package observe)
+ (deps
+  test_formatter_properties.exe
+  (env_var OBSERVE_QCHECK_COUNT)
+  (env_var QCHECK_SEED))
+ (action
+  (run %{exe:test_formatter_properties.exe})))

@@ -20,6 +20,7 @@ end
 module Platform = struct
   type t = unit
 
+  let terminal_style () = Observe.Formatter.Plain
   let now () = Ok (Observe.Instant.of_epoch_nanoseconds 0L)
   let write_terminal () _ = Observe.Platform.Accepted
 end
@@ -31,4 +32,5 @@ let system = System.create ~runtime_context:() ~platform:()
 let text = Observe.Logs.text ~tag:"consumer" "message"
 let free = Observe.Logs.free (fun () -> Observe.Value.int 1)
 let structured = Observe.Logs.structured Observe.Type.int 1
-let _ = (config, system, text, free, structured)
+let readable = Observe.Formatter.readable Observe.Formatter.Plain
+let _ = (config, system, text, free, structured, readable)

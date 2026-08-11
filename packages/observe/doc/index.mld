@@ -30,6 +30,12 @@ The ready initializer is synchronous. It installs Lwt callback-local context,
 the OS wall clock, and automatic formatted output on standard error. It starts
 no scheduler and returns no logging handle. See {!module:Observe_lwt_unix}.
 
+Readable output uses UTC [HH:mm:ss.SSS] timestamps. Tagged text stays on one
+compact line. Free-form and typed structures render as ordered trees. The Unix
+platform automatically selects truecolor, 256-color, or 16-color rendering of
+one semantic palette for a compatible interactive standard-error terminal;
+redirected output and [NO_COLOR] remain plain.
+
 {1 Authoring}
 
 Ordinary code logs through {!module:Observe.Logs}:
@@ -65,9 +71,9 @@ Silent configuration suppresses the terminal, not drains.
 {1 Runtime composition and capture}
 
 {!module-type:Observe.Runtime.S} owns dynamic binding, cleanup, and native
-cancellation. {!module-type:Observe.Platform.S} owns the wall clock and terminal
-write. {!module:Observe.Runtime.Make} composes them without adding a runtime or
-platform dependency to the core.
+cancellation. {!module-type:Observe.Platform.S} owns the wall clock, terminal
+style capability, and terminal write. {!module:Observe.Runtime.Make} composes
+them without adding a runtime or platform dependency to the core.
 
 {!val:Observe.Runtime.Make.with_capture} installs capture as the innermost
 dynamic route, suppresses production delivery for the callback, restores the

@@ -1,6 +1,14 @@
 (** Immutable free-form structured values. *)
 
-type t
+type t =
+  | Null
+  | Bool of bool
+  | Int of int
+  | Float of float
+  | String of string
+  | List of t list
+  | Object of (string * t) list
+  | Embedded : 'a Repr.t * 'a -> t
 
 val null : t
 val bool : bool -> t

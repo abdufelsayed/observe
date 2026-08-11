@@ -9,6 +9,7 @@ depends: [
   "dune" {>= "3.22"}
   "ocaml" {>= "4.14"}
   "repr" {>= "0.7.0"}
+  "yojson"
   "lwt"
   "ptime"
   "ppxlib"
@@ -16,7 +17,6 @@ depends: [
   "alcotest" {with-test & >= "1.9.1"}
   "qcheck-core" {with-test & >= "0.91"}
   "qcheck-alcotest" {with-test & >= "0.91"}
-  "yojson" {with-test}
   "ocamlfind" {with-test}
   "ocamlformat" {with-dev-setup & = "0.29.0"}
   "odoc" {with-doc}

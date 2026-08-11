@@ -112,6 +112,16 @@ end
 
 module Formatter : sig
   type error = Invalid_utf8 | Non_finite_float | Unsupported_value | Failed
+
+  type style =
+    | Plain
+    | Ansi_16
+    | Ansi_256
+    | Truecolor
+        (** Colored styles share one semantic palette and differ only in
+            available color depth. They do not change layout or semantic
+            information. *)
+
   type t
 
   val create : (Log.t -> (string, error) result) -> t
@@ -120,7 +130,10 @@ module Formatter : sig
   (** Invoke a formatter. Callback exceptions remain exceptions; the logging
       engine contains them at the application boundary. *)
 
-  val readable : t
+  val readable : style -> t
+  (** Render compact tagged text or an ordered structured tree with UTC
+      millisecond timestamps and terminal-safe caller data. *)
+
   val json : t
   val json_lines : t
 end
@@ -212,6 +225,10 @@ module Platform : sig
 
   module type S = sig
     type t
+
+    val terminal_style : t -> Formatter.style
+    (** Report the terminal's maximum supported color capability. Return [Plain]
+        when support is unknown. This query must not raise. *)
 
     val now : t -> (Instant.t, clock_error) result
     (** Return wall-clock epoch time. [Unavailable] means that no timestamp can

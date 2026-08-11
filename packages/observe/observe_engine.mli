@@ -24,6 +24,7 @@ type t
 
 val create_production :
   Observe_config.t ->
+  terminal_style:Observe_formatter.style ->
   clock:(unit -> (Observe_instant.t, clock_error) result) ->
   terminal:(string -> terminal_acceptance) ->
   is_control_exception:(exn -> bool) ->

@@ -40,9 +40,11 @@ type t = {
   output : output;
 }
 
-let create_production config ~clock ~terminal ~is_control_exception =
+let create_production config ~terminal_style ~clock ~terminal
+    ~is_control_exception =
   let formatter =
-    if Observe_config.pretty config then Observe_formatter.readable
+    if Observe_config.pretty config then
+      Observe_formatter.readable terminal_style
     else Observe_formatter.json
   in
   {

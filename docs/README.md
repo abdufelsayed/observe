@@ -14,3 +14,8 @@ Unix mechanism sublibraries, and the ready `Observe_lwt_unix` composition. The
 core performs no I/O. Runtime integrations implement `Observe.Runtime.S`;
 platform integrations implement `Observe.Platform.S`;
 `Observe.Runtime.Make` composes those roles.
+
+Readable terminal presentation is owned by the portable core. The Unix
+platform reports standard error's detected color capability and writes the
+completed bytes unchanged. One semantic palette is automatically rendered as
+truecolor, 256-color, 16-color, or plain output.

@@ -2,9 +2,11 @@
 
 (copy_files ../../../packages/observe/unix/write.ml)
 
+(copy_files ../../../packages/observe/unix/terminal.ml)
+
 (executable
  (name test_unix_platform)
- (modules test_unix_platform clock write)
+ (modules test_unix_platform clock write terminal)
  (libraries observe.unix observe alcotest unix))
 
 (rule

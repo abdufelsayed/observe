@@ -3,6 +3,7 @@
  (package observe)
  (deps
   (alias public/observe-public-contracts)
+  (alias formatter/observe-formatter-contracts)
   (alias capture/observe-capture-contracts)
   (alias runtime/observe-runtime-state)
   (alias lwt/observe-lwt-contracts)

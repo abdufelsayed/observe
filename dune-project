@@ -20,6 +20,7 @@
    (>= 4.14))
   (repr
    (>= 0.7.0))
+  yojson
   lwt
   ptime
   ppxlib
@@ -37,7 +38,6 @@
    (and
     :with-test
     (>= 0.91)))
-  (yojson :with-test)
   (ocamlfind :with-test)
   (ocamlformat
    (and

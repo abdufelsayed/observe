@@ -17,3 +17,6 @@
   composable mechanism sublibraries.
 - Add the ready `Observe_lwt_unix` initializer with automatic standard-error
   output and isolated Lwt-scoped test capture.
+- Add compact UTC tagged text, ordered structured trees, semantic field and
+  scalar highlighting, and automatic truecolor, 256-color, 16-color, or plain
+  Unix terminal presentation.

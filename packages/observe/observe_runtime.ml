@@ -8,6 +8,7 @@ module Platform = struct
   module type S = sig
     type t
 
+    val terminal_style : t -> Observe_formatter.style
     val now : t -> (Observe_instant.t, clock_error) result
     val write_terminal : t -> string -> terminal_acceptance
   end
@@ -133,8 +134,9 @@ module Make (Runtime : S) (Platform : Platform.S) = struct
     let is_control_exception = t.runtime.is_control_exception in
     match output with
     | `Production ->
-        Observe_engine.create_production config ~clock:(clock t)
-          ~terminal:(terminal t) ~is_control_exception
+        Observe_engine.create_production config
+          ~terminal_style:(Platform.terminal_style t.platform)
+          ~clock:(clock t) ~terminal:(terminal t) ~is_control_exception
     | `Capture capture ->
         Observe_engine.create_capture config ~clock:(clock t)
           ~is_control_exception capture

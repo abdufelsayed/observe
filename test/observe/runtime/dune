@@ -20,6 +20,7 @@
    (run %{exe:runtime_scenario.exe} formatting-failed)
    (run %{exe:runtime_scenario.exe} callback-containment)
    (run %{exe:runtime_scenario.exe} terminal-and-drains)
+   (run %{exe:runtime_scenario.exe} ANSI-terminal)
    (run %{exe:runtime_scenario.exe} terminal-raised)
    (run %{exe:runtime_scenario.exe} disabled)
    (run %{exe:runtime_scenario.exe} no-output)
