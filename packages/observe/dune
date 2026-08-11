@@ -17,4 +17,4 @@
   observe_value)
  (libraries
   (re_export repr)
-  yojson))
+  jsonm))

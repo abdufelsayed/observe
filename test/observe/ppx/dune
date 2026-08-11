@@ -1,14 +1,14 @@
 (executable
  (name test_deriver_semantics)
  (modules test_deriver_semantics)
- (libraries observe alcotest yojson)
+ (libraries observe alcotest)
  (preprocess
   (pps observe.ppx)))
 
 (executable
  (name test_value_semantics)
  (modules test_value_semantics)
- (libraries observe observe_test_support alcotest yojson)
+ (libraries observe observe_test_support alcotest)
  (preprocess
   (pps observe.ppx)))
 

@@ -29,14 +29,9 @@ let test_inline_record_variant () =
   let value = User_login { user_id = 42; method_ = "oauth" } in
   let encoded, decoded = round_trip event_t value in
   Alcotest.(check bool) "variant round-trip" true (decoded = value);
-  let json = Yojson.Safe.from_string encoded in
-  Alcotest.(check bool)
-    "semantic snapshot includes constructor" true
-    (match json with
-    | `Assoc [ ("User_login", `Assoc fields) ] ->
-        List.assoc_opt "user_id" fields = Some (`Int 42)
-        && List.assoc_opt "method_" fields = Some (`String "oauth")
-    | _ -> false)
+  Alcotest.(check string)
+    "semantic snapshot includes constructor"
+    "{\"User_login\":{\"user_id\":42,\"method_\":\"oauth\"}}" encoded
 
 let test_nested_named_descriptions () =
   let value = { event = Cache_miss "profile:42"; attempts = [ 1; 2; 3 ] } in

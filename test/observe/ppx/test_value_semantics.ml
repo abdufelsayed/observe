@@ -1,9 +1,15 @@
 module System =
   Observe.Runtime.Make (Test_runtime.Runtime) (Test_runtime.Platform)
 
-let member name = function
-  | `Assoc fields -> List.assoc_opt name fields
-  | _ -> None
+let contains value fragment =
+  let value_length = String.length value in
+  let fragment_length = String.length fragment in
+  let rec loop index =
+    if index + fragment_length > value_length then false
+    else if String.sub value index fragment_length = fragment then true
+    else loop (index + 1)
+  in
+  fragment_length = 0 || loop 0
 
 let test_namespaced_value_is_deferred () =
   let forces = ref 0 in
@@ -48,19 +54,14 @@ let test_namespaced_value_is_deferred () =
   in
   let json =
     match Observe.Formatter.format Observe.Formatter.json log with
-    | Ok encoded -> Yojson.Safe.from_string encoded
+    | Ok encoded -> encoded
     | Error _ -> Alcotest.fail "valid PPX value failed JSON formatting"
   in
-  let payload = member "payload" json in
   Alcotest.(check bool)
     "semantic object shape" true
-    (match payload with
-    | Some (`Assoc fields) ->
-        List.assoc_opt "action" fields = Some (`String "user_login")
-        && List.assoc_opt "user_id" fields = Some (`Int 42)
-        && List.assoc_opt "attempts" fields
-           = Some (`List [ `Int 1; `Int 2; `Int 3 ])
-    | _ -> false)
+    (contains json "\"payload\":{\"action\":\"user_login\""
+    && contains json "\"user_id\":42"
+    && contains json "\"attempts\":[1,2,3]")
 
 let () =
   Alcotest.run "observe-ppx-value"

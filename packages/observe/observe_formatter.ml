@@ -307,12 +307,18 @@ let text_json ~tag ~message =
             (json_object
                [ ("kind", "\"text\""); ("tag", tag); ("message", message) ]))
 
+let repr_json description value =
+  try
+    let encoded = Repr.to_json_string ~minify:true description value in
+    if Observe_value.is_valid_utf8 encoded then Ok encoded
+    else Error Invalid_utf8
+  with Repr.Unsupported_operation _ | Failure _ -> Error Unsupported_value
+
 let payload_json log =
   match Observe_log.payload log with
   | Text { tag; message } -> text_json ~tag ~message
   | Free value -> json_value value
-  | Structured (description, value) ->
-      Ok (Repr.to_json_string ~minify:true description value)
+  | Structured (description, value) -> repr_json description value
 
 let optional_string_field name = function
   | None -> Ok []

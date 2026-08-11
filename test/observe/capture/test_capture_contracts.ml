@@ -69,10 +69,6 @@ let test_payloads_and_metadata () =
           Alcotest.fail "expected a structured payload")
   | logs -> Alcotest.failf "expected three logs, received %d" (List.length logs)
 
-let member name = function
-  | `Assoc fields -> List.assoc_opt name fields
-  | _ -> None
-
 let test_formatter_semantics () =
   let config = Test_runtime.config ~pretty:false "formatter" in
   let log =
@@ -84,24 +80,13 @@ let test_formatter_semantics () =
   in
   let json =
     match Observe.Formatter.format Observe.Formatter.json log with
-    | Ok json -> Yojson.Safe.from_string json
+    | Ok json -> json
     | Error _ -> Alcotest.fail "JSON formatter rejected a valid text log"
   in
-  Alcotest.(check bool)
-    "service field" true
-    (member "service" json = Some (`String "formatter"));
-  Alcotest.(check bool)
-    "level field" true
-    (member "level" json = Some (`String "info"));
-  let payload = member "payload" json in
-  Alcotest.(check bool)
-    "semantic text payload" true
-    (match payload with
-    | Some (`Assoc fields) ->
-        List.assoc_opt "kind" fields = Some (`String "text")
-        && List.assoc_opt "tag" fields = Some (`String "json")
-        && List.assoc_opt "message" fields = Some (`String "hello")
-    | _ -> false);
+  Alcotest.(check string)
+    "semantic JSON envelope"
+    "{\"service\":\"formatter\",\"instant\":\"42\",\"level\":\"info\",\"payload\":{\"kind\":\"text\",\"tag\":\"json\",\"message\":\"hello\"}}"
+    json;
   (match Observe.Formatter.format Observe.Formatter.json_lines log with
   | Ok line ->
       Alcotest.(check char)

@@ -1,7 +1,7 @@
 (executable
  (name test_capture_contracts)
  (modules test_capture_contracts)
- (libraries observe observe_test_support alcotest yojson))
+ (libraries observe observe_test_support alcotest))
 
 (executable
  (name test_capture_properties)

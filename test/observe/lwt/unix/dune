@@ -1,7 +1,7 @@
 (executable
  (name ready_scenario)
  (modules ready_scenario)
- (libraries observe.lwt-unix observe lwt lwt.unix unix yojson))
+ (libraries observe.lwt-unix observe lwt lwt.unix unix))
 
 (rule
  (alias observe-lwt-unix-contracts)

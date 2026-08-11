@@ -27,7 +27,8 @@
    (>= 4.14))
   (repr
    (>= 0.7.0))
-  yojson
+  (jsonm
+   (>= 1.0.2))
   lwt
   ptime
   ppxlib

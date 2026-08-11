@@ -92,13 +92,10 @@ let json_terminal () =
         Observe_lwt_unix.init_exn (config ~pretty:false "ready-json");
         Observe.Logs.info (Observe.Logs.text ~tag:"json" "structured"))
   in
-  let json = Yojson.Safe.from_string output in
   check
-    (Yojson.Safe.Util.member "service" json = `String "ready-json")
+    (contains output "\"service\":\"ready-json\"")
     "service missing from JSON";
-  check
-    (Yojson.Safe.Util.member "level" json = `String "info")
-    "level missing from JSON"
+  check (contains output "\"level\":\"info\"") "level missing from JSON"
 
 let repeated_init () =
   let config = config ~silent:true "repeat" in

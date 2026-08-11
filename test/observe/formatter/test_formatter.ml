@@ -307,7 +307,10 @@ let test_projection_failures () =
   let unsupported =
     capture_one Observe.Level.Info (Observe.Logs.structured unsupported 1)
   in
-  check_formatter_error Observe.Formatter.Unsupported_value unsupported
+  Alcotest.(check bool)
+    "unsupported Repr JSON" true
+    (Observe.Formatter.format Observe.Formatter.json unsupported
+    = Error Observe.Formatter.Unsupported_value)
 
 let () =
   Alcotest.run "observe-formatter"
