@@ -31,11 +31,18 @@
   %{lib:observe:observe.mli}
   %{lib:observe:META}
   %{lib:observe:dune-package}
+  %{lib:observe.lwt:observe_lwt.cmi}
+  %{lib:observe.unix:observe_unix.cmi}
+  %{lib:observe.lwt-unix:observe_lwt_unix.cmi}
   test/observe/interfaces/check_install_surface.sh
+  test/observe/interfaces/check_adapter_install_surface.sh
   test/observe/interfaces/public_consumer.exe
   test/observe/interfaces/ppx_consumer.exe
+  test/observe/interfaces/adapter_consumer.exe
   test/observe/interfaces/public_consumer.ml
-  (source_tree test/observe/interfaces/negative))
+  test/observe/interfaces/adapter_consumer.ml
+  (source_tree test/observe/interfaces/negative)
+  (source_tree test/observe/interfaces/negative_adapters))
  (action
   (progn
    (run
@@ -49,5 +56,17 @@
     %{lib:observe:dune-package}
     %{dep:test/observe/interfaces/public_consumer.ml}
     test/observe/interfaces/negative)
+   (run
+    bash
+    %{dep:test/observe/interfaces/check_adapter_install_surface.sh}
+    %{bin:ocamlfind}
+    %{dep:observe.install}
+    %{lib:observe:observe.cmi}
+    %{lib:observe.lwt:observe_lwt.cmi}
+    %{lib:observe.unix:observe_unix.cmi}
+    %{lib:observe.lwt-unix:observe_lwt_unix.cmi}
+    %{dep:test/observe/interfaces/adapter_consumer.ml}
+    test/observe/interfaces/negative_adapters)
    (run %{exe:test/observe/interfaces/public_consumer.exe})
-   (run %{exe:test/observe/interfaces/ppx_consumer.exe}))))
+   (run %{exe:test/observe/interfaces/ppx_consumer.exe})
+   (run %{exe:test/observe/interfaces/adapter_consumer.exe}))))

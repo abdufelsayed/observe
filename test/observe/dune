@@ -5,5 +5,8 @@
   (alias public/observe-public-contracts)
   (alias capture/observe-capture-contracts)
   (alias runtime/observe-runtime-state)
+  (alias lwt/observe-lwt-contracts)
+  (alias unix/observe-unix-contracts)
+  (alias lwt/unix/observe-lwt-unix-contracts)
   (alias concurrency/observe-concurrency-smoke)
   (alias ppx/observe-ppx-contracts)))

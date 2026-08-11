@@ -1,9 +1,10 @@
 # Observe
 
-Observe is runtime-neutral structured logging for OCaml. The core owns
-admission, formatting, diagnostics, additional drains, and deterministic
-capture without performing I/O. Runtime adapters provide dynamic context;
-platform adapters provide wall-clock time and terminal output.
+Observe is structured logging for OCaml with a portable core and a ready
+Lwt-Unix composition. The core owns admission, formatting, diagnostics,
+additional drains, and deterministic capture without performing I/O. Runtime
+adapters provide dynamic context; platform adapters provide wall-clock time and
+terminal output.
 
 The package currently ships logging only: tagged text, free-form values, typed
 Repr-backed values, level filtering, terminal formatting, drains, diagnostics,
@@ -20,20 +21,46 @@ opam install .
 
 Released packages will use the package name `observe`.
 
-Add the core library to the consuming Dune stanza:
+An Lwt-Unix application uses the ready composition:
 
 ```lisp
 (executable
  (name main)
- (libraries observe)
+ (libraries observe observe.lwt-unix lwt.unix)
  (preprocess
   (pps observe.ppx)))
 ```
 
-`(libraries observe)` is sufficient when the program constructs
+Use only `(libraries observe)` for the portable core or a custom runtime and
+platform composition. `(libraries observe)` is also sufficient when a program constructs
 `Observe.Value.t` and `Observe.Type.t` values without PPX. Add
 `(pps observe.ppx)` for `[@@deriving observe]` and
 `[%observe.value ...]`.
+
+## Ready Lwt-Unix initialization
+
+Construct one configuration and initialize Observe once at the application
+composition root:
+
+```ocaml
+let config = Observe.Config.create_exn ~service:"orders" ()
+
+let () = Observe_lwt_unix.init_exn config
+
+let () =
+  Observe.Logs.info
+    (Observe.Logs.text ~tag:"startup" "service ready")
+```
+
+The initializer installs Lwt callback-local context, the OS wall clock, and
+automatic formatted output on standard error. It returns no logger or runtime
+handle. Every linked use of `Observe.Logs` consults the same core-owned active
+system.
+
+`Observe_lwt_unix.init` returns an `Observe.Runtime.init_error` result.
+`init_exn` raises `Observe.Runtime.Init_error` with the same error. Both are
+synchronous and neither calls `Lwt_main.run`. The executable remains
+responsible for starting the Lwt scheduler.
 
 ## Authoring logs
 
@@ -96,12 +123,11 @@ Before production initialization, logs outside an active capture are withheld
 and counted as `Observe.Diagnostics.Not_initialized`; logging does not raise
 merely because initialization has not happened.
 
-## Runnable direct-runtime capture
+## Expert runtime composition
 
-The core exposes runtime and platform contracts so integration packages can be
-implemented without adding a runtime dependency to `observe`. This complete
-direct-style example captures four logs without installing production terminal
-output:
+The core exposes runtime and platform contracts for other compatible
+compositions. This complete direct-style example captures four logs without
+installing production terminal output:
 
 ```ocaml
 module Direct_runtime = struct
@@ -171,7 +197,7 @@ let () =
       invalid_arg (Printf.sprintf "invalid capture capacity: %d" capacity)
 ```
 
-Use the installation stanza above for this example. A capture is the innermost
+Use `(libraries observe)` plus `observe.ppx` for this example. A capture is the innermost
 dynamic route: it suppresses production terminal and drain delivery during the
 callback, restores any previous route afterward, and closes exactly once on
 return, exception, or native cancellation. A retained capture remains readable
@@ -206,16 +232,16 @@ The approved configuration fields have distinct responsibilities:
 - `drains` supplies additional application-owned outputs.
 - `service`, `environment`, and `version` become completed-log metadata.
 
-`Runtime.Make.init` returns an `init_error` result. `init_exn` raises
-`Observe.Runtime.Init_error` with the same error. The first successful
-production initialization owns the process route; a different runtime cannot
-replace a previously registered runtime.
+The first successful initialization owns the process route. A second
+initialization returns `Already_initialized`, and a different registered
+runtime cannot replace the owner.
 
 ## Terminal output and drains
 
 The terminal and drains are deliberately different roles.
 
-- The platform adapter owns one automatic terminal. The core selects and runs
+- The Unix platform adapter writes the automatic terminal path to standard
+  error. The core selects and runs
   the terminal formatter, including record termination, then supplies one
   complete string to `write_terminal`.
 - Configured drains receive the completed `Observe.Log.t` directly. They can
@@ -225,6 +251,10 @@ The terminal and drains are deliberately different roles.
   drains remain active.
 - `Accepted` means immediate handoff only. It does not promise flushing,
   durability, ordering, retry, or shutdown.
+
+The standard-error write is synchronous because `Observe.Logs` emission
+returns `unit`. A slow redirected destination can delay the calling Lwt
+callback. Observe does not add a queue or background writer in this release.
 
 A drain callback is synchronous. If it schedules work that outlives the
 callback, it must first copy or project every part of the log that work needs.
@@ -250,35 +280,45 @@ callback, it must first copy or project every part of the log that work needs.
 - Observe creates no background workers and owns no exporter, flush, or
   shutdown lifecycle.
 
-## Planned ready Lwt-Unix adapter — not shipped
+## Lwt-scoped capture
 
-`Observe_lwt_unix` is an intended future convenience package. It is **not
-available in the current release or source package**. Its ready-to-use shape is
-expected to hide the runtime functor, Lwt-local context, wall clock, and terminal
-implementation behind one initialization call:
+Tests can capture the ordinary static API without production initialization or
+a global reset:
 
 ```ocaml
-(* Future shape only; this does not compile with the package shipped today. *)
-let config = Observe.Config.create_exn ~service:"orders" ()
-let () = Observe_lwt_unix.init_exn config
+let test_config =
+  Observe.Config.create_exn ~service:"library-test"
+    ~min_level:Observe.Level.Debug ()
 
-let () =
-  Observe.Logs.info
-    (Observe.Logs.text ~tag:"startup" "service ready")
+let test_library () =
+  Observe_lwt_unix.Test.with_capture test_config (fun capture ->
+      Lwt.bind (My_library.run ()) (fun () ->
+          let logs = Observe.Capture.logs capture in
+          check_logs logs;
+          Lwt.return_unit))
 ```
 
-Until that adapter ships, runtime integration authors compose
-`Observe.Runtime.Make` with explicit `Observe.Runtime.S` and
-`Observe.Platform.S` implementations, as in the direct capture example.
+Concurrent scopes are isolated. Nested capture restores the outer scope.
+Success, exception, and `Lwt.Canceled` close the scope and restore its prior
+binding. A callback that was registered inside the scope but runs after closure
+cannot fall through to production. The binding does not propagate through
+`Lwt_preemptive.detach`, OS threads, or another runtime.
+
+Invalid capacity or runtime ownership failure raises
+`Observe_lwt_unix.Test.Capture_error` in the returned promise before the test
+callback runs.
 
 ## Repository layout
 
 - `packages/observe/` contains the core library and PPX.
+- `packages/observe/lwt/` and `packages/observe/unix/` contain the separate
+  Lwt runtime and Unix platform mechanisms.
+- `packages/observe/lwt/unix/` contains the ready composition.
 - `packages/observe/doc/` contains the odoc package landing page.
 - `test/observe/public/` and `test/observe/interfaces/` exercise the public API
   and compile-time boundary.
-- `test/observe/runtime/`, `capture/`, and `concurrency/` exercise routing,
-  lifecycle, and synchronization contracts; `test/observe/ppx/` exercises the
-  deriver and value extension.
+- `test/observe/runtime/`, `capture/`, `lwt/`, `unix/`, and `concurrency/`
+  exercise routing, lifecycle, real adapter behavior, and synchronization
+  contracts; `test/observe/ppx/` exercises the deriver and value extension.
 - `test/observe/support/` contains shared test-only adapters and helpers.
 - `docs/` indexes repository documentation.

@@ -13,4 +13,7 @@
   bounded diagnostics, and finite deterministic capture.
 - Add `observe.ppx` with `[@@deriving observe]`, `[%observe.value ...]`, and
   `[%observe.value.embed ...]`.
-
+- Add `Observe_lwt.Runtime` and `Observe_unix.Platform` as independently
+  composable mechanism sublibraries.
+- Add the ready `Observe_lwt_unix` initializer with automatic standard-error
+  output and isolated Lwt-scoped test capture.

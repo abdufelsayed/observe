@@ -1,0 +1,15 @@
+(copy_files ../../../packages/observe/unix/clock.ml)
+
+(copy_files ../../../packages/observe/unix/write.ml)
+
+(executable
+ (name test_unix_platform)
+ (modules test_unix_platform clock write)
+ (libraries observe.unix observe alcotest unix))
+
+(rule
+ (alias observe-unix-contracts)
+ (package observe)
+ (deps test_unix_platform.exe)
+ (action
+  (run %{exe:test_unix_platform.exe})))

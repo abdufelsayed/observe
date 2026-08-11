@@ -1,9 +1,8 @@
 {0 Observe}
 
-Observe is runtime-neutral structured logging for OCaml. The core owns
-admission, formatting, diagnostics, additional drains, and deterministic
-capture without performing I/O. Runtime adapters provide dynamic context;
-platform adapters provide wall-clock time and terminal output.
+Observe is structured logging for OCaml with a portable core and a ready
+Lwt-Unix composition. The core owns admission, formatting, diagnostics,
+additional drains, and deterministic capture without performing I/O.
 
 The current package provides tagged text, deferred text, free-form values,
 Repr-backed typed values, level filtering, automatic terminal formatting,
@@ -12,8 +11,24 @@ wide-event or metric APIs.
 
 {1 Installation}
 
-Link the core library with [(libraries observe)]. Add
+Lwt-Unix applications link [(libraries observe observe.lwt-unix lwt.unix)].
+Custom integrations can link the portable core with [(libraries observe)]. Add
 [(preprocess (pps observe.ppx))] when using the deriver or free-form extension.
+
+{1 Ready Lwt-Unix initialization}
+
+{[
+let config = Observe.Config.create_exn ~service:"orders" ()
+let () = Observe_lwt_unix.init_exn config
+
+let () =
+  Observe.Logs.info
+    (Observe.Logs.text ~tag:"startup" "service ready")
+]}
+
+The ready initializer is synchronous. It installs Lwt callback-local context,
+the OS wall clock, and automatic formatted output on standard error. It starts
+no scheduler and returns no logging handle. See {!module:Observe_lwt_unix}.
 
 {1 Authoring}
 
@@ -58,6 +73,9 @@ platform dependency to the core.
 dynamic route, suppresses production delivery for the callback, restores the
 previous binding, and closes the capture exactly once.
 
+For Lwt tests, {!val:Observe_lwt_unix.Test.with_capture} provides the same
+bracket through real Lwt callback-local state and preserves [Lwt.Canceled].
+
 {1 Safety boundary}
 
 Structured values and values added with {!val:Observe.Value.embed} remain by
@@ -67,7 +85,7 @@ encountered by the logging engine are contained and diagnosed, while runtime
 control exceptions remain native. Arbitrary Repr descriptions do not imply
 bounded traversal, cycle-safe rendering, or redaction.
 
-The planned ready [Observe_lwt_unix] convenience adapter is not shipped. See the
-repository README for a complete direct-runtime capture example and the clearly
-marked future adapter shape.
-
+Automatic Unix terminal writes are synchronous and target standard error. A
+slow destination can delay the caller. Observe owns no background writer,
+flush lifecycle, or durability guarantee. See the repository README for the
+complete ready, test-capture, and custom-integration examples.

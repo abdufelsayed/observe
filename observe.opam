@@ -2,13 +2,15 @@
 opam-version: "2.0"
 synopsis: "Structured logging and observability for OCaml"
 description:
-  "A portable structured logging foundation with typed values, filtering, formatting, drains, diagnostics, and deterministic capture."
+  "Structured logging with a portable core, typed values, deterministic capture, and a ready Lwt-Unix composition."
 maintainer: ["Abdullah Elsayed <hey@abdufelsayed.dev>"]
 authors: ["Abdullah Elsayed <hey@abdufelsayed.dev>"]
 depends: [
   "dune" {>= "3.22"}
   "ocaml" {>= "4.14"}
   "repr" {>= "0.7.0"}
+  "lwt"
+  "ptime"
   "ppxlib"
   "ppx_repr" {>= "0.7.0"}
   "alcotest" {with-test & >= "1.9.1"}

@@ -1,0 +1,11 @@
+(executable
+ (name test_lwt_runtime)
+ (modules test_lwt_runtime)
+ (libraries observe.lwt alcotest lwt lwt.unix))
+
+(rule
+ (alias observe-lwt-contracts)
+ (package observe)
+ (deps test_lwt_runtime.exe)
+ (action
+  (run %{exe:test_lwt_runtime.exe})))

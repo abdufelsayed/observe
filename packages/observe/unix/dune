@@ -1,0 +1,5 @@
+(library
+ (name observe_unix)
+ (public_name observe.unix)
+ (private_modules clock write)
+ (libraries observe ptime.clock unix))

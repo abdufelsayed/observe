@@ -14,12 +14,14 @@
  (name observe)
  (synopsis "Structured logging and observability for OCaml")
  (description
- "A portable structured logging foundation with typed values, filtering, formatting, drains, diagnostics, and deterministic capture.")
+ "Structured logging with a portable core, typed values, deterministic capture, and a ready Lwt-Unix composition.")
  (depends
   (ocaml
    (>= 4.14))
   (repr
    (>= 0.7.0))
+  lwt
+  ptime
   ppxlib
   (ppx_repr
    (>= 0.7.0))
