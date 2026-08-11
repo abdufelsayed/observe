@@ -1,0 +1,61 @@
+name: Stress tests
+
+on:
+  workflow_dispatch:
+    inputs:
+      qcheck_count:
+        description: QCheck count
+        required: false
+        default: "2000"
+        type: string
+      race_trials:
+        description: Runtime publication race trials
+        required: false
+        default: "100"
+        type: string
+      concurrency_work:
+        description: Concurrent offers per conservation scenario
+        required: false
+        default: "64"
+        type: string
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: false
+
+permissions:
+  contents: read
+
+env:
+  OCAML_LATEST: "5"
+
+jobs:
+  stress:
+    name: Stress tests
+    runs-on: ubuntu-latest
+    timeout-minutes: 120
+
+    steps:
+      - name: Checkout tree
+        uses: actions/checkout@v6
+
+      - name: Set-up OCaml ${{ env.OCAML_LATEST }}
+        uses: ocaml/setup-ocaml@v3
+        with:
+          ocaml-compiler: ${{ env.OCAML_LATEST }}
+          dune-cache: true
+          opam-local-packages: |
+            *.opam
+
+      - name: Use opam archive cache
+        run: opam option --global 'archive-mirrors=["https://opam.ocaml.org/cache"]'
+
+      - name: Install stress test dependencies
+        run: opam install --yes --with-test --deps-only .
+
+      - name: Run stress tests
+        env:
+          OBSERVE_QCHECK_COUNT: ${{ inputs.qcheck_count }}
+          OBSERVE_RACE_TRIALS: ${{ inputs.race_trials }}
+          OBSERVE_CONCURRENCY_WORK: ${{ inputs.concurrency_work }}
+        run: opam exec -- dune build @stress

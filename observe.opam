@@ -5,6 +5,10 @@ description:
   "Structured logging with a portable core, typed values, deterministic capture, and a ready Lwt-Unix composition."
 maintainer: ["Abdullah Elsayed <hey@abdufelsayed.dev>"]
 authors: ["Abdullah Elsayed <hey@abdufelsayed.dev>"]
+license: "MIT"
+homepage: "https://github.com/abdufelsayed/observe"
+doc: "https://abdufelsayed.github.io/observe/"
+bug-reports: "https://github.com/abdufelsayed/observe/issues"
 depends: [
   "dune" {>= "3.22"}
   "ocaml" {>= "4.14"}
@@ -14,6 +18,8 @@ depends: [
   "ptime"
   "ppxlib"
   "ppx_repr" {>= "0.7.0"}
+  "dune-release" {with-dev-setup}
+  "opam-publish" {with-dev-setup}
   "alcotest" {with-test & >= "1.9.1"}
   "qcheck-core" {with-test & >= "0.91"}
   "qcheck-alcotest" {with-test & >= "0.91"}
@@ -35,4 +41,5 @@ build: [
     "@doc" {with-doc}
   ]
 ]
+dev-repo: "git+https://github.com/abdufelsayed/observe.git"
 x-maintenance-intent: ["(latest)"]

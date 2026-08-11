@@ -6,9 +6,16 @@
 
 (implicit_transitive_deps false)
 
+(source
+ (github abdufelsayed/observe))
+
+(documentation "https://abdufelsayed.github.io/observe/")
+
 (authors "Abdullah Elsayed <hey@abdufelsayed.dev>")
 
 (maintainers "Abdullah Elsayed <hey@abdufelsayed.dev>")
+
+(license MIT)
 
 (package
  (name observe)
@@ -26,6 +33,8 @@
   ppxlib
   (ppx_repr
    (>= 0.7.0))
+  (dune-release :with-dev-setup)
+  (opam-publish :with-dev-setup)
   (alcotest
    (and
     :with-test

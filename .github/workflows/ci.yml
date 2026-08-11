@@ -1,0 +1,195 @@
+name: CI
+
+on:
+  workflow_dispatch:
+  pull_request:
+  push:
+    branches: [main, release/**]
+    tags: ['v*']
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+env:
+  OCAML_LATEST: "5"
+  OBSERVE_STRESS_QCHECK_COUNT: "2000"
+  OBSERVE_STRESS_RACE_TRIALS: "100"
+  OBSERVE_STRESS_CONCURRENCY_WORK: "64"
+
+jobs:
+  hygiene:
+    name: Hygiene
+    if: github.event_name != 'pull_request' || github.event.pull_request.draft == false
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+
+    steps:
+      - name: Checkout tree
+        uses: actions/checkout@v6
+
+      - name: Set-up OCaml ${{ env.OCAML_LATEST }}
+        uses: ocaml/setup-ocaml@v3
+        with:
+          ocaml-compiler: ${{ env.OCAML_LATEST }}
+          dune-cache: true
+          opam-local-packages: |
+            *.opam
+
+      - name: Use opam archive cache
+        run: opam option --global 'archive-mirrors=["https://opam.ocaml.org/cache"]'
+
+      - name: Install project dependencies
+        run: opam install --yes --with-test --with-doc --with-dev-setup --deps-only .
+
+      - name: Check generated package metadata
+        run: |
+          opam exec -- dune build @opam
+          opam lint ./*.opam
+
+      - name: Check formatting and drift
+        run: |
+          opam exec -- dune fmt
+          git diff --check
+          git diff --exit-code
+
+  correctness:
+    name: Correctness (${{ matrix.os }}, OCaml ${{ matrix.ocaml-compiler }})
+    if: github.event_name != 'pull_request' || github.event.pull_request.draft == false
+    strategy:
+      fail-fast: false
+      matrix:
+        os:
+          - ubuntu-latest
+          - macos-latest
+        ocaml-compiler:
+          - "4.14"
+          - "5"
+
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 45
+
+    steps:
+      - name: Checkout tree
+        uses: actions/checkout@v6
+
+      - name: Set-up OCaml ${{ matrix.ocaml-compiler }}
+        uses: ocaml/setup-ocaml@v3
+        with:
+          ocaml-compiler: ${{ matrix.ocaml-compiler }}
+          dune-cache: true
+          opam-local-packages: |
+            *.opam
+
+      - name: Use opam archive cache
+        run: opam option --global 'archive-mirrors=["https://opam.ocaml.org/cache"]'
+
+      - name: Install package test dependencies
+        run: opam install --yes --with-test --deps-only observe
+
+      - name: Build package install and correctness targets
+        run: opam exec -- dune build -p observe @install @runtest
+
+  docs-examples:
+    name: Documentation and examples
+    if: github.event_name != 'pull_request' || github.event.pull_request.draft == false
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+
+    steps:
+      - name: Checkout tree
+        uses: actions/checkout@v6
+
+      - name: Set-up OCaml ${{ env.OCAML_LATEST }}
+        uses: ocaml/setup-ocaml@v3
+        with:
+          ocaml-compiler: ${{ env.OCAML_LATEST }}
+          dune-cache: true
+          opam-local-packages: |
+            *.opam
+
+      - name: Use opam archive cache
+        run: opam option --global 'archive-mirrors=["https://opam.ocaml.org/cache"]'
+
+      - name: Install project dependencies
+        run: opam install --yes --with-test --with-doc --deps-only .
+
+      - name: Build documentation and examples
+        run: opam exec -- dune build @examples @doc
+
+  stress:
+    name: No-service stress tests
+    if: github.event_name != 'pull_request' || github.event.pull_request.draft == false
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+
+    steps:
+      - name: Checkout tree
+        uses: actions/checkout@v6
+
+      - name: Set-up OCaml ${{ env.OCAML_LATEST }}
+        uses: ocaml/setup-ocaml@v3
+        with:
+          ocaml-compiler: ${{ env.OCAML_LATEST }}
+          dune-cache: true
+          opam-local-packages: |
+            *.opam
+
+      - name: Use opam archive cache
+        run: opam option --global 'archive-mirrors=["https://opam.ocaml.org/cache"]'
+
+      - name: Install stress test dependencies
+        run: opam install --yes --with-test --deps-only .
+
+      - name: Run stress tests
+        env:
+          OBSERVE_QCHECK_COUNT: ${{ env.OBSERVE_STRESS_QCHECK_COUNT }}
+          OBSERVE_RACE_TRIALS: ${{ env.OBSERVE_STRESS_RACE_TRIALS }}
+          OBSERVE_CONCURRENCY_WORK: ${{ env.OBSERVE_STRESS_CONCURRENCY_WORK }}
+        run: opam exec -- dune build @stress
+
+  ci-required:
+    name: Required CI
+    if: always() && (github.event_name != 'pull_request' || github.event.pull_request.draft == false)
+    needs:
+      - hygiene
+      - correctness
+      - docs-examples
+      - stress
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+
+    steps:
+      - name: Summarize required checks
+        env:
+          HYGIENE: ${{ needs.hygiene.result }}
+          CORRECTNESS: ${{ needs.correctness.result }}
+          DOCS_EXAMPLES: ${{ needs.docs-examples.result }}
+          STRESS: ${{ needs.stress.result }}
+        run: |
+          failed=0
+
+          check_result() {
+            name=$1
+            result=$2
+            echo "- ${name}: ${result}" >> "$GITHUB_STEP_SUMMARY"
+            case "$result" in
+              success)
+                ;;
+              *)
+                echo "::error title=${name} failed::${name} ended with '${result}'"
+                failed=1
+                ;;
+            esac
+          }
+
+          echo "### Required CI" >> "$GITHUB_STEP_SUMMARY"
+          check_result "Hygiene" "$HYGIENE"
+          check_result "Correctness matrix" "$CORRECTNESS"
+          check_result "Documentation and examples" "$DOCS_EXAMPLES"
+          check_result "No-service stress tests" "$STRESS"
+
+          exit "$failed"
