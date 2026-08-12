@@ -5,7 +5,7 @@ type t
 type payload =
   | Text of { tag : string; message : string }
   | Free of Observe_value.t
-  | Structured : 'a Repr.t * 'a -> payload
+  | Structured : 'a Observe_type.t * 'a -> payload
 
 val service : t -> string
 val environment : t -> string option

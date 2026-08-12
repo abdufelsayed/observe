@@ -43,8 +43,8 @@ let capture_stderr callback =
   | Ok value -> (value, captured)
   | Error (exn, backtrace) -> Printexc.raise_with_backtrace exn backtrace
 
-let config ?pretty ?silent ?drains service =
-  Observe.Config.create_exn ~service ?pretty ?silent ?drains ()
+let config ?environment ?pretty ?silent ?drains service =
+  Observe.Config.create_exn ~service ?environment ?pretty ?silent ?drains ()
 
 let text_tag log =
   match Observe.Log.payload log with
@@ -70,7 +70,7 @@ let process_diagnostic_count kind =
 let terminal () =
   let (), output =
     capture_stderr (fun () ->
-        Observe_lwt_unix.init_exn (config "ready");
+        Observe_lwt_unix.init_exn (config ~environment:"development" "ready");
         Observe.Logs.info (Observe.Logs.text ~tag:"startup" "service ready"))
   in
   check
@@ -89,13 +89,25 @@ let terminal () =
 let json_terminal () =
   let (), output =
     capture_stderr (fun () ->
-        Observe_lwt_unix.init_exn (config ~pretty:false "ready-json");
+        Observe_lwt_unix.init_exn
+          (config ~environment:"development" ~pretty:false "ready-json");
         Observe.Logs.info (Observe.Logs.text ~tag:"json" "structured"))
   in
   check
     (contains output "\"service\":\"ready-json\"")
     "service missing from JSON";
   check (contains output "\"level\":\"info\"") "level missing from JSON"
+
+let production_json_terminal () =
+  let (), output =
+    capture_stderr (fun () ->
+        Observe_lwt_unix.init_exn
+          (config ~environment:"production" "ready-production");
+        Observe.Logs.info (Observe.Logs.text ~tag:"json" "structured"))
+  in
+  check
+    (contains output "\"service\":\"ready-production\"")
+    "production did not select JSON: %S" output
 
 let repeated_init () =
   let config = config ~silent:true "repeat" in
@@ -291,6 +303,7 @@ let scenarios =
   [
     ("terminal", terminal);
     ("json-terminal", json_terminal);
+    ("production-json-terminal", production_json_terminal);
     ("repeated-init", repeated_init);
     ("silent-drain", silent_drain);
     ("no-output", no_output);

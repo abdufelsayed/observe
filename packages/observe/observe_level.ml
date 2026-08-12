@@ -13,5 +13,5 @@ let to_string = function
 let pp formatter level = Format.pp_print_string formatter (to_string level)
 
 let t =
-  Repr.enum "observe.level"
+  Observe_type.enum "observe.level"
     [ ("debug", Debug); ("info", Info); ("warn", Warn); ("error", Error) ]

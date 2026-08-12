@@ -7,6 +7,5 @@
 (rule
  (alias observe-examples)
  (package observe)
- (deps simple.exe)
  (action
   (run %{exe:simple.exe})))

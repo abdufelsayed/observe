@@ -4,12 +4,12 @@ type message =
   | Text of { tag : string; message : string }
   | Lazy_text of { tag : string; message : unit -> string }
   | Free of (unit -> Observe_value.t)
-  | Structured : 'a Repr.t * 'a -> message
+  | Structured : 'a Observe_type.t * 'a -> message
 
 val text : tag:string -> string -> message
 val text_lazy : tag:string -> (unit -> string) -> message
 val free : (unit -> Observe_value.t) -> message
-val structured : 'a Repr.t -> 'a -> message
+val structured : 'a Observe_type.t -> 'a -> message
 
 type clock_error = Unavailable
 type terminal_acceptance = Accepted | Rejected

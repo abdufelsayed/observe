@@ -5,13 +5,15 @@ type t =
   | String of string
   | List of t list
   | Object of (string * t) list
+  | Record of (string * t) list
+  | Variant of { name : string; polymorphic : bool; payload : t option }
 
 type error = Invalid_utf8 | Non_finite_float | Unsupported_value | Malformed
 
 let ( let* ) = Result.bind
 
 let valid_string value =
-  if Observe_value.is_valid_utf8 value then Ok value else Error Invalid_utf8
+  if Observe_utf8.is_valid value then Ok value else Error Invalid_utf8
 
 let rec map_list convert = function
   | [] -> Ok []
@@ -79,24 +81,3 @@ let of_repr description value =
     | `End -> Ok value
     | `Await | `Error _ | `Lexeme _ -> Error Malformed
   with Repr.Unsupported_operation _ | Failure _ -> Error Unsupported_value
-
-let rec of_value = function
-  | Observe_value.Null -> Ok Null
-  | Observe_value.Bool value -> Ok (Bool value)
-  | Observe_value.Int value -> Ok (Number (string_of_int value))
-  | Observe_value.Float value -> number value
-  | Observe_value.String value ->
-      let* value = valid_string value in
-      Ok (String value)
-  | Observe_value.List values ->
-      let* values = map_list of_value values in
-      Ok (List values)
-  | Observe_value.Object fields ->
-      let convert (name, value) =
-        let* name = valid_string name in
-        let* value = of_value value in
-        Ok (name, value)
-      in
-      let* fields = map_list convert fields in
-      Ok (Object fields)
-  | Observe_value.Embedded (description, value) -> of_repr description value

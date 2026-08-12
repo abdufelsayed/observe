@@ -4,6 +4,22 @@ module System =
 type event = User_login of { user_id : int; method_ : string }
 [@@deriving observe]
 
+type access = Granted | Denied [@@deriving observe]
+type deployment = [ `Development | `Staging | `Production ] [@@deriving observe]
+
+type rich_event =
+  | Session_started of {
+      user_id : int;
+      method_ : string;
+      label : string;
+      access : access;
+      deployment : deployment;
+      roles : string list;
+      remembered : bool;
+      provider : string option;
+    }
+[@@deriving observe]
+
 let instant = ref (Observe.Instant.of_epoch_nanoseconds 37_425_612_000_000L)
 
 let system =
@@ -96,7 +112,7 @@ let test_free_form_tree () =
   in
   Alcotest.(check string)
     "free-form tree"
-    "10:23:45.612 INFO [example]\n  ├─ action: user_login\n  └─ user_id: 42"
+    "10:23:45.612 INFO [example]\n  ├─ action: \"user_login\"\n  └─ user_id: 42"
     (readable log)
 
 let test_typed_variant_tree () =
@@ -111,7 +127,38 @@ let test_typed_variant_tree () =
     "10:23:45.612 INFO [example]\n\
     \  └─ User_login\n\
     \     ├─ user_id: 42\n\
-    \     └─ method_: oauth"
+    \     └─ method_: \"oauth\""
+    (readable log)
+
+let test_mixed_typed_structure () =
+  instant := Observe.Instant.of_epoch_nanoseconds 37_425_612_000_000L;
+  let log =
+    capture_one Observe.Level.Info
+      (Observe.Logs.structured rich_event_t
+         (Session_started
+            {
+              user_id = 42;
+              method_ = "oauth";
+              label = "Granted";
+              access = Granted;
+              deployment = `Development;
+              roles = [ "admin"; "billing" ];
+              remembered = true;
+              provider = Some "github";
+            }))
+  in
+  Alcotest.(check string)
+    "mixed typed structure"
+    "10:23:45.612 INFO [example]\n\
+    \  └─ Session_started\n\
+    \     ├─ user_id: 42\n\
+    \     ├─ method_: \"oauth\"\n\
+    \     ├─ label: \"Granted\"\n\
+    \     ├─ access: Granted\n\
+    \     ├─ deployment: `Development\n\
+    \     ├─ roles: [\"admin\", \"billing\"]\n\
+    \     ├─ remembered: true\n\
+    \     └─ provider: \"github\""
     (readable log)
 
 let test_nested_values_and_strings () =
@@ -153,10 +200,10 @@ let test_nested_values_and_strings () =
     \  ├─ space: \" padded \"\n\
     \  ├─ reserved: \"true\"\n\
     \  ├─ multiline: \"line one\\nline two\"\n\
-    \  ├─ roles: [admin, billing]\n\
+    \  ├─ roles: [\"admin\", \"billing\"]\n\
     \  ├─ metadata\n\
-    \  │  ├─ provider: github\n\
-    \  │  └─ region: eu-west-1\n\
+    \  │  ├─ provider: \"github\"\n\
+    \  │  └─ region: \"eu-west-1\"\n\
     \  └─ items\n\
     \     ├─ [0]\n\
     \     │  └─ id: 1\n\
@@ -248,7 +295,7 @@ let test_ansi_16_structure () =
     "\027[90m10:23:45.612\027[0m \027[1;96mINFO\027[0m \
      \027[1;96m[example]\027[0m\n\
     \  \027[90m├─\027[0m \027[95maction\027[0m\027[90m:\027[0m \
-     \027[92muser_login\027[0m\n\
+     \027[92m\"user_login\"\027[0m\n\
     \  \027[90m└─\027[0m \027[95muser_id\027[0m\027[90m:\027[0m \
      \027[93m42\027[0m"
     (ansi_16 log)
@@ -268,7 +315,7 @@ let test_ansi_16_typed_structure () =
     \     \027[90m├─\027[0m \027[95muser_id\027[0m\027[90m:\027[0m \
      \027[93m42\027[0m\n\
     \     \027[90m└─\027[0m \027[95mmethod_\027[0m\027[90m:\027[0m \
-     \027[92moauth\027[0m"
+     \027[92m\"oauth\"\027[0m"
     (ansi_16 log)
 
 let check_formatter_error expected log =
@@ -289,10 +336,14 @@ let test_projection_failures () =
     capture_one Observe.Level.Info
       (Observe.Logs.structured Observe.Type.string "\255")
   in
-  Alcotest.(check string)
-    "Repr preserves invalid bytes as base64"
-    "00:00:00.000 INFO [example]\n  └─ base64: /w=="
-    (readable invalid_typed_utf8);
+  check_formatter_error Observe.Formatter.Invalid_utf8 invalid_typed_utf8;
+  Alcotest.(check bool)
+    "Repr machine JSON remains available" true
+    (match
+       Observe.Formatter.format Observe.Formatter.json invalid_typed_utf8
+     with
+    | Ok encoded -> String.length encoded > 0
+    | Error _ -> false);
   let non_finite =
     capture_one Observe.Level.Info
       (Observe.Logs.free (fun () -> Observe.Value.float nan))
@@ -329,6 +380,8 @@ let () =
         [
           Alcotest.test_case "free-form tree" `Quick test_free_form_tree;
           Alcotest.test_case "typed variant tree" `Quick test_typed_variant_tree;
+          Alcotest.test_case "mixed typed structure" `Quick
+            test_mixed_typed_structure;
           Alcotest.test_case "nested values and strings" `Quick
             test_nested_values_and_strings;
           Alcotest.test_case "unambiguous literals" `Quick

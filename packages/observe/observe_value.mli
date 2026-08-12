@@ -8,7 +8,7 @@ type t =
   | String of string
   | List of t list
   | Object of (string * t) list
-  | Embedded : 'a Repr.t * 'a -> t
+  | Embedded : 'a Observe_type.t * 'a -> t
 
 val null : t
 val bool : bool -> t
@@ -19,7 +19,7 @@ val option : t option -> t
 val list : t list -> t
 val object_ : (string * t) list -> t
 
-val embed : 'a Repr.t -> 'a -> t
+val embed : 'a Observe_type.t -> 'a -> t
 (** Retain a typed value and its description without projecting it. *)
 
 val pp : Format.formatter -> t -> unit

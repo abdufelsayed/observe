@@ -6,7 +6,7 @@ type t =
   | String of string
   | List of t list
   | Object of (string * t) list
-  | Embedded : 'a Repr.t * 'a -> t
+  | Embedded : 'a Observe_type.t * 'a -> t
 
 let null = Null
 let bool value = Bool value
@@ -37,7 +37,7 @@ let rec pp formatter = function
            (fun formatter (name, value) ->
              Format.fprintf formatter "%S: %a" name pp value))
         fields
-  | Embedded (type_, value) -> Repr.pp type_ formatter value
+  | Embedded (type_, value) -> Observe_type.pp type_ formatter value
 
 let to_string value = Format.asprintf "%a" pp value
 
@@ -45,72 +45,7 @@ type json_error = Invalid_utf8 | Non_finite_float | Unsupported_value
 
 exception Json_error of json_error
 
-let is_valid_utf8 value =
-  let length = String.length value in
-  let byte index = Char.code value.[index] in
-  let is_continuation index =
-    index < length
-    &&
-    let byte = byte index in
-    byte >= 0x80 && byte <= 0xbf
-  in
-  let utf8_sequence_length index leading =
-    if leading >= 0xc2 && leading <= 0xdf && is_continuation (index + 1) then
-      Some 2
-    else if leading = 0xe0 && index + 2 < length then
-      let second = byte (index + 1) in
-      if second >= 0xa0 && second <= 0xbf && is_continuation (index + 2) then
-        Some 3
-      else None
-    else if
-      ((leading >= 0xe1 && leading <= 0xec)
-      || (leading >= 0xee && leading <= 0xef))
-      && is_continuation (index + 1)
-      && is_continuation (index + 2)
-    then Some 3
-    else if leading = 0xed && index + 2 < length then
-      let second = byte (index + 1) in
-      if second >= 0x80 && second <= 0x9f && is_continuation (index + 2) then
-        Some 3
-      else None
-    else if leading = 0xf0 && index + 3 < length then
-      let second = byte (index + 1) in
-      if
-        second >= 0x90
-        && second <= 0xbf
-        && is_continuation (index + 2)
-        && is_continuation (index + 3)
-      then Some 4
-      else None
-    else if
-      leading >= 0xf1
-      && leading <= 0xf3
-      && is_continuation (index + 1)
-      && is_continuation (index + 2)
-      && is_continuation (index + 3)
-    then Some 4
-    else if leading = 0xf4 && index + 3 < length then
-      let second = byte (index + 1) in
-      if
-        second >= 0x80
-        && second <= 0x8f
-        && is_continuation (index + 2)
-        && is_continuation (index + 3)
-      then Some 4
-      else None
-    else None
-  in
-  let rec check index =
-    if index = length then true
-    else
-      let leading = byte index in
-      if leading < 0x80 then check (index + 1)
-      else
-        match utf8_sequence_length index leading with
-        | None -> false
-        | Some sequence_length -> check (index + sequence_length)
-  in
-  check 0
+let is_valid_utf8 = Observe_utf8.is_valid
 
 let add_control_escape buffer byte =
   Buffer.add_string buffer (Printf.sprintf "\\u%04x" byte)
@@ -165,7 +100,7 @@ let rec add_json buffer = function
       Buffer.add_char buffer '}'
   | Embedded (type_, value) ->
       let encoded =
-        try Repr.to_json_string ~minify:true type_ value
+        try Observe_type.to_json_string ~minify:true type_ value
         with Repr.Unsupported_operation _ | Failure _ ->
           raise (Json_error Unsupported_value)
       in

@@ -21,8 +21,11 @@ val create :
 (** Construct validated logging behavior.
 
     [service] is required. Service, environment, and version values must be
-    non-empty valid UTF-8. Defaults are [enabled=true], [pretty=true],
-    [silent=false], [min_level=Info], and no drains. *)
+    non-empty valid UTF-8. If [pretty] is absent, readable output is selected
+    when [environment] is absent, [dev], or [development]; other environments
+    select JSON. An explicit [pretty] value overrides this selection. Other
+    defaults are [enabled=true], [silent=false], [min_level=Info], and no
+    drains. *)
 
 val create_exn :
   service:string ->

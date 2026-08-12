@@ -1,7 +1,7 @@
 type payload =
   | Text of { tag : string; message : string }
   | Free of Observe_value.t
-  | Structured : 'a Repr.t * 'a -> payload
+  | Structured : 'a Observe_type.t * 'a -> payload
 
 type t = {
   service : string;

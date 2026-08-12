@@ -11,6 +11,7 @@
   (progn
    (run %{exe:ready_scenario.exe} terminal)
    (run %{exe:ready_scenario.exe} json-terminal)
+   (run %{exe:ready_scenario.exe} production-json-terminal)
    (run %{exe:ready_scenario.exe} repeated-init)
    (run %{exe:ready_scenario.exe} silent-drain)
    (run %{exe:ready_scenario.exe} no-output)

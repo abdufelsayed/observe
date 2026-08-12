@@ -14,8 +14,9 @@ top of this foundation but are not part of the current public API.
 
 - Process-wide tagged text and structured logging.
 - Deferred messages and values that run only after admission.
-- Typed structured values backed by Repr.
-- A concise PPX for free-form values and Repr descriptions.
+- Typed structured values with Repr machine behavior and type-aware terminal
+  presentation.
+- A concise PPX for free-form values and Observe type descriptions.
 - Readable terminal output with automatic truecolor, 256-color, 16-color, and
   plain fallback.
 - Pure readable, JSON, and JSON Lines formatters.
@@ -52,6 +53,7 @@ Initialize Observe once at the application composition root:
 ```ocaml
 let config =
   Observe.Config.create_exn ~service:"orders"
+    ~environment:"development"
     ~min_level:Observe.Level.Debug ()
 
 let () = Observe_lwt_unix.init_exn config
@@ -65,6 +67,10 @@ The initializer installs Lwt callback-local context, the Unix wall clock, and
 automatic readable output on standard error. It is synchronous, starts no
 scheduler, and returns no logger handle. Application code emits through the
 same process-wide `Observe.Logs` module.
+
+When `pretty` is not set, an absent, `dev`, or `development` environment uses
+readable terminal output. Other environments, including `production`, use
+JSON. Set `~pretty:false` or `~pretty:true` to override the environment default.
 
 ## Logging
 
@@ -90,7 +96,7 @@ Observe.Logs.info
      [%observe.value { action = "user_login"; user_id = 42 }])
 ```
 
-OCaml values can carry a Repr description:
+OCaml values can carry an Observe type description:
 
 ```ocaml
 type event = User_login of { user_id : int; method_ : string }
@@ -108,17 +114,38 @@ The ready Unix composition produces compact text and ordered structured trees:
 ```text
 10:23:45.612 INFO [auth] user logged in
 10:23:45.613 INFO [orders]
-  ├─ action: user_login
+  ├─ action: "user_login"
   └─ user_id: 42
 10:23:45.614 INFO [orders]
   └─ User_login
      ├─ user_id: 42
-     └─ method_: oauth
+     └─ method_: "oauth"
 ```
 
 The Unix adapter passively detects terminal color capability. Redirected
 output, `NO_COLOR`, `TERM=dumb`, and failed probes select plain output. Observe
 does not query or consume terminal input.
+
+Derived descriptions preserve distinctions that JSON cannot: strings remain
+quoted, ordinary constructors render as `Granted`, and polymorphic constructors
+render as `` `Development``. Machine encoding and decoding still delegate to
+Repr. Use `Observe.Type.repr` to pass an Observe description to Repr APIs, or
+`Observe.Type.of_repr` to lift an existing Repr description. A lifted raw
+description cannot recover presentation distinctions already erased by its
+JSON encoding.
+
+## Example
+
+The runnable example keeps initialization, tagged logs, free-form data, and
+rich typed domain events in one place:
+
+```sh
+opam exec -- dune exec examples/simple.exe
+```
+
+It uses nested records, lists, options, ordinary variants, polymorphic variants,
+and constructor payloads. The same executable is exercised by
+`opam exec -- dune build @examples`.
 
 ## Libraries
 

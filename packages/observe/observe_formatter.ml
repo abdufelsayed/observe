@@ -117,24 +117,52 @@ let display_error = function
   | Observe_display.Unsupported_value -> Unsupported_value
   | Observe_display.Malformed -> Failed
 
-let needs_quotes value =
-  let reserved =
-    value = "null"
-    || value = "true"
-    || value = "false"
-    || Option.is_some (float_of_string_opt value)
-  in
-  let ambiguous_character = function
-    | ',' | '[' | ']' | '{' | '}' | '"' | '\\' -> true
-    | character -> Char.code character < 0x20 || character = '\127'
-  in
-  value = ""
-  || String.trim value <> value
-  || reserved
-  || String.exists ambiguous_character value
+let ( let* ) = Result.bind
 
-let render_string value =
-  if needs_quotes value then quoted_text value else readable_text value
+let rec display_of_value = function
+  | Observe_value.Null -> Ok Observe_display.Null
+  | Observe_value.Bool value -> Ok (Observe_display.Bool value)
+  | Observe_value.Int value -> Ok (Observe_display.Number (string_of_int value))
+  | Observe_value.Float value -> (
+      match classify_float value with
+      | FP_nan | FP_infinite -> Error Observe_display.Non_finite_float
+      | FP_normal | FP_subnormal | FP_zero ->
+          let encoded = string_of_float value in
+          let encoded =
+            if encoded.[String.length encoded - 1] = '.' then
+              String.sub encoded 0 (String.length encoded - 1)
+            else encoded
+          in
+          Ok (Observe_display.Number encoded))
+  | Observe_value.String value ->
+      Result.map
+        (fun value -> Observe_display.String value)
+        (Observe_display.valid_string value)
+  | Observe_value.List values ->
+      Result.map
+        (fun values -> Observe_display.List values)
+        (List.fold_right
+           (fun value rest ->
+             let* value = display_of_value value in
+             let* rest = rest in
+             Ok (value :: rest))
+           values (Ok []))
+  | Observe_value.Object fields ->
+      let convert (name, value) =
+        let* name = Observe_display.valid_string name in
+        let* value = display_of_value value in
+        Ok (name, value)
+      in
+      Result.map
+        (fun fields -> Observe_display.Object fields)
+        (List.fold_right
+           (fun field rest ->
+             let* field = convert field in
+             let* rest = rest in
+             Ok (field :: rest))
+           fields (Ok []))
+  | Observe_value.Embedded (description, value) ->
+      Observe_type.present description value
 
 let rec scalar style = function
   | Observe_display.Null -> Some (style_metadata style "null")
@@ -142,14 +170,19 @@ let rec scalar style = function
       Some (style_boolean style (string_of_bool value))
   | Observe_display.Number value -> Some (style_number style value)
   | Observe_display.String value ->
-      Some (style_string style (render_string value))
+      Some (style_string style (quoted_text value))
   | Observe_display.List [] -> Some (style_metadata style "[]")
   | Observe_display.List values -> (
       match scalar_values style values with
       | Some values -> Some ("[" ^ String.concat ", " values ^ "]")
       | None -> None)
-  | Observe_display.Object [] -> Some (style_metadata style "{}")
-  | Observe_display.Object (_ :: _) -> None
+  | Observe_display.Object [] | Observe_display.Record [] ->
+      Some (style_metadata style "{}")
+  | Observe_display.Object (_ :: _) | Observe_display.Record (_ :: _) -> None
+  | Observe_display.Variant { name; polymorphic; payload = None } ->
+      let name = if polymorphic then "`" ^ name else name in
+      Some (style_constructor style (readable_text name))
+  | Observe_display.Variant { payload = Some _; _ } -> None
 
 and scalar_values style = function
   | [] -> Some []
@@ -158,26 +191,26 @@ and scalar_values style = function
       | Some value, Some rest -> Some (value :: rest)
       | None, _ | _, None -> None)
 
+type tree_label = Field of string | Constructor of string
+
 let children = function
-  | Observe_display.Object fields ->
-      List.map (fun (name, value) -> (Some name, value)) fields
+  | Observe_display.Object fields | Observe_display.Record fields ->
+      List.map (fun (name, value) -> (Some (Field name), value)) fields
   | Observe_display.List values ->
       List.mapi
-        (fun index value -> (Some (Printf.sprintf "[%d]" index), value))
+        (fun index value -> (Some (Field (Printf.sprintf "[%d]" index)), value))
         values
+  | Observe_display.Variant { name; polymorphic; payload = Some payload } ->
+      let name = if polymorphic then "`" ^ name else name in
+      [ (Some (Constructor name), payload) ]
   | Observe_display.Null | Observe_display.Bool _ | Observe_display.Number _
-  | Observe_display.String _ ->
+  | Observe_display.String _
+  | Observe_display.Variant { payload = None; _ } ->
       []
 
-let constructor_label ~typed ~depth value =
-  typed
-  && depth = 0
-  && String.length value > 0
-  && match value.[0] with 'A' .. 'Z' -> true | _ -> false
-
-let render_tree style ~typed display =
+let render_tree style display =
   let buffer = Buffer.create 128 in
-  let rec render_items depth prefix = function
+  let rec render_items prefix = function
     | [] -> ()
     | items ->
         let last_index = List.length items - 1 in
@@ -185,24 +218,32 @@ let render_tree style ~typed display =
           (fun index (label, value) ->
             let last = index = last_index in
             let connector = if last then "└─" else "├─" in
-            let label = Option.map readable_text label in
+            let label =
+              Option.map
+                (function
+                  | Field label -> `Field (readable_text label)
+                  | Constructor label -> `Constructor (readable_text label))
+                label
+            in
             let scalar = scalar style value in
             Buffer.add_string buffer prefix;
             Buffer.add_string buffer (style_metadata style connector);
             Buffer.add_char buffer ' ';
             (match (label, scalar) with
-            | Some label, Some scalar ->
+            | Some (`Field label), Some scalar ->
                 Buffer.add_string buffer (style_field style label);
                 Buffer.add_string buffer (style_metadata style ":");
                 Buffer.add_char buffer ' ';
                 Buffer.add_string buffer scalar
-            | Some label, None ->
-                let label =
-                  if constructor_label ~typed ~depth label then
-                    style_constructor style label
-                  else style_field style label
-                in
-                Buffer.add_string buffer label
+            | Some (`Constructor label), Some scalar ->
+                Buffer.add_string buffer (style_constructor style label);
+                Buffer.add_string buffer (style_metadata style ":");
+                Buffer.add_char buffer ' ';
+                Buffer.add_string buffer scalar
+            | Some (`Field label), None ->
+                Buffer.add_string buffer (style_field style label)
+            | Some (`Constructor label), None ->
+                Buffer.add_string buffer (style_constructor style label)
             | None, Some scalar -> Buffer.add_string buffer scalar
             | None, None -> ());
             let nested =
@@ -210,9 +251,7 @@ let render_tree style ~typed display =
             in
             if nested <> [] then (
               Buffer.add_char buffer '\n';
-              render_items (depth + 1)
-                (prefix ^ if last then "   " else "│  ")
-                nested;
+              render_items (prefix ^ if last then "   " else "│  ") nested;
               if not last then Buffer.add_char buffer '\n')
             else if not last then Buffer.add_char buffer '\n')
           items
@@ -220,21 +259,27 @@ let render_tree style ~typed display =
   let items =
     match display with
     | Observe_display.Object []
+    | Observe_display.Record []
     | Observe_display.List []
     | Observe_display.Null | Observe_display.Bool _ | Observe_display.Number _
-    | Observe_display.String _ ->
+    | Observe_display.String _
+    | Observe_display.Variant { payload = None; _ } ->
         [ (None, display) ]
-    | Observe_display.Object fields ->
-        List.map (fun (name, value) -> (Some name, value)) fields
+    | Observe_display.Object fields | Observe_display.Record fields ->
+        List.map (fun (name, value) -> (Some (Field name), value)) fields
+    | Observe_display.Variant { name; polymorphic; payload = Some payload } ->
+        let name = if polymorphic then "`" ^ name else name in
+        [ (Some (Constructor name), payload) ]
     | Observe_display.List values -> (
         match scalar style display with
         | Some _ -> [ (None, display) ]
         | None ->
             List.mapi
-              (fun index value -> (Some (Printf.sprintf "[%d]" index), value))
+              (fun index value ->
+                (Some (Field (Printf.sprintf "[%d]" index)), value))
               values)
   in
-  render_items 0 "  " items;
+  render_items "  " items;
   Buffer.contents buffer
 
 let structured_header style log =
@@ -245,8 +290,8 @@ let structured_header style log =
   ^ " "
   ^ style_level style level ("[" ^ readable_text (Observe_log.service log) ^ "]")
 
-let readable_display style ~typed log display =
-  structured_header style log ^ "\n" ^ render_tree style ~typed display
+let readable_display style log display =
+  structured_header style log ^ "\n" ^ render_tree style display
 
 let readable style =
   create (fun log ->
@@ -263,12 +308,12 @@ let readable style =
               ^ " "
               ^ readable_text message)
         | Free value -> (
-            match Observe_display.of_value value with
-            | Ok display -> Ok (readable_display style ~typed:false log display)
+            match display_of_value value with
+            | Ok display -> Ok (readable_display style log display)
             | Error error -> Error (display_error error))
         | Structured (description, value) -> (
-            match Observe_display.of_repr description value with
-            | Ok display -> Ok (readable_display style ~typed:true log display)
+            match Observe_type.present description value with
+            | Ok display -> Ok (readable_display style log display)
             | Error error -> Error (display_error error))
       with Readable_error error -> Error error)
 
@@ -309,7 +354,7 @@ let text_json ~tag ~message =
 
 let repr_json description value =
   try
-    let encoded = Repr.to_json_string ~minify:true description value in
+    let encoded = Observe_type.to_json_string ~minify:true description value in
     if Observe_value.is_valid_utf8 encoded then Ok encoded
     else Error Invalid_utf8
   with Repr.Unsupported_operation _ | Failure _ -> Error Unsupported_value

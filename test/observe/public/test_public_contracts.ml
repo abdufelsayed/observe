@@ -83,6 +83,38 @@ let test_config_contract () =
     "explicit enabled" false
     (Observe.Config.enabled explicit);
   Alcotest.(check bool) "explicit pretty" false (Observe.Config.pretty explicit);
+  let development =
+    Observe.Config.create_exn ~service:"api" ~environment:"development" ()
+  in
+  Alcotest.(check bool)
+    "development is readable" true
+    (Observe.Config.pretty development);
+  let dev = Observe.Config.create_exn ~service:"api" ~environment:"dev" () in
+  Alcotest.(check bool) "dev is readable" true (Observe.Config.pretty dev);
+  let production =
+    Observe.Config.create_exn ~service:"api" ~environment:"production" ()
+  in
+  Alcotest.(check bool)
+    "production is JSON" false
+    (Observe.Config.pretty production);
+  let staging =
+    Observe.Config.create_exn ~service:"api" ~environment:"staging" ()
+  in
+  Alcotest.(check bool) "staging is JSON" false (Observe.Config.pretty staging);
+  let development_override =
+    Observe.Config.create_exn ~service:"api" ~environment:"development"
+      ~pretty:false ()
+  in
+  Alcotest.(check bool)
+    "development override" false
+    (Observe.Config.pretty development_override);
+  let production_override =
+    Observe.Config.create_exn ~service:"api" ~environment:"production"
+      ~pretty:true ()
+  in
+  Alcotest.(check bool)
+    "production override" true
+    (Observe.Config.pretty production_override);
   Alcotest.(check bool) "explicit silent" true (Observe.Config.silent explicit);
   check_config_error ~field:Observe.Config.Service ~problem:Observe.Config.Empty
     (Observe.Config.create ~service:"" ());
@@ -128,6 +160,15 @@ let test_value_contract () =
     "pp and to_string agree" rendered
     (Format.asprintf "%a" Observe.Value.pp value)
 
+let test_type_interoperability () =
+  Alcotest.(check string)
+    "Observe description exposes Repr" "42"
+    (Repr.to_json_string ~minify:true (Observe.Type.repr Observe.Type.int) 42);
+  let description = Observe.Type.of_repr Repr.string in
+  Alcotest.(check string)
+    "raw Repr description remains machine-compatible" "\"value\""
+    (Observe.Type.to_json_string ~minify:true description "value")
+
 let () =
   Alcotest.run "observe-public-contracts"
     [
@@ -143,6 +184,9 @@ let () =
             test_config_exception_and_printer;
         ] );
       ( "unit:observe:value",
-        [ Alcotest.test_case "public constructors" `Quick test_value_contract ]
-      );
+        [
+          Alcotest.test_case "public constructors" `Quick test_value_contract;
+          Alcotest.test_case "Repr interoperability" `Quick
+            test_type_interoperability;
+        ] );
     ]

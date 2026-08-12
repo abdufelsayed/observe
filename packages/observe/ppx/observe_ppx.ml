@@ -319,6 +319,439 @@ let inline_variant_expression (module Engine : Ppx_repr_lib.Engine.S) ~library
   in
   call ~loc (repr_path library "sealv") [ variant ]
 
+let for_ppx_call ~loc name arguments =
+  call ~loc ("Observe.Type.For_ppx." ^ name) arguments
+
+let rec expression_list ~loc = function
+  | [] -> pexp_construct ~loc (lident ~loc "[]") None
+  | head :: tail ->
+      pexp_construct ~loc (lident ~loc "::")
+        (Some (pexp_tuple ~loc [ head; expression_list ~loc tail ]))
+
+let option_expression ~loc = function
+  | None -> pexp_construct ~loc (lident ~loc "None") None
+  | Some value -> pexp_construct ~loc (lident ~loc "Some") (Some value)
+
+let internal_variant ~loc ~polymorphic name payload =
+  pexp_apply ~loc
+    (evar ~loc "Observe.Type.For_ppx.variant")
+    [
+      (Labelled "polymorphic", ebool ~loc polymorphic);
+      (Nolabel, estr ~loc name);
+      (Nolabel, option_expression ~loc payload);
+    ]
+
+let internal_record ~loc fields =
+  let fields =
+    List.map
+      (fun (name, value) -> pexp_tuple ~loc [ estr ~loc name; value ])
+      fields
+  in
+  for_ppx_call ~loc "record" [ expression_list ~loc fields ]
+
+let last_identifier = function
+  | Lident name | Ldot (_, name) -> Some name
+  | Lapply _ -> None
+
+let is_lazy_type = function
+  | Lident "lazy_t" | Ldot (Lident "Lazy", "t") -> true
+  | _ -> false
+
+let rec present_sequence (module Engine : Ppx_repr_lib.Engine.S) ~library
+    ~presenters ~loc description values =
+  let item = "__observe_item" in
+  let present =
+    presentation_of_core
+      (module Engine : Ppx_repr_lib.Engine.S)
+      ~library ~presenters description (evar ~loc item)
+  in
+  for_ppx_call ~loc "list_map"
+    [ pexp_fun ~loc Nolabel None (pvar ~loc item) present; values ]
+
+and presentation_of_core (module Engine : Ppx_repr_lib.Engine.S) ~library
+    ~presenters description value =
+  let loc = description.ptyp_loc in
+  match description.ptyp_desc with
+  | Ptyp_var name -> for_ppx_call ~loc "present" [ evar ~loc name; value ]
+  | Ptyp_constr ({ txt = Lident name; _ }, []) -> (
+      match List.assoc_opt name presenters with
+      | Some presenter -> call ~loc presenter [ value ]
+      | None ->
+          let description = Engine.expand_typ ?lib:library description in
+          for_ppx_call ~loc "present" [ description; value ])
+  | Ptyp_constr ({ txt; _ }, [ item ])
+    when Option.equal String.equal (last_identifier txt) (Some "list") ->
+      present_sequence
+        (module Engine : Ppx_repr_lib.Engine.S)
+        ~library ~presenters ~loc item value
+  | Ptyp_constr ({ txt; _ }, [ item ])
+    when Option.equal String.equal (last_identifier txt) (Some "array") ->
+      let values = call ~loc "Array.to_list" [ value ] in
+      present_sequence
+        (module Engine : Ppx_repr_lib.Engine.S)
+        ~library ~presenters ~loc item values
+  | Ptyp_constr ({ txt; _ }, [ item ])
+    when Option.equal String.equal (last_identifier txt) (Some "option") ->
+      let some = "__observe_some" in
+      pexp_match ~loc value
+        [
+          case
+            ~lhs:(ppat_construct ~loc (lident ~loc "None") None)
+            ~guard:None
+            ~rhs:(for_ppx_call ~loc "option" [ option_expression ~loc None ]);
+          case
+            ~lhs:
+              (ppat_construct ~loc (lident ~loc "Some") (Some (pvar ~loc some)))
+            ~guard:None
+            ~rhs:
+              (for_ppx_call ~loc "option"
+                 [
+                   option_expression ~loc
+                     (Some
+                        (presentation_of_core
+                           (module Engine : Ppx_repr_lib.Engine.S)
+                           ~library ~presenters item (evar ~loc some)));
+                 ]);
+        ]
+  | Ptyp_constr ({ txt; _ }, [ item ])
+    when Option.equal String.equal (last_identifier txt) (Some "ref") ->
+      presentation_of_core
+        (module Engine : Ppx_repr_lib.Engine.S)
+        ~library ~presenters item
+        (call ~loc "(!)" [ value ])
+  | Ptyp_constr ({ txt; _ }, [ item ]) when is_lazy_type txt ->
+      presentation_of_core
+        (module Engine : Ppx_repr_lib.Engine.S)
+        ~library ~presenters item
+        (call ~loc "Lazy.force" [ value ])
+  | Ptyp_tuple descriptions ->
+      let names =
+        List.mapi
+          (fun index _ -> Printf.sprintf "__observe_tuple_%d" index)
+          descriptions
+      in
+      let items =
+        List.map2
+          (fun description name ->
+            presentation_of_core
+              (module Engine : Ppx_repr_lib.Engine.S)
+              ~library ~presenters description (evar ~loc name))
+          descriptions names
+      in
+      pexp_match ~loc value
+        [
+          case
+            ~lhs:(ppat_tuple ~loc (List.map (pvar ~loc) names))
+            ~guard:None
+            ~rhs:(for_ppx_call ~loc "list" [ expression_list ~loc items ]);
+        ]
+  | Ptyp_variant (rows, Closed, _) ->
+      presentation_of_polyvariant
+        (module Engine : Ppx_repr_lib.Engine.S)
+        ~library ~presenters ~loc rows value
+  | _ ->
+      let description = Engine.expand_typ ?lib:library description in
+      for_ppx_call ~loc "present" [ description; value ]
+
+and presentation_of_polyvariant (module Engine : Ppx_repr_lib.Engine.S) ~library
+    ~presenters ~loc rows value =
+  let cases =
+    List.map
+      (fun row ->
+        match row.prf_desc with
+        | Rtag (label, _, []) ->
+            case
+              ~lhs:(ppat_variant ~loc:row.prf_loc label.txt None)
+              ~guard:None
+              ~rhs:
+                (internal_variant ~loc:row.prf_loc ~polymorphic:true label.txt
+                   None)
+        | Rtag (label, _, descriptions) ->
+            let names =
+              List.mapi
+                (fun index _ -> Printf.sprintf "__observe_poly_%d" index)
+                descriptions
+            in
+            let pattern =
+              match names with
+              | [ name ] -> pvar ~loc:row.prf_loc name
+              | names ->
+                  ppat_tuple ~loc:row.prf_loc
+                    (List.map (pvar ~loc:row.prf_loc) names)
+            in
+            let payload_type =
+              match descriptions with
+              | [ description ] -> description
+              | descriptions -> ptyp_tuple ~loc:row.prf_loc descriptions
+            in
+            let payload_value =
+              match names with
+              | [ name ] -> evar ~loc:row.prf_loc name
+              | names ->
+                  pexp_tuple ~loc:row.prf_loc
+                    (List.map (evar ~loc:row.prf_loc) names)
+            in
+            let payload =
+              presentation_of_core
+                (module Engine)
+                ~library ~presenters payload_type payload_value
+            in
+            case
+              ~lhs:(ppat_variant ~loc:row.prf_loc label.txt (Some pattern))
+              ~guard:None
+              ~rhs:
+                (internal_variant ~loc:row.prf_loc ~polymorphic:true label.txt
+                   (Some payload))
+        | Rinherit _ ->
+            inline_error ~loc:row.prf_loc
+              "inherited polymorphic-variant rows are not supported")
+      rows
+  in
+  pexp_match ~loc value cases
+
+let presentation_of_fields (module Engine : Ppx_repr_lib.Engine.S) ~library
+    ~presenters fields value =
+  let loc = value.pexp_loc in
+  let fields =
+    List.map
+      (fun field ->
+        let field_loc = field.pld_loc in
+        let field_value =
+          pexp_field ~loc:field_loc value
+            (Located.mk ~loc:field_loc (Lident field.pld_name.txt))
+        in
+        ( field.pld_name.txt,
+          presentation_of_core
+            (module Engine)
+            ~library ~presenters field.pld_type field_value ))
+      fields
+  in
+  internal_record ~loc fields
+
+let presentation_of_variant (module Engine : Ppx_repr_lib.Engine.S) ~library
+    ~presenters declaration constructors value =
+  let cases =
+    List.mapi
+      (fun index constructor ->
+        let loc = constructor.pcd_loc in
+        let name = constructor.pcd_name.txt in
+        match constructor.pcd_args with
+        | Pcstr_tuple [] ->
+            case
+              ~lhs:(constructor_pattern ~loc constructor None)
+              ~guard:None
+              ~rhs:(internal_variant ~loc ~polymorphic:false name None)
+        | Pcstr_tuple descriptions ->
+            let names =
+              List.mapi
+                (fun field_index _ ->
+                  Printf.sprintf "__observe_payload_%d_%d" index field_index)
+                descriptions
+            in
+            let pattern = tuple_pattern ~loc (List.map (pvar ~loc) names) in
+            let payload_type =
+              match descriptions with
+              | [ description ] -> description
+              | descriptions -> ptyp_tuple ~loc descriptions
+            in
+            let payload_value =
+              tuple_expression ~loc (List.map (evar ~loc) names)
+            in
+            let payload =
+              presentation_of_core
+                (module Engine)
+                ~library ~presenters payload_type payload_value
+            in
+            case
+              ~lhs:(constructor_pattern ~loc constructor (Some pattern))
+              ~guard:None
+              ~rhs:
+                (internal_variant ~loc ~polymorphic:false name (Some payload))
+        | Pcstr_record fields ->
+            let binders = field_binders fields in
+            let pattern = inline_record_pattern ~loc fields binders in
+            let fields =
+              List.map2
+                (fun field (_, value_name, _) ->
+                  ( field.pld_name.txt,
+                    presentation_of_core
+                      (module Engine)
+                      ~library ~presenters field.pld_type
+                      (evar ~loc:field.pld_loc value_name) ))
+                fields binders
+            in
+            let payload = internal_record ~loc fields in
+            case
+              ~lhs:(constructor_pattern ~loc constructor (Some pattern))
+              ~guard:None
+              ~rhs:
+                (internal_variant ~loc ~polymorphic:false name (Some payload)))
+      constructors
+  in
+  pexp_match ~loc:declaration.ptype_loc value cases
+
+let presentation_of_declaration (module Engine : Ppx_repr_lib.Engine.S) ~library
+    ~presenters declaration value =
+  match declaration.ptype_kind with
+  | Ptype_record fields ->
+      presentation_of_fields (module Engine) ~library ~presenters fields value
+  | Ptype_variant constructors ->
+      presentation_of_variant
+        (module Engine)
+        ~library ~presenters declaration constructors value
+  | Ptype_abstract -> (
+      match declaration.ptype_manifest with
+      | Some description ->
+          presentation_of_core
+            (module Engine)
+            ~library ~presenters description value
+      | None ->
+          inline_error ~loc:declaration.ptype_loc
+            "abstract types need a manifest")
+  | Ptype_open ->
+      inline_error ~loc:declaration.ptype_loc "open types are not supported"
+
+let with_presentation (module Engine : Ppx_repr_lib.Engine.S) ~library
+    ~recursive declaration description =
+  let loc = declaration.ptype_loc in
+  let presenter = "__observe_present_" ^ declaration.ptype_name.txt in
+  let presenters =
+    if recursive then [ (declaration.ptype_name.txt, presenter) ] else []
+  in
+  let value = "__observe_value" in
+  let body =
+    presentation_of_declaration
+      (module Engine)
+      ~library ~presenters declaration (evar ~loc value)
+  in
+  let presenter_binding =
+    value_binding ~loc ~pat:(pvar ~loc presenter)
+      ~expr:(pexp_fun ~loc Nolabel None (pvar ~loc value) body)
+  in
+  let presenter_expression =
+    pexp_let ~loc
+      (if recursive && is_self_recursive declaration then Recursive
+       else Nonrecursive)
+      [ presenter_binding ] (evar ~loc presenter)
+  in
+  for_ppx_call ~loc "with_present" [ description; presenter_expression ]
+
+let rec wrap_descriptor_parameters count wrap expression =
+  if count = 0 then wrap expression
+  else
+    match expression.pexp_desc with
+    | Pexp_fun (label, default, pattern, body) ->
+        {
+          expression with
+          pexp_desc =
+            Pexp_fun
+              ( label,
+                default,
+                pattern,
+                wrap_descriptor_parameters (count - 1) wrap body );
+        }
+    | _ ->
+        inline_error ~loc:expression.pexp_loc
+          "unexpected parameterized descriptor expansion"
+
+let add_presentation (module Engine : Ppx_repr_lib.Engine.S) ~library ~recursive
+    declaration items =
+  match items with
+  | ({ pstr_desc = Pstr_value (flag, [ binding ]); _ } as representation)
+    :: rest ->
+      let parameter_count = List.length declaration.ptype_params in
+      let expression =
+        wrap_descriptor_parameters parameter_count
+          (with_presentation (module Engine) ~library ~recursive declaration)
+          binding.pvb_expr
+      in
+      let binding = { binding with pvb_expr = expression } in
+      { representation with pstr_desc = Pstr_value (flag, [ binding ]) } :: rest
+  | _ ->
+      inline_error ~loc:declaration.ptype_loc
+        "unexpected descriptor expansion shape"
+
+let add_group_presentation (module Engine : Ppx_repr_lib.Engine.S) ~library
+    ~recursive declarations items =
+  match items with
+  | ({ pstr_desc = Pstr_value (flag, [ binding ]); _ } as representation)
+    :: rest ->
+      let loc = binding.pvb_loc in
+      let presenter_name declaration =
+        "__observe_present_" ^ declaration.ptype_name.txt
+      in
+      let machine_names =
+        List.map
+          (fun declaration -> "__observe_machine_" ^ declaration.ptype_name.txt)
+          declarations
+      in
+      let machine_binding =
+        value_binding ~loc
+          ~pat:(tuple_pattern ~loc (List.map (pvar ~loc) machine_names))
+          ~expr:binding.pvb_expr
+      in
+      let wrapped =
+        if recursive then
+          let presenters =
+            List.map
+              (fun declaration ->
+                (declaration.ptype_name.txt, presenter_name declaration))
+              declarations
+          in
+          let presenter_bindings =
+            List.map
+              (fun declaration ->
+                let presenter = presenter_name declaration in
+                let value = "__observe_value" in
+                let body =
+                  presentation_of_declaration
+                    (module Engine)
+                    ~library ~presenters declaration (evar ~loc value)
+                in
+                value_binding ~loc ~pat:(pvar ~loc presenter)
+                  ~expr:(pexp_fun ~loc Nolabel None (pvar ~loc value) body))
+              declarations
+          in
+          let values =
+            List.map2
+              (fun declaration machine ->
+                for_ppx_call ~loc "with_present"
+                  [ evar ~loc machine; evar ~loc (presenter_name declaration) ])
+              declarations machine_names
+            |> tuple_expression ~loc
+          in
+          pexp_let ~loc Recursive presenter_bindings values
+        else
+          List.map2
+            (fun declaration machine ->
+              let parameters =
+                List.mapi
+                  (fun index (parameter, _) ->
+                    match parameter.ptyp_desc with
+                    | Ptyp_var name -> name
+                    | Ptyp_any -> Printf.sprintf "__observe_parameter_%d" index
+                    | _ -> assert false)
+                  declaration.ptype_params
+              in
+              let machine =
+                apply ~loc (evar ~loc machine) (List.map (evar ~loc) parameters)
+              in
+              let description =
+                with_presentation
+                  (module Engine)
+                  ~library ~recursive:false declaration machine
+              in
+              lambda ~loc (List.map (pvar ~loc) parameters) description)
+            declarations machine_names
+          |> tuple_expression ~loc
+      in
+      let expression = pexp_let ~loc Nonrecursive [ machine_binding ] wrapped in
+      let binding = { binding with pvb_expr = expression } in
+      { representation with pstr_desc = Pstr_value (flag, [ binding ]) } :: rest
+  | _ ->
+      inline_error ~loc:(List.hd declarations).ptype_loc
+        "unexpected descriptor group expansion shape"
+
 let derive_inline_structure (module Engine : Ppx_repr_lib.Engine.S) ~plugins
     ~name ~library (rec_flag, declarations) =
   match (rec_flag, declarations) with
@@ -345,6 +778,11 @@ let derive_inline_structure (module Engine : Ppx_repr_lib.Engine.S) ~plugins
         inline_variant_expression
           (module Engine)
           ~library declaration constructors
+      in
+      let body =
+        with_presentation
+          (module Engine)
+          ~library ~recursive:(rec_flag = Recursive) declaration body
       in
       let binding =
         value_binding ~loc:declaration.ptype_loc
@@ -377,7 +815,23 @@ let register_repr_deriver () =
         let library = Option.fold lib ~none:library ~some:Engine.parse_lib in
         if List.exists has_inline_record (snd input) then
           derive_inline_structure (module Engine) ~plugins ~name ~library input
-        else Engine.derive_str ~plugins ~name ~lib:library input )
+        else
+          match snd input with
+          | [ declaration ] ->
+              Engine.derive_str ~plugins ~name ~lib:library input
+              |> add_presentation
+                   (module Engine)
+                   ~library
+                   ~recursive:(fst input = Recursive)
+                   declaration
+          | _ :: _ as declarations ->
+              Engine.derive_str ~plugins ~name ~lib:library input
+              |> add_group_presentation
+                   (module Engine)
+                   ~library
+                   ~recursive:(fst input = Recursive)
+                   declarations
+          | [] -> assert false )
   in
   let signature =
     Ppx_repr_lib.Meta_deriving.make_generator ~supported_plugins

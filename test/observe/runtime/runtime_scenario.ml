@@ -186,7 +186,7 @@ let formatting_failed () =
     ((fun _ _ -> raise Exit), fun _ -> Error (`Msg "unused decoder"))
   in
   let raising_description =
-    Observe.Type.like ~json:raising_json Observe.Type.int
+    Observe.Type.of_repr (Repr.like ~json:raising_json Repr.int)
   in
   Observe.Logs.info (Observe.Logs.structured raising_description 1);
   Alcotest.(check int) "raised output not delivered" 0 !terminal;

@@ -1,6 +1,6 @@
 # Observe PPX
 
-`observe.ppx` provides the `[@@deriving observe]` Repr-description deriver and
+`observe.ppx` provides the `[@@deriving observe]` type-description deriver and
 the namespaced `[%observe.value ...]` free-form value extension. Generated code
 uses the public `Observe.Type` and `Observe.Value` paths; application runtime
 code does not link the PPX implementation.
@@ -17,7 +17,7 @@ Enable it in Dune:
 
 ## Typed descriptions
 
-The deriver emits a Repr description named after the declared type:
+The deriver emits an Observe description named after the declared type:
 
 ```ocaml
 type event = User_login of { user_id : int; method_ : string }
@@ -31,9 +31,15 @@ let () =
        (User_login { user_id = 42; method_ = "oauth" }))
 ```
 
+The description pairs Repr's machine representation with presentation metadata
+generated from the OCaml type. JSON and binary operations still use Repr, while
+readable output can distinguish strings, ordinary constructors, and
+polymorphic constructors. `Observe.Type.repr` exposes the Repr description
+when another library needs it.
+
 The deriver targets `Observe.Type` as its default description library. It uses
-the Repr PPX engine for ordinary declarations and package-owned lowering for
-inline-record variant constructors.
+the Repr PPX engine for machine descriptions and package-owned generation for
+presentation metadata and inline-record variant constructors.
 
 Inline-record lowering currently supports a single, non-parameterized,
 non-recursive ordinary variant declaration. Recursive or mutually recursive

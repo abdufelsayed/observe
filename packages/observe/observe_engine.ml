@@ -2,7 +2,7 @@ type message =
   | Text of { tag : string; message : string }
   | Lazy_text of { tag : string; message : unit -> string }
   | Free of (unit -> Observe_value.t)
-  | Structured : 'a Repr.t * 'a -> message
+  | Structured : 'a Observe_type.t * 'a -> message
 
 let text ~tag message = Text { tag; message }
 let text_lazy ~tag message = Lazy_text { tag; message }

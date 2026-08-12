@@ -4,8 +4,176 @@
     dynamic context; platform adapters provide the clock and terminal output.
     Ordinary application code logs through {!Logs}. *)
 
-module Type = Repr
-(** Runtime descriptions used by typed structured logs. *)
+(** Runtime descriptions used by typed structured logs. Each description keeps
+    Repr's machine representation together with Observe's presentation
+    semantics. {!Type.repr} is the explicit interoperability escape hatch. *)
+module Type : sig
+  type 'a t
+
+  val repr : 'a t -> 'a Repr.t
+  (** Recover the underlying Repr description for machine operations and
+      interoperability. *)
+
+  val of_repr : 'a Repr.t -> 'a t
+  (** Lift a raw Repr description. Readable formatting then uses Repr's JSON
+      projection and cannot recover distinctions erased by that encoding.
+      Descriptions produced by [@@deriving observe] retain those distinctions.
+  *)
+
+  type len = Repr.len
+
+  val unit : unit t
+  val bool : bool t
+  val char : char t
+  val int : int t
+  val int32 : int32 t
+  val int63 : Optint.Int63.t t
+  val int64 : int64 t
+  val float : float t
+  val string : string t
+  val bytes : bytes t
+  val string_of : len -> string t
+  val bytes_of : len -> bytes t
+  val boxed : 'a t -> 'a t
+  val list : ?len:len -> 'a t -> 'a list t
+  val array : ?len:len -> 'a t -> 'a array t
+  val option : 'a t -> 'a option t
+  val pair : 'a t -> 'b t -> ('a * 'b) t
+  val triple : 'a t -> 'b t -> 'c t -> ('a * 'b * 'c) t
+  val quad : 'a t -> 'b t -> 'c t -> 'd t -> ('a * 'b * 'c * 'd) t
+  val result : 'a t -> 'b t -> ('a, 'b) result t
+  val seq : 'a t -> 'a Seq.t t
+  val ref : 'a t -> 'a ref t
+  val lazy_t : 'a t -> 'a Lazy.t t
+  val queue : 'a t -> 'a Queue.t t
+  val stack : 'a t -> 'a Stack.t t
+  val hashtbl : 'key t -> 'value t -> ('key, 'value) Hashtbl.t t
+
+  type empty = Repr.empty = |
+
+  val empty : empty t
+
+  type ('a, 'b, 'c) open_record
+  type ('a, 'b) field
+
+  val record : string -> 'b -> ('a, 'b, 'b) open_record
+  val field : string -> 'a t -> ('b -> 'a) -> ('b, 'a) field
+
+  val ( |+ ) :
+    ('a, 'b, 'c -> 'd) open_record -> ('a, 'c) field -> ('a, 'b, 'd) open_record
+
+  val sealr : ('a, 'b, 'a) open_record -> 'a t
+
+  type ('a, 'b, 'c) open_variant
+  type ('a, 'b) case
+  type 'a case_p
+
+  val variant : string -> 'b -> ('a, 'b, 'b) open_variant
+  val case0 : string -> 'a -> ('a, 'a case_p) case
+  val case1 : string -> 'b t -> ('b -> 'a) -> ('a, 'b -> 'a case_p) case
+
+  val ( |~ ) :
+    ('a, 'b, 'c -> 'd) open_variant ->
+    ('a, 'c) case ->
+    ('a, 'b, 'd) open_variant
+
+  val sealv : ('a, 'b, 'a -> 'a case_p) open_variant -> 'a t
+  val enum : string -> (string * 'a) list -> 'a t
+  val mu : ('a t -> 'a t) -> 'a t
+  val mu2 : ('a t -> 'b t -> 'a t * 'b t) -> 'a t * 'b t
+
+  type +'a staged = 'a Repr.staged
+  type 'a equal = 'a Repr.equal
+  type 'a compare = 'a Repr.compare
+  type 'a pp = 'a Repr.pp
+  type 'a of_string = 'a Repr.of_string
+  type 'a encode_json = 'a Repr.encode_json
+  type 'a decode_json = 'a Repr.decode_json
+  type 'a encode_bin = 'a Repr.encode_bin
+  type 'a decode_bin = 'a Repr.decode_bin
+  type -'a size_of = 'a Repr.size_of
+  type 'a impl = 'a Repr.impl = Structural | Custom of 'a | Undefined
+
+  val stage : 'a -> 'a staged
+  val unstage : 'a staged -> 'a
+  val equal : 'a t -> 'a equal staged
+  val compare : 'a t -> 'a compare staged
+  val pp : 'a t -> 'a pp
+  val pp_dump : 'a t -> 'a pp
+  val to_string : 'a t -> 'a -> string
+  val of_string : 'a t -> 'a of_string
+  val encode_json : 'a t -> Jsonm.encoder -> 'a -> unit
+  val decode_json : 'a t -> Jsonm.decoder -> ('a, [ `Msg of string ]) result
+
+  val decode_json_lexemes :
+    'a t -> Jsonm.lexeme list -> ('a, [ `Msg of string ]) result
+
+  val to_json_string : ?minify:bool -> 'a t -> 'a -> string
+  val of_json_string : 'a t -> string -> ('a, [ `Msg of string ]) result
+  val encode_bin : 'a t -> 'a encode_bin staged
+  val decode_bin : 'a t -> 'a decode_bin staged
+  val to_bin_string : 'a t -> ('a -> string) staged
+  val of_bin_string : 'a t -> (string -> ('a, [ `Msg of string ]) result) staged
+  val size_of : 'a t -> ('a -> int option) staged
+
+  val like :
+    ?pp:'a pp ->
+    ?of_string:'a of_string ->
+    ?json:'a encode_json * 'a decode_json ->
+    ?bin:'a encode_bin * 'a decode_bin * 'a size_of ->
+    ?unboxed_bin:'a encode_bin * 'a decode_bin * 'a size_of ->
+    ?equal:'a equal ->
+    ?compare:'a compare ->
+    ?short_hash:(?seed:int -> 'a -> int) ->
+    ?pre_hash:'a encode_bin ->
+    'a t ->
+    'a t
+
+  val partially_abstract :
+    pp:'a pp impl ->
+    of_string:'a of_string impl ->
+    json:('a encode_json * 'a decode_json) impl ->
+    bin:('a encode_bin * 'a decode_bin * 'a size_of) impl ->
+    unboxed_bin:('a encode_bin * 'a decode_bin * 'a size_of) impl ->
+    equal:'a equal impl ->
+    compare:'a compare impl ->
+    short_hash:(?seed:int -> 'a -> int) impl ->
+    pre_hash:'a encode_bin impl ->
+    'a t ->
+    'a t
+
+  val map :
+    ?pp:'a pp ->
+    ?of_string:'a of_string ->
+    ?json:'a encode_json * 'a decode_json ->
+    ?bin:'a encode_bin * 'a decode_bin * 'a size_of ->
+    ?unboxed_bin:'a encode_bin * 'a decode_bin * 'a size_of ->
+    ?equal:'a equal ->
+    ?compare:'a compare ->
+    ?short_hash:(?seed:int -> 'a -> int) ->
+    ?pre_hash:'a encode_bin ->
+    'b t ->
+    ('b -> 'a) ->
+    ('a -> 'b) ->
+    'a t
+
+  module For_ppx : sig
+    type view
+    (** Runtime support for code generated by [observe.ppx]. Application code
+        should use the ordinary description combinators above. *)
+
+    type error
+    type result = (view, error) Stdlib.result
+
+    val with_present : 'a t -> ('a -> result) -> 'a t
+    val present : 'a t -> 'a -> result
+    val record : (string * result) list -> result
+    val list : result list -> result
+    val list_map : ('a -> result) -> 'a list -> result
+    val option : result option -> result
+    val variant : polymorphic:bool -> string -> result option -> result
+  end
+end
 
 module Level : sig
   type t =
@@ -169,6 +337,10 @@ module Config : sig
     ?drains:Drain.t list ->
     unit ->
     (t, error) result
+  (** Construct validated logging behavior. If [pretty] is absent, readable
+      output is selected when [environment] is absent, [dev], or [development];
+      other environments select JSON. An explicit [pretty] value overrides this
+      selection. *)
 
   val create_exn :
     service:string ->

@@ -25,7 +25,14 @@ let validate_optional field = function
   | None -> Ok ()
   | Some value -> validate field value
 
-let create ~service ?environment ?version ?(enabled = true) ?(pretty = true)
+let default_pretty = function
+  | None -> true
+  | Some environment -> (
+      match String.lowercase_ascii environment with
+      | "dev" | "development" -> true
+      | _ -> false)
+
+let create ~service ?environment ?version ?(enabled = true) ?pretty
     ?(silent = false) ?(min_level = Observe_level.Info) ?(drains = []) () =
   match validate Service service with
   | Error _ as error -> error
@@ -36,6 +43,9 @@ let create ~service ?environment ?version ?(enabled = true) ?(pretty = true)
           match validate_optional Version version with
           | Error _ as error -> error
           | Ok () ->
+              let pretty =
+                Option.value pretty ~default:(default_pretty environment)
+              in
               Ok
                 {
                   service;

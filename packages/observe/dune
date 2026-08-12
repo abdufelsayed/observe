@@ -14,6 +14,8 @@
   observe_log
   observe_logs
   observe_runtime
+  observe_type
+  observe_utf8
   observe_value)
  (libraries
   (re_export repr)

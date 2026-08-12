@@ -1,4 +1,4 @@
-module Type = Repr
+module Type = Observe_type
 module Level = Observe_level
 module Instant = Observe_instant
 module Value = Observe_value
