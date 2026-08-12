@@ -12,7 +12,7 @@ val free : (unit -> Observe_value.t) -> message
 val structured : 'a Observe_type.t -> 'a -> message
 
 type clock_error = Unavailable
-type terminal_acceptance = Accepted | Rejected
+type console_acceptance = Accepted | Rejected
 type 'a contained = Returned of 'a | Raised
 
 val contain : is_control_exception:(exn -> bool) -> (unit -> 'a) -> 'a contained
@@ -24,9 +24,9 @@ type t
 
 val create_production :
   Observe_config.t ->
-  terminal_style:Observe_formatter.style ->
+  console_style:Observe_formatter.style ->
   clock:(unit -> (Observe_instant.t, clock_error) result) ->
-  terminal:(string -> terminal_acceptance) ->
+  console:(string -> console_acceptance) ->
   is_control_exception:(exn -> bool) ->
   t
 

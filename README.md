@@ -14,10 +14,10 @@ top of this foundation but are not part of the current public API.
 
 - Process-wide tagged text and structured logging.
 - Deferred messages and values that run only after admission.
-- Typed structured values with Repr machine behavior and type-aware terminal
+- Typed structured values with Repr machine behavior and type-aware readable
   presentation.
 - A concise PPX for free-form values and Observe type descriptions.
-- Readable terminal output with automatic truecolor, 256-color, 16-color, and
+- Readable console output with automatic truecolor, 256-color, 16-color, and
   plain fallback.
 - Pure readable, JSON, and JSON Lines formatters.
 - Additional application-owned drains and finite diagnostics.
@@ -38,7 +38,7 @@ An Lwt-Unix executable links the ready composition:
 ```lisp
 (executable
  (name main)
- (libraries observe observe.lwt-unix lwt.unix)
+ (libraries observe observe-lwt-unix lwt.unix)
  (preprocess
   (pps observe.ppx)))
 ```
@@ -69,7 +69,7 @@ scheduler, and returns no logger handle. Application code emits through the
 same process-wide `Observe.Logs` module.
 
 When `pretty` is not set, an absent, `dev`, or `development` environment uses
-readable terminal output. Other environments, including `production`, use
+readable console output. Other environments, including `production`, use
 JSON. Set `~pretty:false` or `~pretty:true` to override the environment default.
 
 ## Logging
@@ -107,7 +107,7 @@ Observe.Logs.info
      (User_login { user_id = 42; method_ = "oauth" }))
 ```
 
-## Terminal Output
+## Console Output
 
 The ready Unix composition produces compact text and ordered structured trees:
 
@@ -123,8 +123,8 @@ The ready Unix composition produces compact text and ordered structured trees:
 ```
 
 The Unix adapter passively detects terminal color capability. Redirected
-output, `NO_COLOR`, `TERM=dumb`, and failed probes select plain output. Observe
-does not query or consume terminal input.
+output, `NO_COLOR`, an absent or empty `TERM`, `TERM=dumb`, and failed probes
+select plain output. Observe does not query or consume terminal input.
 
 Derived descriptions preserve distinctions that JSON cannot: strings remain
 quoted, ordinary constructors render as `Granted`, and polymorphic constructors
@@ -147,18 +147,18 @@ It uses nested records, lists, options, ordinary variants, polymorphic variants,
 and constructor payloads. The same executable is exercised by
 `opam exec -- dune build @examples`.
 
-## Libraries
+## Packages
 
-Observe is currently distributed as one opam package with independently
-composable Dune libraries:
+Observe is distributed as a small package family with explicit portable,
+runtime, platform, and ready-composition boundaries:
 
-| Library | Purpose |
+| Package or library | Purpose |
 | --- | --- |
 | `observe` | Portable logging core, public authoring API, formatters, drains, diagnostics, capture, and runtime/platform contracts. |
-| `observe.ppx` | `[@@deriving observe]`, `[%observe.value ...]`, and embedded typed values. |
-| `observe.lwt` | Lwt callback-local runtime mechanism. |
-| `observe.unix` | Unix clock and standard-error platform mechanism. |
-| `observe.lwt-unix` | Ready composition and Lwt-scoped test capture. |
+| `observe.ppx` | Core-package sublibrary for `[@@deriving observe]`, `[%observe.value ...]`, and embedded typed values. |
+| `observe-lwt` | Lwt callback-local runtime mechanism. |
+| `observe-unix` | Unix clock and standard-error platform mechanism. |
+| `observe-lwt-unix` | Ready composition and Lwt-scoped test capture. |
 
 The core does not depend on Lwt or Unix. `Observe.Runtime.Make` composes any
 compatible runtime and platform; `Observe_lwt_unix` is the ready path for
@@ -166,7 +166,8 @@ ordinary Lwt applications.
 
 ## Drains And Capture
 
-The platform terminal is the automatic formatted output. Configured
+The platform console is the automatic formatted output. On Unix it writes to
+standard error, which may be a terminal, file, or pipe. Configured
 `Observe.Drain.t` values are additional outputs that receive completed
 `Observe.Log.t` values and may apply `Observe.Formatter.readable`, `.json`,
 `.json_lines`, or a custom pure formatter.

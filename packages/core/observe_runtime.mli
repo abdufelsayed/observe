@@ -2,14 +2,14 @@
 
 module Platform : sig
   type clock_error = Unavailable
-  type terminal_acceptance = Accepted | Rejected
+  type console_acceptance = Accepted | Rejected
 
   module type S = sig
     type t
 
-    val terminal_style : t -> Observe_formatter.style
+    val console_style : t -> Observe_formatter.style
     val now : t -> (Observe_instant.t, clock_error) result
-    val write_terminal : t -> string -> terminal_acceptance
+    val write_console : t -> string -> console_acceptance
   end
 end
 

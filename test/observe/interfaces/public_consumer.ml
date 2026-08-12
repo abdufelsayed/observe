@@ -20,9 +20,9 @@ end
 module Platform = struct
   type t = unit
 
-  let terminal_style () = Observe.Formatter.Plain
+  let console_style () = Observe.Formatter.Plain
   let now () = Ok (Observe.Instant.of_epoch_nanoseconds 0L)
-  let write_terminal () _ = Observe.Platform.Accepted
+  let write_console () _ = Observe.Platform.Accepted
 end
 
 module System = Observe.Runtime.Make (Runtime) (Platform)

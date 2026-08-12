@@ -67,7 +67,7 @@ let process_diagnostic_count kind =
     0
     (Observe.Diagnostics.snapshot ())
 
-let terminal () =
+let console () =
   let (), output =
     capture_stderr (fun () ->
         Observe_lwt_unix.init_exn (config ~environment:"development" "ready");
@@ -78,15 +78,15 @@ let terminal () =
     "unexpected readable output: %S" output;
   check
     (not (contains output "\027["))
-    "redirected terminal output contained ANSI styling: %S" output;
+    "redirected console output contained ANSI styling: %S" output;
   check
     (String.fold_left
        (fun count character -> if character = '\n' then count + 1 else count)
        0 output
     = 1)
-    "expected one terminal record: %S" output
+    "expected one console record: %S" output
 
-let json_terminal () =
+let json_console () =
   let (), output =
     capture_stderr (fun () ->
         Observe_lwt_unix.init_exn
@@ -98,7 +98,7 @@ let json_terminal () =
     "service missing from JSON";
   check (contains output "\"level\":\"info\"") "level missing from JSON"
 
-let production_json_terminal () =
+let production_json_console () =
   let (), output =
     capture_stderr (fun () ->
         Observe_lwt_unix.init_exn
@@ -301,9 +301,9 @@ let invalid_capacity () =
 
 let scenarios =
   [
-    ("terminal", terminal);
-    ("json-terminal", json_terminal);
-    ("production-json-terminal", production_json_terminal);
+    ("console", console);
+    ("json-console", json_console);
+    ("production-json-console", production_json_console);
     ("repeated-init", repeated_init);
     ("silent-drain", silent_drain);
     ("no-output", no_output);

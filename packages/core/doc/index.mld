@@ -1,46 +1,21 @@
 {0 Observe}
 
-Observe is structured logging for OCaml with a portable core and a ready
-Lwt-Unix composition. The core owns admission, formatting, diagnostics,
-additional drains, and deterministic capture without performing I/O.
+Observe is a portable structured logging core for OCaml. It owns admission,
+formatting, diagnostics, additional drains, and deterministic capture without
+performing I/O.
 
 The current package provides tagged text, deferred text, free-form values,
 typed values with Repr machine behavior and type-aware presentation, level
-filtering, automatic terminal formatting,
+filtering, automatic console formatting,
 drains, diagnostics, and finite capture. It does not currently provide
 wide-event or metric APIs.
 
 {1 Installation}
 
-Lwt-Unix applications link [(libraries observe observe.lwt-unix lwt.unix)].
-Custom integrations can link the portable core with [(libraries observe)]. Add
+Link the portable core with [(libraries observe)]. Add
 [(preprocess (pps observe.ppx))] when using the deriver or free-form extension.
-
-{1 Ready Lwt-Unix initialization}
-
-{[
-let config =
-  Observe.Config.create_exn ~service:"orders" ~environment:"development" ()
-let () = Observe_lwt_unix.init_exn config
-
-let () =
-  Observe.Logs.info
-    (Observe.Logs.text ~tag:"startup" "service ready")
-]}
-
-The ready initializer is synchronous. It installs Lwt callback-local context,
-the OS wall clock, and automatic formatted output on standard error. It starts
-no scheduler and returns no logging handle. See {!module:Observe_lwt_unix}.
-
-Readable output uses UTC [HH:mm:ss.SSS] timestamps. Tagged text stays on one
-compact line. Free-form and typed structures render as ordered trees. The Unix
-platform automatically selects truecolor, 256-color, or 16-color rendering of
-one semantic palette for a compatible interactive standard-error terminal;
-redirected output and [NO_COLOR] remain plain.
-
-If [pretty] is absent, an absent, [dev], or [development] environment selects
-readable output. Other environments select JSON. An explicit [pretty] value
-overrides this default.
+Runtime, platform, and ready compositions are distributed in the
+[observe-lwt], [observe-unix], and [observe-lwt-unix] packages.
 
 {1 Authoring}
 
@@ -69,24 +44,21 @@ than raising an initialization exception.
 
 {!val:Observe.Config.create} returns a validated result;
 {!val:Observe.Config.create_exn} raises
-{!exception:Observe.Config.Invalid_configuration}. The platform terminal is the
+{!exception:Observe.Config.Invalid_configuration}. The platform console is the
 automatic formatted output. {!module:Observe.Drain} values are additional
 application-owned outputs that receive completed {!type:Observe.Log.t} values.
-Silent configuration suppresses the terminal, not drains.
+Silent configuration suppresses the console, not drains.
 
 {1 Runtime composition and capture}
 
 {!module-type:Observe.Runtime.S} owns dynamic binding, cleanup, and native
-cancellation. {!module-type:Observe.Platform.S} owns the wall clock, terminal
-style capability, and terminal write. {!module:Observe.Runtime.Make} composes
+cancellation. {!module-type:Observe.Platform.S} owns the wall clock, console
+presentation capability, and console write. {!module:Observe.Runtime.Make} composes
 them without adding a runtime or platform dependency to the core.
 
 {!val:Observe.Runtime.Make.with_capture} installs capture as the innermost
 dynamic route, suppresses production delivery for the callback, restores the
 previous binding, and closes the capture exactly once.
-
-For Lwt tests, {!val:Observe_lwt_unix.Test.with_capture} provides the same
-bracket through real Lwt callback-local state and preserves [Lwt.Canceled].
 
 {1 Safety boundary}
 
@@ -103,7 +75,6 @@ nullary constructors and ordinary versus polymorphic constructors. Machine
 operations remain Repr operations; {!val:Observe.Type.repr} and
 {!val:Observe.Type.of_repr} form the explicit interoperability boundary.
 
-Automatic Unix terminal writes are synchronous and target standard error. A
-slow destination can delay the caller. Observe owns no background writer,
-flush lifecycle, or durability guarantee. See the repository README for the
-complete ready, test-capture, and custom-integration examples.
+Observe owns no background writer, flush lifecycle, or durability guarantee.
+See the repository README for ready, test-capture, and custom-integration
+examples.

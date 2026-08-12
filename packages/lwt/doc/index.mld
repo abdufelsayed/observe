@@ -1,0 +1,9 @@
+{0 Observe Lwt}
+
+[observe-lwt] supplies the Lwt implementation of [Observe.Runtime.S].
+It provides callback-local dynamic bindings, cleanup, and native
+[Lwt.Canceled] handling without selecting a platform or performing I/O.
+
+Use {!module:Observe_lwt.Runtime} with [Observe.Runtime.Make] when an
+application needs a custom Lwt composition. Most Lwt applications on Unix can
+use the ready [observe-lwt-unix] package instead.

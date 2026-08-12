@@ -1,2 +1,0 @@
-let _ = Observe.Config.create_exn ~service:"consumer" ~terminal:() ()
-

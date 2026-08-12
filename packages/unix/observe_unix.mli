@@ -9,9 +9,9 @@ module Platform : Observe.Platform.S with type t = unit
 
     The best supported truecolor, 256-color, or 16-color presentation is
     selected from passive terminal signals when standard error is a TTY.
-    [NO_COLOR], [TERM=dumb], redirected output, and probe failure select plain
-    output. Detection never queries terminal input.
+    [NO_COLOR], an absent or empty [TERM], [TERM=dumb], redirected output, and
+    probe failure select plain output. Detection never queries terminal input.
 
-    Terminal writes are synchronous. [Accepted] means that every supplied byte
+    Console writes are synchronous. [Accepted] means that every supplied byte
     was handed to the descriptor. It does not promise atomicity, ordering,
     flushing, or durability. *)

@@ -13,9 +13,9 @@ module Raising_get_system =
 module Inherited_system =
   Observe.Runtime.Make (Test_runtime.Inherited_runtime) (Test_runtime.Platform)
 
-let make_system ?terminal_style ?now ?write_terminal () =
+let make_system ?console_style ?now ?write_console () =
   let platform =
-    Test_runtime.Platform.create ?terminal_style ?now ?write_terminal ()
+    Test_runtime.Platform.create ?console_style ?now ?write_console ()
   in
   System.create ~runtime_context:() ~platform
 
@@ -111,11 +111,11 @@ let invalid_capacity () =
   init_ok system (config ())
 
 let threshold_and_laziness () =
-  let terminal = ref [] in
+  let console = ref [] in
   let system =
     make_system
-      ~write_terminal:(fun output ->
-        terminal := output :: !terminal;
+      ~write_console:(fun output ->
+        console := output :: !console;
         Observe.Platform.Accepted)
       ()
   in
@@ -131,24 +131,24 @@ let threshold_and_laziness () =
          "accepted"));
   Alcotest.(check int) "only admitted message forced" 1 !forced;
   Alcotest.(check int)
-    "only admitted message delivered" 1 (List.length !terminal);
+    "only admitted message delivered" 1 (List.length !console);
   Alcotest.(check char)
-    "engine owns terminal newline" '\n'
-    (List.hd !terminal).[String.length (List.hd !terminal) - 1]
+    "engine owns console newline" '\n'
+    (List.hd !console).[String.length (List.hd !console) - 1]
 
 let clock_unavailable () =
-  let terminal = ref 0 in
+  let console = ref 0 in
   let system =
     make_system
       ~now:(fun () -> Error Observe.Platform.Unavailable)
-      ~write_terminal:(fun _ ->
-        incr terminal;
+      ~write_console:(fun _ ->
+        incr console;
         Observe.Platform.Accepted)
       ()
   in
   init_ok system (config ());
   Observe.Logs.info (Observe.Logs.text ~tag:"clock" "missing");
-  Alcotest.(check int) "no terminal delivery" 0 !terminal;
+  Alcotest.(check int) "no console delivery" 0 !console;
   Alcotest.(check int)
     "clock diagnosed" 1
     (Test_runtime.process_diagnostic_count Observe.Diagnostics.Clock_unavailable)
@@ -167,18 +167,18 @@ let scope_raised () =
     (Test_runtime.process_diagnostic_count Observe.Diagnostics.Scope_raised)
 
 let formatting_failed () =
-  let terminal = ref 0 in
+  let console = ref 0 in
   let system =
     make_system
-      ~write_terminal:(fun _ ->
-        incr terminal;
+      ~write_console:(fun _ ->
+        incr console;
         Observe.Platform.Accepted)
       ()
   in
   init_ok system (config ());
   Observe.Logs.info
     (Observe.Logs.text ~tag:"format" (String.make 1 (Char.chr 0xff)));
-  Alcotest.(check int) "invalid output not delivered" 0 !terminal;
+  Alcotest.(check int) "invalid output not delivered" 0 !console;
   Alcotest.(check int)
     "formatting failure diagnosed" 1
     (Test_runtime.process_diagnostic_count Observe.Diagnostics.Formatting_failed);
@@ -189,7 +189,7 @@ let formatting_failed () =
     Observe.Type.of_repr (Repr.like ~json:raising_json Repr.int)
   in
   Observe.Logs.info (Observe.Logs.structured raising_description 1);
-  Alcotest.(check int) "raised output not delivered" 0 !terminal;
+  Alcotest.(check int) "raised output not delivered" 0 !console;
   Alcotest.(check int)
     "Repr callback exception diagnosed" 1
     (Test_runtime.process_diagnostic_count Observe.Diagnostics.Formatting_raised)
@@ -217,7 +217,7 @@ let callback_containment () =
     "raising clock diagnosed" 1
     (Test_runtime.process_diagnostic_count Observe.Diagnostics.Clock_raised)
 
-let terminal_and_drains () =
+let console_and_drains () =
   let accepted = ref 0 in
   let rejected = ref 0 in
   let raised = ref 0 in
@@ -235,7 +235,7 @@ let terminal_and_drains () =
     ]
   in
   let system =
-    make_system ~write_terminal:(fun _ -> Observe.Platform.Rejected) ()
+    make_system ~write_console:(fun _ -> Observe.Platform.Rejected) ()
   in
   init_ok system (config ~drains ());
   Observe.Logs.info (Observe.Logs.text ~tag:"fanout" "message");
@@ -243,8 +243,8 @@ let terminal_and_drains () =
   Alcotest.(check int) "rejected drain called" 1 !rejected;
   Alcotest.(check int) "raising drain called" 1 !raised;
   Alcotest.(check int)
-    "terminal rejection diagnosed" 1
-    (Test_runtime.process_diagnostic_count Observe.Diagnostics.Terminal_rejected);
+    "console rejection diagnosed" 1
+    (Test_runtime.process_diagnostic_count Observe.Diagnostics.Console_rejected);
   Alcotest.(check int)
     "drain rejection diagnosed" 1
     (Test_runtime.process_diagnostic_count Observe.Diagnostics.Drain_rejected);
@@ -252,21 +252,21 @@ let terminal_and_drains () =
     "drain exception diagnosed" 1
     (Test_runtime.process_diagnostic_count Observe.Diagnostics.Drain_raised)
 
-let terminal_raised () =
-  let system = make_system ~write_terminal:(fun _ -> failwith "terminal") () in
+let console_raised () =
+  let system = make_system ~write_console:(fun _ -> failwith "console") () in
   init_ok system (config ());
-  Observe.Logs.info (Observe.Logs.text ~tag:"terminal" "raises");
+  Observe.Logs.info (Observe.Logs.text ~tag:"console" "raises");
   Alcotest.(check int)
-    "terminal exception diagnosed" 1
-    (Test_runtime.process_diagnostic_count Observe.Diagnostics.Terminal_raised)
+    "console exception diagnosed" 1
+    (Test_runtime.process_diagnostic_count Observe.Diagnostics.Console_raised)
 
-let ansi_terminal () =
+let ansi_console () =
   let output = Buffer.create 128 in
   let system =
-    make_system ~terminal_style:Observe.Formatter.Ansi_16
+    make_system ~console_style:Observe.Formatter.Ansi_16
       ~now:(fun () ->
         Ok (Observe.Instant.of_epoch_nanoseconds 37_425_612_000_000L))
-      ~write_terminal:(fun value ->
+      ~write_console:(fun value ->
         Buffer.add_string output value;
         Observe.Platform.Accepted)
       ()
@@ -280,11 +280,11 @@ let ansi_terminal () =
     (Buffer.contents output)
 
 let disabled () =
-  let terminal = ref 0 in
+  let console = ref 0 in
   let system =
     make_system
-      ~write_terminal:(fun _ ->
-        incr terminal;
+      ~write_console:(fun _ ->
+        incr console;
         Observe.Platform.Accepted)
       ()
   in
@@ -295,7 +295,7 @@ let disabled () =
          incr forced;
          Observe.Value.int 1));
   Alcotest.(check int) "disabled logging remains lazy" 0 !forced;
-  Alcotest.(check int) "disabled logging has no output" 0 !terminal;
+  Alcotest.(check int) "disabled logging has no output" 0 !console;
   Alcotest.(check int)
     "disabled configuration is not diagnosed as outputless" 0
     (Test_runtime.process_diagnostic_count Observe.Diagnostics.No_output)
@@ -308,11 +308,11 @@ let no_output () =
     (Test_runtime.process_diagnostic_count Observe.Diagnostics.No_output)
 
 let scope_overrides_production () =
-  let terminal = ref 0 in
+  let console = ref 0 in
   let system =
     make_system
-      ~write_terminal:(fun _ ->
-        incr terminal;
+      ~write_console:(fun _ ->
+        incr console;
         Observe.Platform.Accepted)
       ()
   in
@@ -326,19 +326,19 @@ let scope_overrides_production () =
     | Ok capture -> capture
     | Error _ -> Alcotest.fail "capture was rejected"
   in
-  Alcotest.(check int) "scope suppresses terminal" 0 !terminal;
+  Alcotest.(check int) "scope suppresses console" 0 !console;
   Alcotest.(check int)
     "scope receives message" 1
     (List.length (Observe.Capture.logs capture));
   Observe.Logs.info (Observe.Logs.text ~tag:"production" "restored");
-  Alcotest.(check int) "production restored" 1 !terminal
+  Alcotest.(check int) "production restored" 1 !console
 
 let nested_capture_precedence () =
-  let terminal = ref 0 in
+  let console = ref 0 in
   let system =
     make_system
-      ~write_terminal:(fun _ ->
-        incr terminal;
+      ~write_console:(fun _ ->
+        incr console;
         Observe.Platform.Accepted)
       ()
   in
@@ -366,19 +366,19 @@ let nested_capture_precedence () =
     [ "outer:before-inner"; "outer:after-inner" ]
     outer;
   check_capture_tags "inner capture takes precedence" [ "inner:inside" ] inner;
-  Alcotest.(check int) "nested captures suppress production" 0 !terminal;
+  Alcotest.(check int) "nested captures suppress production" 0 !console;
   Observe.Logs.info (Observe.Logs.text ~tag:"production" "after-captures");
-  Alcotest.(check int) "production restored after nested captures" 1 !terminal
+  Alcotest.(check int) "production restored after nested captures" 1 !console
 
 let cancellation_capture_close () =
   let context = Test_runtime.Inherited_runtime.create_context () in
-  let terminal = ref 0 in
+  let console = ref 0 in
   let system =
     Inherited_system.create ~runtime_context:context
       ~platform:
         (Test_runtime.Platform.create
-           ~write_terminal:(fun _ ->
-             incr terminal;
+           ~write_console:(fun _ ->
+             incr console;
              Observe.Platform.Accepted)
            ())
   in
@@ -423,24 +423,24 @@ let cancellation_capture_close () =
       Observe.Logs.info (Observe.Logs.text ~tag:"detached" "after-cancel");
       Observe.Logs.info (Observe.Logs.text ~tag:"detached" "after-cancel-again"));
   Alcotest.(check int)
-    "closed cancelled capture withholds detached work" 0 !terminal;
+    "closed cancelled capture withholds detached work" 0 !console;
   Alcotest.(check int)
     "each detached offer diagnoses the closed capture" 2
     (Test_runtime.diagnostic_count
        (Observe.Capture.diagnostics capture)
        Observe.Diagnostics.Capture_closed);
   Observe.Logs.info (Observe.Logs.text ~tag:"production" "restored");
-  Alcotest.(check int) "production restored after cancellation" 1 !terminal
+  Alcotest.(check int) "production restored after cancellation" 1 !console
 
 let closed_inherited_tombstone () =
   let context = Test_runtime.Inherited_runtime.create_context () in
-  let terminal = ref 0 in
+  let console = ref 0 in
   let system =
     Inherited_system.create ~runtime_context:context
       ~platform:
         (Test_runtime.Platform.create
-           ~write_terminal:(fun _ ->
-             incr terminal;
+           ~write_console:(fun _ ->
+             incr console;
              Observe.Platform.Accepted)
            ())
   in
@@ -466,21 +466,21 @@ let closed_inherited_tombstone () =
   Test_runtime.Inherited_runtime.with_context context inherited (fun () ->
       Observe.Logs.info (Observe.Logs.text ~tag:"detached" "closed-scope"));
   Alcotest.(check int)
-    "closed inherited scope withholds from production" 0 !terminal;
+    "closed inherited scope withholds from production" 0 !console;
   Alcotest.(check int)
     "closed inherited scope is diagnosed" 1
     (Test_runtime.diagnostic_count
        (Observe.Capture.diagnostics capture)
        Observe.Diagnostics.Capture_closed);
   Observe.Logs.info (Observe.Logs.text ~tag:"production" "after-detach");
-  Alcotest.(check int) "root binding restored after detached work" 1 !terminal
+  Alcotest.(check int) "root binding restored after detached work" 1 !console
 
 let callback_restoration () =
-  let terminal = ref 0 in
+  let console = ref 0 in
   let system =
     make_system
-      ~write_terminal:(fun _ ->
-        incr terminal;
+      ~write_console:(fun _ ->
+        incr console;
         Observe.Platform.Accepted)
       ()
   in
@@ -491,7 +491,7 @@ let callback_restoration () =
         (System.with_capture system (config ()) (fun _ ->
              raise (Failure "callback"))));
   Observe.Logs.info (Observe.Logs.text ~tag:"after" "production");
-  Alcotest.(check int) "binding restored after exception" 1 !terminal
+  Alcotest.(check int) "binding restored after exception" 1 !console
 
 let control_exception () =
   let system = make_system () in
@@ -549,9 +549,9 @@ let scenario = function
   | "scope-raised" -> scope_raised
   | "formatting-failed" -> formatting_failed
   | "callback-containment" -> callback_containment
-  | "terminal-and-drains" -> terminal_and_drains
-  | "ANSI-terminal" -> ansi_terminal
-  | "terminal-raised" -> terminal_raised
+  | "console-and-drains" -> console_and_drains
+  | "ANSI-console" -> ansi_console
+  | "console-raised" -> console_raised
   | "disabled" -> disabled
   | "no-output" -> no_output
   | "scope-overrides-production" -> scope_overrides_production

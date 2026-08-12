@@ -7,8 +7,8 @@ type kind =
   | Authoring_raised
   | Formatting_failed
   | Formatting_raised
-  | Terminal_rejected
-  | Terminal_raised
+  | Console_rejected
+  | Console_raised
   | Drain_rejected
   | Drain_raised
   | Capture_overflow
@@ -27,8 +27,8 @@ let kinds =
     Authoring_raised;
     Formatting_failed;
     Formatting_raised;
-    Terminal_rejected;
-    Terminal_raised;
+    Console_rejected;
+    Console_raised;
     Drain_rejected;
     Drain_raised;
     Capture_overflow;
@@ -44,8 +44,8 @@ let index = function
   | Authoring_raised -> 5
   | Formatting_failed -> 6
   | Formatting_raised -> 7
-  | Terminal_rejected -> 8
-  | Terminal_raised -> 9
+  | Console_rejected -> 8
+  | Console_raised -> 9
   | Drain_rejected -> 10
   | Drain_raised -> 11
   | Capture_overflow -> 12

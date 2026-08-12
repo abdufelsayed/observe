@@ -88,10 +88,15 @@ jobs:
         run: opam option --global 'archive-mirrors=["https://opam.ocaml.org/cache"]'
 
       - name: Install package test dependencies
-        run: opam install --yes --with-test --deps-only observe
+        run: >-
+          opam install --yes --with-test --deps-only
+          observe observe-lwt observe-unix observe-lwt-unix
 
-      - name: Build package install and correctness targets
-        run: opam exec -- dune build -p observe @install @runtest
+      - name: Build package installs and correctness targets
+        run: >-
+          opam exec -- dune build
+          -p observe,observe-lwt,observe-unix,observe-lwt-unix
+          @install @runtest
 
   docs-examples:
     name: Documentation and examples

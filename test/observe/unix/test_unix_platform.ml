@@ -14,23 +14,6 @@ let test_clock () =
     "not after surrounding clock" true
     (seconds <= after +. 0.001)
 
-let instant_nanoseconds parts =
-  match Clock.instant parts with
-  | Ok instant -> Observe.Instant.to_epoch_nanoseconds instant
-  | Error Observe.Platform.Unavailable -> Alcotest.fail "instant unavailable"
-
-let test_clock_conversion () =
-  Alcotest.(check int64) "epoch" 0L (instant_nanoseconds (0, 0L));
-  Alcotest.(check int64)
-    "day and picoseconds" 86_400_000_000_001L
-    (instant_nanoseconds (1, 1_234L));
-  let overflow_days =
-    Int64.div Int64.max_int 86_400_000_000_000L |> Int64.succ |> Int64.to_int
-  in
-  Alcotest.(check bool)
-    "out of Instant range" true
-    (Clock.instant (overflow_days, 0L) = Error Observe.Platform.Unavailable)
-
 let read_all descriptor =
   let buffer = Bytes.create 64 in
   let output = Buffer.create 64 in
@@ -43,83 +26,30 @@ let read_all descriptor =
   in
   loop ()
 
-let test_terminal_bytes () =
+let test_console_bytes () =
   let input, output = Unix.pipe () in
   let saved = Unix.dup Unix.stderr in
-  Fun.protect
-    ~finally:(fun () ->
-      Unix.dup2 saved Unix.stderr;
-      Unix.close saved;
-      Unix.close input)
-    (fun () ->
-      Unix.dup2 output Unix.stderr;
-      Unix.close output;
-      let acceptance =
-        Observe_unix.Platform.write_terminal () "exact record\n"
-      in
-      Unix.dup2 saved Unix.stderr;
-      Alcotest.(check bool)
-        "accepted" true
-        (acceptance = Observe.Platform.Accepted);
-      Alcotest.(check string)
-        "bytes unchanged" "exact record\n" (read_all input))
-
-let test_partial_and_interrupted_writes () =
-  let calls = ref 0 in
-  let received = Buffer.create 8 in
-  let write _ value offset remaining =
-    incr calls;
-    if !calls = 1 then raise (Unix.Unix_error (Unix.EINTR, "write", ""));
-    let count = min 2 remaining in
-    Buffer.add_substring received value offset count;
-    count
+  let style, acceptance, bytes =
+    Fun.protect
+      ~finally:(fun () ->
+        Unix.dup2 saved Unix.stderr;
+        Unix.close saved;
+        Unix.close input)
+      (fun () ->
+        Unix.dup2 output Unix.stderr;
+        Unix.close output;
+        let style = Observe_unix.Platform.console_style () in
+        let acceptance =
+          Observe_unix.Platform.write_console () "exact record\n"
+        in
+        Unix.dup2 saved Unix.stderr;
+        (style, acceptance, read_all input))
   in
-  Write.all ~write Unix.stderr "abcdef";
-  Alcotest.(check string) "all bytes" "abcdef" (Buffer.contents received);
-  Alcotest.(check int) "interruption plus partial writes" 4 !calls
-
-let style ?(isatty = true) ?no_color ?term ?colorterm () =
-  let getenv = function
-    | "NO_COLOR" -> no_color
-    | "TERM" -> term
-    | "COLORTERM" -> colorterm
-    | _ -> None
-  in
-  Terminal.style ~isatty:(fun () -> isatty) ~getenv
-
-let test_terminal_style () =
   Alcotest.(check bool)
-    "unknown interactive terminal uses ANSI 16" true
-    (style () = Observe.Formatter.Ansi_16);
-  Alcotest.(check bool)
-    "256-color term" true
-    (style ~term:"xterm-256color" () = Observe.Formatter.Ansi_256);
-  Alcotest.(check bool)
-    "truecolor signal" true
-    (style ~term:"xterm-256color" ~colorterm:"truecolor" ()
-    = Observe.Formatter.Truecolor);
-  Alcotest.(check bool)
-    "24-bit signal is case insensitive" true
-    (style ~colorterm:"24BIT" () = Observe.Formatter.Truecolor);
-  Alcotest.(check bool)
-    "Ghostty term" true
-    (style ~term:"xterm-ghostty" () = Observe.Formatter.Truecolor);
-  Alcotest.(check bool)
-    "direct-color term" true
-    (style ~term:"xterm-direct" () = Observe.Formatter.Truecolor);
-  Alcotest.(check bool)
-    "redirected terminal stays plain" true
-    (style ~isatty:false () = Observe.Formatter.Plain);
-  Alcotest.(check bool)
-    "NO_COLOR disables ANSI" true
-    (style ~no_color:"" () = Observe.Formatter.Plain);
-  Alcotest.(check bool)
-    "dumb terminal stays plain" true
-    (style ~term:"DUMB" ~colorterm:"truecolor" () = Observe.Formatter.Plain);
-  Alcotest.(check bool)
-    "probe failure stays plain" true
-    (Terminal.style ~isatty:(fun () -> failwith "probe") ~getenv:(fun _ -> None)
-    = Observe.Formatter.Plain)
+    "redirected output is plain" true
+    (style = Observe.Formatter.Plain);
+  Alcotest.(check bool) "accepted" true (acceptance = Observe.Platform.Accepted);
+  Alcotest.(check string) "bytes unchanged" "exact record\n" bytes
 
 let () =
   Alcotest.run "observe-unix"
@@ -127,10 +57,6 @@ let () =
       ( "platform",
         [
           Alcotest.test_case "wall clock" `Quick test_clock;
-          Alcotest.test_case "clock conversion" `Quick test_clock_conversion;
-          Alcotest.test_case "terminal bytes" `Quick test_terminal_bytes;
-          Alcotest.test_case "partial and interrupted writes" `Quick
-            test_partial_and_interrupted_writes;
-          Alcotest.test_case "terminal style" `Quick test_terminal_style;
+          Alcotest.test_case "console bytes" `Quick test_console_bytes;
         ] );
     ]

@@ -1,16 +1,16 @@
 module Platform = struct
   type clock_error = Observe_engine.clock_error = Unavailable
 
-  type terminal_acceptance = Observe_engine.terminal_acceptance =
+  type console_acceptance = Observe_engine.console_acceptance =
     | Accepted
     | Rejected
 
   module type S = sig
     type t
 
-    val terminal_style : t -> Observe_formatter.style
+    val console_style : t -> Observe_formatter.style
     val now : t -> (Observe_instant.t, clock_error) result
-    val write_terminal : t -> string -> terminal_acceptance
+    val write_console : t -> string -> console_acceptance
   end
 end
 
@@ -128,15 +128,15 @@ module Make (Runtime : S) (Platform : Platform.S) = struct
     { runtime_context; platform; runtime }
 
   let clock t () = Platform.now t.platform
-  let terminal t output = Platform.write_terminal t.platform output
+  let console t output = Platform.write_console t.platform output
 
   let engine t config output =
     let is_control_exception = t.runtime.is_control_exception in
     match output with
     | `Production ->
         Observe_engine.create_production config
-          ~terminal_style:(Platform.terminal_style t.platform)
-          ~clock:(clock t) ~terminal:(terminal t) ~is_control_exception
+          ~console_style:(Platform.console_style t.platform)
+          ~clock:(clock t) ~console:(console t) ~is_control_exception
     | `Capture capture ->
         Observe_engine.create_capture config ~clock:(clock t)
           ~is_control_exception capture

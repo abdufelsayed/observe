@@ -88,19 +88,19 @@ end
 
 module Platform = struct
   type t = {
-    terminal_style : Observe.Formatter.style;
+    console_style : Observe.Formatter.style;
     now : unit -> (Observe.Instant.t, Observe.Platform.clock_error) result;
-    write_terminal : string -> Observe.Platform.terminal_acceptance;
+    write_console : string -> Observe.Platform.console_acceptance;
   }
 
-  let create ?(terminal_style = Observe.Formatter.Plain)
+  let create ?(console_style = Observe.Formatter.Plain)
       ?(now = fun () -> Ok (Observe.Instant.of_epoch_nanoseconds 42L))
-      ?(write_terminal = fun _ -> Observe.Platform.Accepted) () =
-    { terminal_style; now; write_terminal }
+      ?(write_console = fun _ -> Observe.Platform.Accepted) () =
+    { console_style; now; write_console }
 
-  let terminal_style t = t.terminal_style
+  let console_style t = t.console_style
   let now t = t.now ()
-  let write_terminal t output = t.write_terminal output
+  let write_console t output = t.write_console output
 end
 
 let config ?environment ?version ?enabled ?pretty ?silent ?min_level ?drains

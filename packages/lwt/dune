@@ -1,4 +1,4 @@
 (library
  (name observe_lwt)
- (public_name observe.lwt)
+ (public_name observe-lwt)
  (libraries observe lwt))

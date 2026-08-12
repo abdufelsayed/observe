@@ -9,8 +9,8 @@ type kind =
   | Authoring_raised
   | Formatting_failed
   | Formatting_raised
-  | Terminal_rejected
-  | Terminal_raised
+  | Console_rejected
+  | Console_raised
   | Drain_rejected
   | Drain_raised
   | Capture_overflow

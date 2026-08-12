@@ -13,4 +13,4 @@
 (executable
  (name adapter_consumer)
  (modules adapter_consumer)
- (libraries observe.lwt-unix observe.lwt observe.unix observe lwt))
+ (libraries observe-lwt-unix observe-lwt observe-unix observe lwt))

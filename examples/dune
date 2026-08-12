@@ -1,11 +1,11 @@
 (executable
  (name simple)
- (libraries observe observe.lwt-unix lwt lwt.unix)
+ (libraries observe observe-lwt-unix lwt lwt.unix)
  (preprocess
   (pps observe.ppx)))
 
 (rule
  (alias observe-examples)
- (package observe)
+ (package observe-lwt-unix)
  (action
   (run %{exe:simple.exe})))

@@ -1,17 +1,17 @@
 (executable
  (name ready_scenario)
  (modules ready_scenario)
- (libraries observe.lwt-unix observe lwt lwt.unix unix))
+ (libraries observe-lwt-unix observe lwt lwt.unix unix))
 
 (rule
  (alias observe-lwt-unix-contracts)
- (package observe)
+ (package observe-lwt-unix)
  (deps ready_scenario.exe)
  (action
   (progn
-   (run %{exe:ready_scenario.exe} terminal)
-   (run %{exe:ready_scenario.exe} json-terminal)
-   (run %{exe:ready_scenario.exe} production-json-terminal)
+   (run %{exe:ready_scenario.exe} console)
+   (run %{exe:ready_scenario.exe} json-console)
+   (run %{exe:ready_scenario.exe} production-json-console)
    (run %{exe:ready_scenario.exe} repeated-init)
    (run %{exe:ready_scenario.exe} silent-drain)
    (run %{exe:ready_scenario.exe} no-output)
@@ -23,3 +23,9 @@
    (run %{exe:ready_scenario.exe} cancellation)
    (run %{exe:ready_scenario.exe} late-callback)
    (run %{exe:ready_scenario.exe} invalid-capacity))))
+
+(alias
+ (name runtest)
+ (package observe-lwt-unix)
+ (deps
+  (alias observe-lwt-unix-contracts)))

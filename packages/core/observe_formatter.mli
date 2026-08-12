@@ -7,7 +7,7 @@ type style =
   | Ansi_16
   | Ansi_256
   | Truecolor
-      (** Presentation capability for readable terminal output. Colored styles
+      (** Presentation capability for readable console output. Colored styles
           share one semantic palette and differ only in available color depth;
           they do not change layout or semantic information. *)
 

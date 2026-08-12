@@ -10,7 +10,7 @@ let free make = Free make
 let structured description value = Structured (description, value)
 
 type clock_error = Unavailable
-type terminal_acceptance = Accepted | Rejected
+type console_acceptance = Accepted | Rejected
 type 'a contained = Returned of 'a | Raised
 
 let contain ~is_control_exception callback =
@@ -25,7 +25,7 @@ let contain ~is_control_exception callback =
     | _ -> Raised)
 
 type production = {
-  terminal : string -> terminal_acceptance;
+  console : string -> console_acceptance;
   drains : Observe_drain.t list;
   formatter : Observe_formatter.t;
   silent : bool;
@@ -40,11 +40,11 @@ type t = {
   output : output;
 }
 
-let create_production config ~terminal_style ~clock ~terminal
+let create_production config ~console_style ~clock ~console
     ~is_control_exception =
   let formatter =
     if Observe_config.pretty config then
-      Observe_formatter.readable terminal_style
+      Observe_formatter.readable console_style
     else Observe_formatter.json
   in
   {
@@ -54,7 +54,7 @@ let create_production config ~terminal_style ~clock ~terminal
     output =
       Production
         {
-          terminal;
+          console;
           drains = Observe_config.drains config;
           formatter;
           silent = Observe_config.silent config;
@@ -105,7 +105,7 @@ let seal t level instant payload =
 
 let offer_capture t capture log = ignore (Observe_capture.offer capture log)
 
-let offer_terminal t terminal formatter log =
+let offer_console t console formatter log =
   match
     contain ~is_control_exception:t.is_control_exception (fun () ->
         Observe_formatter.format formatter log)
@@ -115,11 +115,11 @@ let offer_terminal t terminal formatter log =
   | Returned (Ok output) -> (
       match
         contain ~is_control_exception:t.is_control_exception (fun () ->
-            terminal (output ^ "\n"))
+            console (output ^ "\n"))
       with
       | Returned Accepted -> ()
-      | Returned Rejected -> record t Observe_diagnostics.Terminal_rejected
-      | Raised -> record t Observe_diagnostics.Terminal_raised)
+      | Returned Rejected -> record t Observe_diagnostics.Console_rejected
+      | Raised -> record t Observe_diagnostics.Console_raised)
 
 let offer_drain t drain log =
   match
@@ -134,8 +134,8 @@ let offer_drain t drain log =
 let deliver t log =
   match t.output with
   | Capture_only capture -> offer_capture t capture log
-  | Production { terminal; drains; formatter; silent } ->
-      if not silent then offer_terminal t terminal formatter log;
+  | Production { console; drains; formatter; silent } ->
+      if not silent then offer_console t console formatter log;
       List.iter (fun drain -> offer_drain t drain log) drains
 
 let emit t level message =

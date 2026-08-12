@@ -1,0 +1,4 @@
+(library
+ (name observe_lwt_unix)
+ (public_name observe-lwt-unix)
+ (libraries observe observe-lwt observe-unix lwt lwt.unix))

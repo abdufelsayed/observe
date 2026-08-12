@@ -1,0 +1,33 @@
+{0 Observe Lwt Unix}
+
+[observe-lwt-unix] is the ready Observe composition for Lwt applications on
+Unix. Link it with
+[(libraries observe observe-lwt-unix lwt.unix)]. Add
+[(preprocess (pps observe.ppx))] when using the deriver or free-form extension.
+
+{1 Initialization}
+
+{[
+let config =
+  Observe.Config.create_exn ~service:"orders" ~environment:"development" ()
+
+let () = Observe_lwt_unix.init_exn config
+
+let () =
+  Observe.Logs.info
+    (Observe.Logs.text ~tag:"startup" "service ready")
+]}
+
+The initializer is synchronous. It installs Lwt callback-local context, the OS
+wall clock, and automatic formatted output on standard error. It starts no
+scheduler and returns no logging handle. See {!module:Observe_lwt_unix}.
+
+If [pretty] is absent, an absent, [dev], or [development] environment selects
+readable output. Other environments select JSON. An explicit [pretty] value
+overrides this default.
+
+{1 Capture}
+
+{!val:Observe_lwt_unix.Test.with_capture} installs a bounded capture through
+real Lwt callback-local state. It restores the prior route after success,
+failure, or [Lwt.Canceled].

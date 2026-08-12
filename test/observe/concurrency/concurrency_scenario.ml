@@ -93,11 +93,11 @@ let capture_conservation work =
 
 let diagnostic_counting work =
   let work = max 1 work in
-  let terminal_calls = Atomic.make 0 in
+  let console_calls = Atomic.make 0 in
   let platform =
     Test_runtime.Platform.create
-      ~write_terminal:(fun _ ->
-        ignore (Atomic.fetch_and_add terminal_calls 1 : int);
+      ~write_console:(fun _ ->
+        ignore (Atomic.fetch_and_add console_calls 1 : int);
         Observe.Platform.Rejected)
       ()
   in
@@ -117,11 +117,10 @@ let diagnostic_counting work =
   in
   Array.iter Thread.join threads;
   Alcotest.(check int)
-    "terminal called for every log" work
-    (Atomic.get terminal_calls);
+    "console called for every log" work (Atomic.get console_calls);
   Alcotest.(check int)
     "every rejection counted" work
-    (Test_runtime.process_diagnostic_count Observe.Diagnostics.Terminal_rejected)
+    (Test_runtime.process_diagnostic_count Observe.Diagnostics.Console_rejected)
 
 let () =
   let mode = if Array.length Sys.argv > 1 then Sys.argv.(1) else "missing" in

@@ -1,7 +1,7 @@
 (** Runtime-neutral structured logging.
 
     The core owns logging policy and performs no I/O. Runtime adapters provide
-    dynamic context; platform adapters provide the clock and terminal output.
+    dynamic context; platform adapters provide the clock and console output.
     Ordinary application code logs through {!Logs}. *)
 
 (** Runtime descriptions used by typed structured logs. Each description keeps
@@ -252,8 +252,8 @@ module Diagnostics : sig
     | Authoring_raised
     | Formatting_failed
     | Formatting_raised
-    | Terminal_rejected
-    | Terminal_raised
+    | Console_rejected
+    | Console_raised
     | Drain_rejected
     | Drain_raised
     | Capture_overflow
@@ -300,7 +300,7 @@ module Formatter : sig
 
   val readable : style -> t
   (** Render compact tagged text or an ordered structured tree with UTC
-      millisecond timestamps and terminal-safe caller data. *)
+      millisecond timestamps and console-safe caller data. *)
 
   val json : t
   val json_lines : t
@@ -393,20 +393,20 @@ end
 
 module Platform : sig
   type clock_error = Unavailable
-  type terminal_acceptance = Accepted | Rejected
+  type console_acceptance = Accepted | Rejected
 
   module type S = sig
     type t
 
-    val terminal_style : t -> Formatter.style
-    (** Report the terminal's maximum supported color capability. Return [Plain]
-        when support is unknown. This query must not raise. *)
+    val console_style : t -> Formatter.style
+    (** Report the console's maximum supported presentation capability. Return
+        [Plain] when support is unknown. This query must not raise. *)
 
     val now : t -> (Instant.t, clock_error) result
     (** Return wall-clock epoch time. [Unavailable] means that no timestamp can
         be supplied. Ordinary exceptions are diagnosed by the core. *)
 
-    val write_terminal : t -> string -> terminal_acceptance
+    val write_console : t -> string -> console_acceptance
     (** Write one completely formatted record exactly as supplied. The core owns
         record termination. [Accepted] promises immediate handoff only, not
         flushing or durability. Ordinary exceptions are diagnosed by the core.

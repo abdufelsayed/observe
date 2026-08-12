@@ -63,7 +63,7 @@ compile "$positive_source" "$temporary/public_consumer.cmo"
 expected() {
   case "$1" in
     config_formatter.ml.fail) printf '%s' 'formatter' ;;
-    config_terminal.ml.fail) printf '%s' 'terminal' ;;
+    config_console.ml.fail) printf '%s' 'console' ;;
     mismatched_structured.ml.fail) printf '%s' '(constant|expression) has type' ;;
     private_engine.ml.fail) printf '%s' 'Observe__Observe_engine' ;;
     private_runtime.ml.fail) printf '%s' 'Observe__Observe_runtime' ;;

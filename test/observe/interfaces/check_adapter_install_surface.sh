@@ -1,31 +1,32 @@
 set -eu
 
 ocamlfind_bin=$1
-manifest=$2
-core_cmi=$3
-lwt_cmi=$4
-unix_cmi=$5
-ready_cmi=$6
-positive_source=$7
-negative_dir=$8
+shift
+ready_manifest=$1
+core_cmi=$2
+lwt_cmi=$3
+unix_cmi=$4
+ready_cmi=$5
+positive_source=$6
+negative_dir=$7
 
-for required in "$manifest" "$core_cmi" "$lwt_cmi" "$unix_cmi" "$ready_cmi"; do
+for required in \
+  "$ready_manifest" \
+  "$core_cmi" \
+  "$lwt_cmi" \
+  "$unix_cmi" \
+  "$ready_cmi"
+do
   if [ ! -f "$required" ]; then
     printf 'installed adapter artifact missing: %s\n' "$required" >&2
     exit 1
   fi
 done
 
-for path in \
-  '/lib/observe/lwt/observe_lwt.cmi"' \
-  '/lib/observe/unix/observe_unix.cmi"' \
-  '/lib/observe/lwt-unix/observe_lwt_unix.cmi"'
-do
-  if ! grep -Fq "$path" "$manifest"; then
-    printf 'adapter CMI is absent from install manifest: %s\n' "$path" >&2
-    exit 1
-  fi
-done
+if ! grep -Fq '/lib/observe-lwt-unix/observe_lwt_unix.cmi"' "$ready_manifest"; then
+  printf 'observe-lwt-unix CMI is absent from install manifest\n' >&2
+  exit 1
+fi
 
 temporary=$(mktemp -d "${TMPDIR:-/tmp}/observe-adapter-surface.XXXXXX")
 trap 'rm -rf "$temporary"' EXIT HUP INT TERM

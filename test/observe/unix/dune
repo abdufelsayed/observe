@@ -1,17 +1,17 @@
-(copy_files ../../../packages/observe/unix/clock.ml)
-
-(copy_files ../../../packages/observe/unix/write.ml)
-
-(copy_files ../../../packages/observe/unix/terminal.ml)
-
 (executable
  (name test_unix_platform)
- (modules test_unix_platform clock write terminal)
- (libraries observe.unix observe alcotest unix))
+ (modules test_unix_platform)
+ (libraries observe-unix observe alcotest unix))
 
 (rule
  (alias observe-unix-contracts)
- (package observe)
+ (package observe-unix)
  (deps test_unix_platform.exe)
  (action
   (run %{exe:test_unix_platform.exe})))
+
+(alias
+ (name runtest)
+ (package observe-unix)
+ (deps
+  (alias observe-unix-contracts)))

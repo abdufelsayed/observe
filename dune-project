@@ -21,7 +21,7 @@
  (name observe)
  (synopsis "Structured logging and observability for OCaml")
  (description
- "Structured logging with a portable core, typed values, deterministic capture, and a ready Lwt-Unix composition.")
+ "Portable structured logging with typed values and deterministic capture.")
  (depends
   (ocaml
    (>= 4.14))
@@ -29,8 +29,6 @@
    (>= 0.7.0))
   (jsonm
    (>= 1.0.2))
-  lwt
-  ptime
   ppxlib
   (ppx_repr
    (>= 0.7.0))
@@ -53,3 +51,52 @@
    (and
     :with-dev-setup
     (= 0.29.0)))))
+
+(package
+ (name observe-lwt)
+ (synopsis "Lwt runtime support for Observe")
+ (description
+  "Lwt dynamic-context support for the portable Observe logging core.")
+ (depends
+  (ocaml
+   (>= 4.14))
+  (observe
+   (= :version))
+  lwt
+  (alcotest
+   (and
+    :with-test
+    (>= 1.9.1)))))
+
+(package
+ (name observe-unix)
+ (synopsis "Unix platform support for Observe")
+ (description
+  "Unix wall-clock and console mechanisms for the portable Observe logging core.")
+ (depends
+  (ocaml
+   (>= 4.14))
+  (observe
+   (= :version))
+  ptime
+  (alcotest
+   (and
+    :with-test
+    (>= 1.9.1)))))
+
+(package
+ (name observe-lwt-unix)
+ (synopsis "Ready Lwt-Unix composition for Observe")
+ (description
+  "Ready Observe initialization and scoped capture for Lwt applications on Unix.")
+ (depends
+  (ocaml
+   (>= 4.14))
+  (observe
+   (= :version))
+  (observe-lwt
+   (= :version))
+  (observe-unix
+   (= :version))
+  lwt
+  (ocamlfind :with-test)))
