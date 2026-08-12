@@ -190,8 +190,16 @@ reference rather than becoming deep snapshots.
 ```sh
 opam install . --deps-only --with-test --with-doc --with-dev-setup
 opam exec -- dune build @fmt @correctness @examples @doc @opam
-opam exec -- dune build @stress
+scripts/test.sh stress
+opam exec -- dune exec bench/observe_bench.exe
 ```
+
+Use `scripts/test.sh quick` when the correctness run should leave a durable
+report. All runner profiles record their workload controls; correctness and
+stress failures also copy Alcotest outputs under the ignored `.logs/`
+directory. The separate benchmark tool records informational measurements and
+never participates in correctness or stress gates. See
+[`bench/README.md`](bench/README.md) for its suites and output contract.
 
 CI also proves each installable package independently:
 

@@ -6,7 +6,12 @@
 (executable
  (name test_public_properties)
  (modules test_public_properties)
- (libraries observe alcotest qcheck-core qcheck-alcotest))
+ (libraries
+  observe
+  observe_test_support
+  alcotest
+  qcheck-core
+  qcheck-alcotest))
 
 (rule
  (alias observe-public-unit)

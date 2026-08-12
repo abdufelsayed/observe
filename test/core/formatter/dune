@@ -12,6 +12,7 @@
   observe
   observe_test_support
   alcotest
+  jsonm
   qcheck-core
   qcheck-alcotest))
 
@@ -31,3 +32,9 @@
   (env_var QCHECK_SEED))
  (action
   (run %{exe:test_formatter_properties.exe})))
+
+(alias
+ (name discovery)
+ (package observe)
+ (deps
+  (alias observe-formatter-contracts)))

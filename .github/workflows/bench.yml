@@ -1,0 +1,75 @@
+name: Benchmarks
+
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+    inputs:
+      quota_ms:
+        description: Bechamel sampling quota per scenario in milliseconds
+        required: false
+        default: "500"
+        type: string
+      sample_limit:
+        description: Maximum Bechamel samples per scenario
+        required: false
+        default: "2000"
+        type: string
+      allocation_runs:
+        description: Operations in each GC allocation batch
+        required: false
+        default: "10000"
+        type: string
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+env:
+  BENCH_QUOTA_MS: ${{ github.event_name == 'workflow_dispatch' && inputs.quota_ms || '500' }}
+  BENCH_SAMPLE_LIMIT: ${{ github.event_name == 'workflow_dispatch' && inputs.sample_limit || '2000' }}
+  BENCH_ALLOCATION_RUNS: ${{ github.event_name == 'workflow_dispatch' && inputs.allocation_runs || '10000' }}
+
+jobs:
+  bench:
+    name: Observe benchmark measurements
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+
+    steps:
+      - name: Checkout tree
+        uses: actions/checkout@v6
+
+      - name: Set-up OCaml 5
+        uses: ocaml/setup-ocaml@v3
+        with:
+          ocaml-compiler: "5"
+          dune-cache: true
+          opam-local-packages: |
+            *.opam
+
+      - name: Use opam archive cache
+        run: opam option --global 'archive-mirrors=["https://opam.ocaml.org/cache"]'
+
+      - name: Install benchmark dependencies
+        run: opam install --yes --with-dev-setup --deps-only .
+
+      - name: Run benchmark tool
+        run: |
+          opam exec -- dune exec bench/observe_bench.exe -- \
+            --quota-ms "$BENCH_QUOTA_MS" \
+            --limit "$BENCH_SAMPLE_LIMIT" \
+            --allocation-runs "$BENCH_ALLOCATION_RUNS" \
+            --commit "$GITHUB_SHA" \
+            --output ".logs/benchmarks/observe-$GITHUB_SHA.json"
+
+      - name: Upload benchmark report
+        uses: actions/upload-artifact@v4
+        with:
+          name: observe-benchmark-${{ github.sha }}
+          path: .logs/benchmarks/*.json
+          if-no-files-found: error
+          retention-days: 90

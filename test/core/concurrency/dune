@@ -9,8 +9,15 @@
  (deps concurrency_scenario.exe)
  (action
   (progn
+   (run %{exe:concurrency_scenario.exe} init-race 2)
    (run %{exe:concurrency_scenario.exe} init-race 8)
-   (run %{exe:concurrency_scenario.exe} capture-conservation 64)
+   (run %{exe:concurrency_scenario.exe} capture-conservation 1 1)
+   (run %{exe:concurrency_scenario.exe} capture-conservation 8 1)
+   (run %{exe:concurrency_scenario.exe} capture-conservation 64 32)
+   (run %{exe:concurrency_scenario.exe} capture-conservation 64 64)
+   (run %{exe:concurrency_scenario.exe} capture-conservation 64 67)
+   (run %{exe:concurrency_scenario.exe} diagnostic-counting 1)
+   (run %{exe:concurrency_scenario.exe} diagnostic-counting 8)
    (run %{exe:concurrency_scenario.exe} diagnostic-counting 64))))
 
 (rule

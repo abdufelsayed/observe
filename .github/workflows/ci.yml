@@ -56,8 +56,74 @@ jobs:
           git diff --check
           git diff --exit-code
 
-  package-install-build-test:
-    name: Package install/build/test (${{ matrix.package }}, ${{ matrix.os }}, OCaml ${{ matrix.ocaml-compiler }})
+  no-service-stress:
+    name: No-service stress tests
+    if: github.event_name != 'pull_request' || github.event.pull_request.draft == false
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+
+    steps:
+      - name: Checkout tree
+        uses: actions/checkout@v6
+
+      - name: Set-up OCaml ${{ env.OCAML_LATEST }}
+        uses: ocaml/setup-ocaml@v3
+        with:
+          ocaml-compiler: ${{ env.OCAML_LATEST }}
+          dune-cache: true
+          opam-local-packages: |
+            *.opam
+
+      - name: Use opam archive cache
+        run: opam option --global 'archive-mirrors=["https://opam.ocaml.org/cache"]'
+
+      - name: Install stress test dependencies
+        run: opam install --yes --with-test --with-doc --with-dev-setup --deps-only .
+
+      - name: Run no-service stress tests
+        env:
+          OBSERVE_QCHECK_COUNT: ${{ env.OBSERVE_STRESS_QCHECK_COUNT }}
+          OBSERVE_RACE_TRIALS: ${{ env.OBSERVE_STRESS_RACE_TRIALS }}
+          OBSERVE_CONCURRENCY_WORK: ${{ env.OBSERVE_STRESS_CONCURRENCY_WORK }}
+        run: scripts/test.sh stress --label no-service-stress
+
+      - name: Upload no-service stress test report
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: no-service-stress-report
+          path: .logs/
+          if-no-files-found: ignore
+
+  docs-examples:
+    name: Documentation and example build
+    if: github.event_name != 'pull_request' || github.event.pull_request.draft == false
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+
+    steps:
+      - name: Checkout tree
+        uses: actions/checkout@v6
+
+      - name: Set-up OCaml ${{ env.OCAML_LATEST }}
+        uses: ocaml/setup-ocaml@v3
+        with:
+          ocaml-compiler: ${{ env.OCAML_LATEST }}
+          dune-cache: true
+          opam-local-packages: |
+            *.opam
+
+      - name: Use opam archive cache
+        run: opam option --global 'archive-mirrors=["https://opam.ocaml.org/cache"]'
+
+      - name: Install project dependencies
+        run: opam install --yes --with-test --with-doc --with-dev-setup --deps-only .
+
+      - name: Build documentation and example targets
+        run: opam exec -- dune build @examples @doc
+
+  package-install-build-test-lwt:
+    name: Lwt package install/build/test (${{ matrix.package }}, ${{ matrix.os }}, OCaml ${{ matrix.ocaml-compiler }})
     if: github.event_name != 'pull_request' || github.event.pull_request.draft == false
     strategy:
       fail-fast: false
@@ -97,72 +163,14 @@ jobs:
       - name: Build package install and test targets
         run: opam exec -- dune build -p "${{ matrix.package }}" @install @runtest
 
-  docs-examples:
-    name: Documentation and examples
-    if: github.event_name != 'pull_request' || github.event.pull_request.draft == false
-    runs-on: ubuntu-latest
-    timeout-minutes: 30
-
-    steps:
-      - name: Checkout tree
-        uses: actions/checkout@v6
-
-      - name: Set-up OCaml ${{ env.OCAML_LATEST }}
-        uses: ocaml/setup-ocaml@v3
-        with:
-          ocaml-compiler: ${{ env.OCAML_LATEST }}
-          dune-cache: true
-          opam-local-packages: |
-            *.opam
-
-      - name: Use opam archive cache
-        run: opam option --global 'archive-mirrors=["https://opam.ocaml.org/cache"]'
-
-      - name: Install project dependencies
-        run: opam install --yes --with-test --with-doc --deps-only .
-
-      - name: Build documentation and examples
-        run: opam exec -- dune build @examples @doc
-
-  stress:
-    name: No-service stress tests
-    if: github.event_name != 'pull_request' || github.event.pull_request.draft == false
-    runs-on: ubuntu-latest
-    timeout-minutes: 60
-
-    steps:
-      - name: Checkout tree
-        uses: actions/checkout@v6
-
-      - name: Set-up OCaml ${{ env.OCAML_LATEST }}
-        uses: ocaml/setup-ocaml@v3
-        with:
-          ocaml-compiler: ${{ env.OCAML_LATEST }}
-          dune-cache: true
-          opam-local-packages: |
-            *.opam
-
-      - name: Use opam archive cache
-        run: opam option --global 'archive-mirrors=["https://opam.ocaml.org/cache"]'
-
-      - name: Install stress test dependencies
-        run: opam install --yes --with-test --deps-only .
-
-      - name: Run stress tests
-        env:
-          OBSERVE_QCHECK_COUNT: ${{ env.OBSERVE_STRESS_QCHECK_COUNT }}
-          OBSERVE_RACE_TRIALS: ${{ env.OBSERVE_STRESS_RACE_TRIALS }}
-          OBSERVE_CONCURRENCY_WORK: ${{ env.OBSERVE_STRESS_CONCURRENCY_WORK }}
-        run: opam exec -- dune build @stress
-
   ci-required:
     name: Required CI
     if: always() && (github.event_name != 'pull_request' || github.event.pull_request.draft == false)
     needs:
       - hygiene
-      - package-install-build-test
+      - no-service-stress
       - docs-examples
-      - stress
+      - package-install-build-test-lwt
     runs-on: ubuntu-latest
     timeout-minutes: 5
 
@@ -170,9 +178,9 @@ jobs:
       - name: Summarize required checks
         env:
           HYGIENE: ${{ needs.hygiene.result }}
-          PACKAGE_TESTS: ${{ needs.package-install-build-test.result }}
+          NO_SERVICE_STRESS: ${{ needs.no-service-stress.result }}
           DOCS_EXAMPLES: ${{ needs.docs-examples.result }}
-          STRESS: ${{ needs.stress.result }}
+          PACKAGE_INSTALL_BUILD_TEST_LWT: ${{ needs.package-install-build-test-lwt.result }}
         run: |
           failed=0
 
@@ -192,8 +200,8 @@ jobs:
 
           echo "### Required CI" >> "$GITHUB_STEP_SUMMARY"
           check_result "Hygiene" "$HYGIENE"
-          check_result "Package install/build/test matrix" "$PACKAGE_TESTS"
-          check_result "Documentation and examples" "$DOCS_EXAMPLES"
-          check_result "No-service stress tests" "$STRESS"
+          check_result "No-service stress tests" "$NO_SERVICE_STRESS"
+          check_result "Documentation and example build" "$DOCS_EXAMPLES"
+          check_result "Lwt package install/build/test matrix" "$PACKAGE_INSTALL_BUILD_TEST_LWT"
 
           exit "$failed"

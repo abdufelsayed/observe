@@ -2,26 +2,105 @@ module Observer = Observe.Make (Test_io.IO)
 
 let observer = Observer.create (Test_io.Host.create ())
 
-let count_from_env ~default =
-  match Sys.getenv_opt "OBSERVE_QCHECK_COUNT" with
-  | None | Some "" -> default
-  | Some value -> (
-      match int_of_string_opt value with
-      | Some count when count > 0 -> count
-      | _ -> default)
-
 let ascii_string =
   QCheck.Gen.string_size
     ~gen:(QCheck.Gen.char_range '\000' '\127')
-    (QCheck.Gen.int_range 0 64)
+    (QCheck.Gen.int_range 0 32)
 
-let text_case = QCheck.make (QCheck.Gen.pair ascii_string ascii_string)
+let valid_string =
+  QCheck.Gen.oneof_weighted
+    [
+      (8, ascii_string);
+      ( 2,
+        QCheck.Gen.oneof_list
+          [ "مرحبا"; "λ"; "🙂"; "line\nbreak"; "quote\"slash\\" ] );
+    ]
 
-let capture_text tag message =
+let text_case = QCheck.make (QCheck.Gen.pair valid_string valid_string)
+
+type sample =
+  | Null
+  | Bool of bool
+  | Int of int
+  | Float of float
+  | String of string
+  | List of sample list
+  | Object of (string * sample) list
+
+let rec value_of_sample = function
+  | Null -> Observe.Value.null
+  | Bool value -> Observe.Value.bool value
+  | Int value -> Observe.Value.int value
+  | Float value -> Observe.Value.float value
+  | String value -> Observe.Value.string value
+  | List values -> Observe.Value.list (List.map value_of_sample values)
+  | Object fields ->
+      Observe.Value.object_
+        (List.map (fun (name, value) -> (name, value_of_sample value)) fields)
+
+let scalar_sample =
+  let open QCheck.Gen in
+  oneof
+    [
+      return Null;
+      map (fun value -> Bool value) bool;
+      map (fun value -> Int value) (int_range (-10_000) 10_000);
+      map
+        (fun value -> Float (float_of_int value /. 10.))
+        (int_range (-10_000) 10_000);
+      map (fun value -> String value) valid_string;
+    ]
+
+let rec sample_gen depth =
+  let open QCheck.Gen in
+  if depth = 0 then scalar_sample
+  else
+    let child = sample_gen (depth - 1) in
+    oneof_weighted
+      [
+        (6, scalar_sample);
+        (2, map (fun values -> List values) (list_size (int_range 0 4) child));
+        ( 2,
+          map
+            (fun fields -> Object fields)
+            (list_size (int_range 0 4) (pair valid_string child)) );
+      ]
+
+let shrink_valid_string value =
+  if String.length value = 0 then QCheck.Iter.empty else QCheck.Iter.return ""
+
+let rec shrink_sample = function
+  | Null -> QCheck.Iter.empty
+  | Bool value ->
+      QCheck.Iter.map (fun value -> Bool value) (QCheck.Shrink.bool value)
+  | Int value ->
+      QCheck.Iter.map (fun value -> Int value) (QCheck.Shrink.int value)
+  | Float value ->
+      QCheck.Iter.map (fun value -> Float value) (QCheck.Shrink.float value)
+  | String value ->
+      QCheck.Iter.map (fun value -> String value) (shrink_valid_string value)
+  | List values ->
+      QCheck.Iter.append (QCheck.Iter.return Null)
+        (QCheck.Iter.map
+           (fun values -> List values)
+           (QCheck.Shrink.list ~shrink:shrink_sample values))
+  | Object fields ->
+      let shrink_field = QCheck.Shrink.pair shrink_valid_string shrink_sample in
+      QCheck.Iter.append (QCheck.Iter.return Null)
+        (QCheck.Iter.map
+           (fun fields -> Object fields)
+           (QCheck.Shrink.list ~shrink:shrink_field fields))
+
+let sample =
+  QCheck.make ~shrink:shrink_sample
+    ~print:(fun sample -> Observe.Value.to_string (value_of_sample sample))
+    (sample_gen 3)
+
+let capture message =
   let config = Test_io.config "property" in
   match
     Observer.with_capture observer config (fun capture ->
-        Observe.Logs.info (Observe.Logs.text ~tag message);
+        Observe.Logs.info message;
         match Observe.Capture.logs capture with
         | [ log ] -> log
         | _ -> failwith "expected one captured log")
@@ -29,22 +108,10 @@ let capture_text tag message =
   | Ok log -> log
   | Error _ -> failwith "I/O implementation unexpectedly conflicted"
 
-let capture_structure key value =
-  let config = Test_io.config "property" in
-  match
-    Observer.with_capture observer config (fun capture ->
-        Observe.Logs.info
-          (Observe.Logs.free (fun () ->
-               Observe.Value.object_ [ (key, Observe.Value.string value) ]));
-        match Observe.Capture.logs capture with
-        | [ log ] -> log
-        | _ -> failwith "expected one captured log")
-  with
-  | Ok log -> log
-  | Error _ -> failwith "I/O implementation unexpectedly conflicted"
-
-let format style log =
-  Observe.Formatter.format (Observe.Formatter.readable style) log
+let capture_text tag message = capture (Observe.Logs.text ~tag message)
+let capture_value value = capture (Observe.Logs.free (fun () -> value))
+let format formatter log = Observe.Formatter.format formatter log
+let readable style log = format (Observe.Formatter.readable style) log
 
 let strip_ansi value =
   let buffer = Buffer.create (String.length value) in
@@ -64,8 +131,18 @@ let strip_ansi value =
   in
   copy 0
 
-let has_raw_record_control value =
-  String.exists (function '\027' | '\r' | '\n' -> true | _ -> false) value
+let valid_json value =
+  let decoder = Jsonm.decoder (`String value) in
+  let rec decode saw_lexeme =
+    match Jsonm.decode decoder with
+    | `Lexeme _ -> decode true
+    | `End -> saw_lexeme
+    | `Await | `Error _ -> false
+  in
+  decode false
+
+let has_raw_terminal_control value =
+  String.exists (function '\027' | '\r' -> true | _ -> false) value
 
 let count character value =
   String.fold_left
@@ -73,16 +150,16 @@ let count character value =
     0 value
 
 let prop_color_preserves_plain_and_controls_are_escaped =
-  QCheck.Test.make ~count:(count_from_env ~default:300)
+  QCheck.Test.make ~count:(Test_profile.qcheck_count ~default:300)
     ~name:"color strips to plain and caller controls stay escaped" text_case
     (fun (tag, message) ->
       let log = capture_text tag message in
-      match format Observe.Formatter.Plain log with
+      match readable Observe.Formatter.Plain log with
       | Error _ -> false
       | Ok plain ->
           List.for_all
             (fun style ->
-              match format style log with
+              match readable style log with
               | Ok styled -> strip_ansi styled = plain
               | Error _ -> false)
             [
@@ -90,18 +167,83 @@ let prop_color_preserves_plain_and_controls_are_escaped =
               Observe.Formatter.Ansi_256;
               Observe.Formatter.Truecolor;
             ]
-          && not (has_raw_record_control plain))
+          && (not (has_raw_terminal_control plain))
+          && not (String.contains plain '\n'))
 
-let prop_structure_controls_are_escaped =
-  QCheck.Test.make ~count:(count_from_env ~default:300)
-    ~name:"structural keys and values cannot inject terminal controls" text_case
-    (fun (key, value) ->
-      match format Observe.Formatter.Plain (capture_structure key value) with
-      | Ok output ->
-          count '\n' output = 1
-          && (not (String.contains output '\027'))
-          && not (String.contains output '\r')
-      | Error _ -> false)
+let prop_rich_values_have_equivalent_readable_and_valid_json_projections =
+  QCheck.Test.make ~count:(Test_profile.qcheck_count ~default:300)
+    ~name:"rich values preserve readable styling and form one valid JSON value"
+    sample (fun sample ->
+      let log = capture_value (value_of_sample sample) in
+      match
+        ( readable Observe.Formatter.Plain log,
+          format Observe.Formatter.json log,
+          format Observe.Formatter.json_lines log )
+      with
+      | Ok plain, Ok json, Ok json_lines ->
+          List.for_all
+            (fun style ->
+              match readable style log with
+              | Ok styled -> strip_ansi styled = plain
+              | Error _ -> false)
+            [
+              Observe.Formatter.Ansi_16;
+              Observe.Formatter.Ansi_256;
+              Observe.Formatter.Truecolor;
+            ]
+          && (not (has_raw_terminal_control plain))
+          && valid_json json
+          && json_lines = json ^ "\n"
+          && count '\n' json_lines = 1
+      | Error _, _, _ | _, Error _, _ | _, _, Error _ -> false)
+
+let invalid_utf8 =
+  QCheck.make
+    ~print:(fun value -> Printf.sprintf "0x%02x" (Char.code value.[0]))
+    (QCheck.Gen.map
+       (fun byte -> String.make 1 (Char.chr byte))
+       (QCheck.Gen.int_range 0x80 0xff))
+
+let is_invalid_utf8 = function
+  | Error Observe.Formatter.Invalid_utf8 -> true
+  | _ -> false
+
+let prop_invalid_utf8_is_rejected_at_every_projection_boundary =
+  QCheck.Test.make ~count:(Test_profile.qcheck_count ~default:128)
+    ~name:"invalid UTF-8 is rejected in free-form keys and values" invalid_utf8
+    (fun invalid ->
+      let invalid_key =
+        capture_value
+          (Observe.Value.object_ [ (invalid, Observe.Value.string "value") ])
+      in
+      let invalid_value =
+        capture_value
+          (Observe.Value.object_ [ ("key", Observe.Value.string invalid) ])
+      in
+      List.for_all
+        (fun log ->
+          is_invalid_utf8 (readable Observe.Formatter.Plain log)
+          && is_invalid_utf8 (format Observe.Formatter.json log)
+          && is_invalid_utf8 (format Observe.Formatter.json_lines log))
+        [ invalid_key; invalid_value ])
+
+let test_non_finite_floats_are_rejected () =
+  List.iter
+    (fun value ->
+      let log = capture_value (Observe.Value.float value) in
+      let check name result =
+        Alcotest.(check bool)
+          name true
+          (match result with
+          | Error Observe.Formatter.Non_finite_float -> true
+          | Ok _ | Error _ -> false)
+      in
+      check "readable rejects non-finite float"
+        (readable Observe.Formatter.Plain log);
+      check "JSON rejects non-finite float" (format Observe.Formatter.json log);
+      check "JSON Lines rejects non-finite float"
+        (format Observe.Formatter.json_lines log))
+    [ Float.nan; Float.infinity; Float.neg_infinity ]
 
 let () =
   Alcotest.run "observe-formatter-properties"
@@ -111,6 +253,13 @@ let () =
           QCheck_alcotest.to_alcotest ~speed_level:`Quick
             prop_color_preserves_plain_and_controls_are_escaped;
           QCheck_alcotest.to_alcotest ~speed_level:`Quick
-            prop_structure_controls_are_escaped;
+            prop_rich_values_have_equivalent_readable_and_valid_json_projections;
+          QCheck_alcotest.to_alcotest ~speed_level:`Quick
+            prop_invalid_utf8_is_rejected_at_every_projection_boundary;
+        ] );
+      ( "unit:observe:formatter-boundaries",
+        [
+          Alcotest.test_case "non-finite floats are rejected" `Quick
+            test_non_finite_floats_are_rejected;
         ] );
     ]

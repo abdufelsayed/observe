@@ -23,3 +23,8 @@
 - Distribute the portable core, configurable Lwt I/O, and ready Lwt-Unix
   composition as separate opam packages while keeping `observe.ppx` with the
   core package.
+- Establish package-owned correctness and discovery gates with model-based
+  capture properties, rich formatter projections, parameterized concurrency
+  pressure, temporal and bounded-space laws, and reproducible stress reports.
+- Add a separate Bechamel maintainer tool for component, controlled-core, and
+  real Lwt-Unix measurements with structured JSON reports.

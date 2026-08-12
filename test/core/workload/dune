@@ -1,0 +1,25 @@
+(executable
+ (name test_time_space_properties)
+ (modules test_time_space_properties)
+ (libraries
+  observe
+  observe_test_support
+  alcotest
+  qcheck-core
+  qcheck-alcotest))
+
+(rule
+ (alias observe-workload-laws)
+ (package observe)
+ (deps
+  test_time_space_properties.exe
+  (env_var OBSERVE_QCHECK_COUNT)
+  (env_var QCHECK_SEED))
+ (action
+  (run %{exe:test_time_space_properties.exe})))
+
+(alias
+ (name discovery)
+ (package observe)
+ (deps
+  (alias observe-workload-laws)))

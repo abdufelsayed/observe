@@ -1,0 +1,6 @@
+(executable
+ (name observe_bench)
+ (modules benchmark_io payload scenario measurement report observe_bench)
+ (libraries observe observe-lwt-unix bechamel unix)
+ (preprocess
+  (pps observe.ppx)))

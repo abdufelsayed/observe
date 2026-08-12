@@ -1,11 +1,3 @@
-let count_from_env ~default =
-  match Sys.getenv_opt "OBSERVE_QCHECK_COUNT" with
-  | None | Some "" -> default
-  | Some value -> (
-      match int_of_string_opt value with
-      | Some count when count > 0 -> count
-      | _ -> default)
-
 let levels =
   [
     Observe.Level.Debug;
@@ -20,18 +12,18 @@ let level =
 let level_pair = QCheck.pair level level
 
 let prop_level_compare_and_equal_agree =
-  QCheck.Test.make ~count:(count_from_env ~default:200)
+  QCheck.Test.make ~count:(Test_profile.qcheck_count ~default:200)
     ~name:"compare zero exactly when equal" level_pair (fun (left, right) ->
       Observe.Level.compare left right = 0 = Observe.Level.equal left right)
 
 let prop_level_compare_is_antisymmetric =
-  QCheck.Test.make ~count:(count_from_env ~default:200)
+  QCheck.Test.make ~count:(Test_profile.qcheck_count ~default:200)
     ~name:"comparison signs are antisymmetric" level_pair (fun (left, right) ->
       Int.compare (Observe.Level.compare left right) 0
       = -Int.compare (Observe.Level.compare right left) 0)
 
 let prop_instant_round_trips =
-  QCheck.Test.make ~count:(count_from_env ~default:500)
+  QCheck.Test.make ~count:(Test_profile.qcheck_count ~default:500)
     ~name:"epoch nanoseconds round-trip" QCheck.int64 (fun nanoseconds ->
       nanoseconds
       = Observe.Instant.(
@@ -39,7 +31,7 @@ let prop_instant_round_trips =
 
 let prop_instant_compare_agrees_with_int64 =
   QCheck.Test.make
-    ~count:(count_from_env ~default:300)
+    ~count:(Test_profile.qcheck_count ~default:300)
     ~name:"instant comparison agrees with epoch nanoseconds"
     QCheck.(pair int64 int64)
     (fun (left, right) ->

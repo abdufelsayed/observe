@@ -49,9 +49,9 @@ let init_race participants =
   Alcotest.(check int)
     "every other publication loses" (participants - 1) already
 
-let capture_conservation work =
+let capture_conservation work capacity =
   let work = max 1 work in
-  let capacity = max 1 (work / 2) in
+  let capacity = max 1 capacity in
   let observer = Observer.create (Test_io.Host.create ()) in
   let result =
     Observer.with_capture observer (config ()) ~capacity (fun capture ->
@@ -79,7 +79,8 @@ let capture_conservation work =
       (Observe.Capture.diagnostics capture)
       Observe.Diagnostics.Capture_overflow
   in
-  Alcotest.(check int) "capacity retained exactly" capacity retained;
+  Alcotest.(check int)
+    "capacity retains the available prefix" (min capacity work) retained;
   Alcotest.(check int) "every offer accounted for" work (retained + overflow)
 
 let diagnostic_counting work =
@@ -115,13 +116,15 @@ let diagnostic_counting work =
 
 let () =
   let mode = if Array.length Sys.argv > 1 then Sys.argv.(1) else "missing" in
-  let work =
-    if Array.length Sys.argv > 2 then
-      Option.value (int_of_string_opt Sys.argv.(2)) ~default:1
-    else 1
+  let argument index ~default =
+    if Array.length Sys.argv > index then
+      Option.value (int_of_string_opt Sys.argv.(index)) ~default
+    else default
   in
+  let work = argument 2 ~default:1 in
   match mode with
   | "init-race" -> init_race work
-  | "capture-conservation" -> capture_conservation work
+  | "capture-conservation" ->
+      capture_conservation work (argument 3 ~default:(max 1 (work / 2)))
   | "diagnostic-counting" -> diagnostic_counting work
   | _ -> Alcotest.failf "unknown concurrency scenario: %s" mode

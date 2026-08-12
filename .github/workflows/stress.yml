@@ -28,6 +28,9 @@ permissions:
 
 env:
   OCAML_LATEST: "5"
+  OBSERVE_STRESS_QCHECK_COUNT: ${{ github.event_name == 'workflow_dispatch' && inputs.qcheck_count || '2000' }}
+  OBSERVE_STRESS_RACE_TRIALS: ${{ github.event_name == 'workflow_dispatch' && inputs.race_trials || '100' }}
+  OBSERVE_STRESS_CONCURRENCY_WORK: ${{ github.event_name == 'workflow_dispatch' && inputs.concurrency_work || '64' }}
 
 jobs:
   stress:
@@ -51,11 +54,19 @@ jobs:
         run: opam option --global 'archive-mirrors=["https://opam.ocaml.org/cache"]'
 
       - name: Install stress test dependencies
-        run: opam install --yes --with-test --deps-only .
+        run: opam install --yes --with-test --with-doc --with-dev-setup --deps-only .
 
-      - name: Run stress tests
+      - name: Run no-service stress tests
         env:
-          OBSERVE_QCHECK_COUNT: ${{ inputs.qcheck_count }}
-          OBSERVE_RACE_TRIALS: ${{ inputs.race_trials }}
-          OBSERVE_CONCURRENCY_WORK: ${{ inputs.concurrency_work }}
-        run: opam exec -- dune build @stress
+          OBSERVE_QCHECK_COUNT: ${{ env.OBSERVE_STRESS_QCHECK_COUNT }}
+          OBSERVE_RACE_TRIALS: ${{ env.OBSERVE_STRESS_RACE_TRIALS }}
+          OBSERVE_CONCURRENCY_WORK: ${{ env.OBSERVE_STRESS_CONCURRENCY_WORK }}
+        run: scripts/test.sh stress --label manual-stress
+
+      - name: Upload stress test report
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: stress-test-report
+          path: .logs/
+          if-no-files-found: ignore

@@ -46,6 +46,10 @@
    (and
     :with-test
     (>= 0.91)))
+  (bechamel
+   (and
+    :with-dev-setup
+    (>= 0.5.0)))
   (ocamlfind :with-test)
   (ocamlformat
    (and

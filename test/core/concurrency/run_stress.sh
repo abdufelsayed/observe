@@ -25,9 +25,23 @@ esac
 
 trial=0
 while [ "$trial" -lt "$trials" ]; do
-  "$runner" init-race 8
+  participants=$((2 + trial % 15))
+  "$runner" init-race "$participants"
   trial=$((trial + 1))
 done
 
-"$runner" capture-conservation "$work"
+half=$((work / 2))
+if [ "$half" -lt 1 ]; then
+  half=1
+fi
+
+"$runner" capture-conservation 1 1
+"$runner" capture-conservation 8 1
+"$runner" capture-conservation 8 3
+"$runner" capture-conservation "$work" 1
+"$runner" capture-conservation "$work" "$half"
+"$runner" capture-conservation "$work" "$work"
+"$runner" capture-conservation "$work" "$((work + 3))"
+"$runner" diagnostic-counting 1
+"$runner" diagnostic-counting 8
 "$runner" diagnostic-counting "$work"
