@@ -1,10 +1,13 @@
 module IO = Observe_lwt.IO
 
+let owner_thread = Thread.id (Thread.self ())
+
 let state =
   Observe_lwt.create
-    ~clock:(fun () -> Ok (Observe.Instant.of_epoch_nanoseconds 0L))
+    ~clock:(fun () -> Ok (Observe.Timestamp.of_unix_ns 0L))
     ~console_style:(fun () -> Observe.Formatter.Plain)
     ~write_console:(fun _ -> Observe.IO.Accepted)
+    ~can_lookup_context:(fun () -> Thread.id (Thread.self ()) = owner_thread)
     ()
 
 let test_dynamic_binding () =
@@ -70,6 +73,19 @@ let test_control_exception () =
     "ordinary exception is not control flow" false
     (IO.is_control_exception state Exit)
 
+let test_foreign_thread_lookup () =
+  let key = IO.create_key () in
+  let seen = ref (Some "not-run") in
+  IO.with_binding state key "scheduler" (fun () ->
+      let thread = Thread.create (fun () -> seen := IO.get state key) () in
+      Thread.join thread;
+      Alcotest.(check (option string))
+        "scheduler binding is unchanged" (Some "scheduler") (IO.get state key);
+      Lwt.return_unit)
+  |> Lwt_main.run;
+  Alcotest.(check (option string))
+    "foreign thread has no Lwt context" None !seen
+
 let () =
   Alcotest.run "observe-lwt"
     [
@@ -83,5 +99,7 @@ let () =
           Alcotest.test_case "cancellation cleanup" `Quick
             test_cancellation_cleanup;
           Alcotest.test_case "control exception" `Quick test_control_exception;
+          Alcotest.test_case "foreign thread lookup" `Quick
+            test_foreign_thread_lookup;
         ] );
     ]

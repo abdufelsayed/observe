@@ -17,8 +17,8 @@ let barrier participants =
       done;
     Mutex.unlock mutex
 
-let config ?silent ?drains () =
-  Test_io.config ?silent ?drains ~min_level:Observe.Level.Debug "concurrency"
+let config ?console ?drains () =
+  Test_io.config ?console ?drains ~min_level:Observe.Level.Debug "concurrency"
 
 let init_race participants =
   let participants = max 2 participants in

@@ -17,7 +17,7 @@ opam exec -- dune exec bench/observe_bench.exe -- \
   --compare .logs/benchmarks/baseline.json
 ```
 
-The tool prints a table and writes a Repr-encoded JSON report under
+The tool prints a table and writes a compact typed JSON report under
 `.logs/benchmarks/` by default. Use `--output PATH` to select another location.
 Every scenario runs in a fresh child process because Observe initialization is
 process-wide and one-shot.
@@ -30,15 +30,17 @@ promoted words; promoted allocation is also reported separately.
 
 ## Suites
 
-- `component` isolates free-form value construction, Repr JSON projection, and
-  JSON or readable formatting.
+- `component` isolates free-form value construction, typed JSON projection, and
+  JSON or pretty formatting.
 - `core` measures public logging calls with a controlled clock and no-op I/O.
-  It covers filtering, routing, drain fan-out, JSON, and true-color readable
+  It covers filtering, routing, drain fan-out, JSON, and true-color pretty
   formatting.
 - `lwt-unix` initializes `Observe_lwt_unix` and performs its real clock and Unix
-  standard-error write. Standard error is redirected to `/dev/null` before
-  initialization, so the adapter uses its non-TTY plain style and the benchmark
-  does not flood the caller's terminal.
+  standard-error write. Each measured operation includes a `flush` sequence
+  barrier, so it measures formatting, bounded submission, scheduler wakeup,
+  and completed delivery rather than a full queue's rejection path. Standard
+  error is redirected to `/dev/null` before initialization, so the adapter uses
+  its non-TTY plain style and does not flood the caller's terminal.
 
 Free-form and typed scenarios use the same small or nested logical payload.
 Compare measurements only when their report metadata, benchmark configuration,

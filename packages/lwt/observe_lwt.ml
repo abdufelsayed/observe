@@ -1,13 +1,14 @@
 type state = {
-  clock : unit -> (Observe.Instant.t, Observe.IO.clock_error) result;
+  clock : unit -> (Observe.Timestamp.t, Observe.IO.clock_error) result;
   console_style : unit -> Observe.Formatter.style;
   write_console : string -> Observe.IO.console_acceptance;
+  can_lookup_context : unit -> bool;
 }
 
 type t = state
 
-let create ~clock ~console_style ~write_console () =
-  { clock; console_style; write_console }
+let create ~clock ~console_style ~write_console ~can_lookup_context () =
+  { clock; console_style; write_console; can_lookup_context }
 
 module IO = struct
   type +'a t = 'a Lwt.t
@@ -17,7 +18,7 @@ module IO = struct
   let return = Lwt.return
   let bind = Lwt.bind
   let create_key = Lwt.new_key
-  let get _state key = Lwt.get key
+  let get state key = if state.can_lookup_context () then Lwt.get key else None
 
   let with_binding _state key value callback =
     Lwt.with_value key (Some value) callback

@@ -59,6 +59,9 @@
   value_unsupported.ml
   value_suffixed_integer.ml
   value_record_update.ml
+  deriver_abstract.ml
+  deriver_gadt.ml
+  deriver_open_polyvariant.ml
   ppx_driver.exe)
  (action
   (progn
@@ -79,7 +82,25 @@
     %{dep:check_negative.sh}
     %{exe:ppx_driver.exe}
     %{dep:value_record_update.ml}
-    "[%observe.value]: record updates are not valid free-form objects"))))
+    "[%observe.value]: record updates are not valid free-form objects")
+   (run
+    bash
+    %{dep:check_negative.sh}
+    %{exe:ppx_driver.exe}
+    %{dep:deriver_abstract.ml}
+    "abstract types need a manifest")
+   (run
+    bash
+    %{dep:check_negative.sh}
+    %{exe:ppx_driver.exe}
+    %{dep:deriver_gadt.ml}
+    "GADT result types are not supported")
+   (run
+    bash
+    %{dep:check_negative.sh}
+    %{exe:ppx_driver.exe}
+    %{dep:deriver_open_polyvariant.ml}
+    "open polymorphic variants are not supported"))))
 
 (rule
  (alias observe-ppx-expansion)
@@ -91,6 +112,17 @@
     %{target}
     (run %{exe:ppx_driver.exe} --impl %{dep:inline_expansion.ml}))
    (run %{exe:check_inline_expansion.exe} %{target}))))
+
+(rule
+ (alias observe-ppx-expansion)
+ (target recursive_expansion.actual)
+ (deps recursive_expansion.ml ppx_driver.exe check_inline_expansion.exe)
+ (action
+  (progn
+   (with-stdout-to
+    %{target}
+    (run %{exe:ppx_driver.exe} --impl %{dep:recursive_expansion.ml}))
+   (run %{exe:check_inline_expansion.exe} %{target} recursive))))
 
 (alias
  (name observe-ppx-contracts)

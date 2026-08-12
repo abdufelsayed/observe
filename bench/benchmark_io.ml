@@ -2,14 +2,14 @@ type 'a binding_key = { mutable value : 'a option }
 
 type t = {
   style : Observe.Formatter.style;
-  clock : unit -> (Observe.Instant.t, Observe.IO.clock_error) result;
+  clock : unit -> (Observe.Timestamp.t, Observe.IO.clock_error) result;
   console : string -> Observe.IO.console_acceptance;
 }
 
 type host = t
 
 let create ?(style = Observe.Formatter.Plain)
-    ?(clock = fun () -> Ok (Observe.Instant.of_epoch_nanoseconds 42L))
+    ?(clock = fun () -> Ok (Observe.Timestamp.of_unix_ns 42L))
     ?(console =
       fun output ->
         ignore (Sys.opaque_identity output : string);

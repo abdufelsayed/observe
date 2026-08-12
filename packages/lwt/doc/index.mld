@@ -3,7 +3,10 @@
 [observe-lwt] supplies a configurable Lwt implementation of [Observe.IO.S].
 It provides callback-local dynamic bindings, cleanup, and native
 [Lwt.Canceled] handling, then {!val:Observe_lwt.create} completes it with a
-caller-provided clock and console.
+caller-provided clock, console, and dynamic-context safety check. The latter
+keeps [observe-lwt] portable: a single-threaded runtime can always allow lookup,
+while a threaded composition should allow it only in the scheduler execution
+context.
 
 Use {!module:Observe_lwt.IO} with [Observe.Make] when an
 application needs a custom Lwt composition. Most Lwt applications on Unix can

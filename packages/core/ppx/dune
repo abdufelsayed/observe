@@ -2,5 +2,20 @@
  (name observe_ppx)
  (public_name observe.ppx)
  (kind ppx_rewriter)
+ (modules
+  observe_ppx
+  deriver
+  generated_ast
+  json
+  pretty
+  type_shape
+  value_extension)
+ (private_modules
+  deriver
+  generated_ast
+  json
+  pretty
+  type_shape
+  value_extension)
  (libraries ppxlib ppx_repr.lib)
  (ppx_runtime_libraries observe))

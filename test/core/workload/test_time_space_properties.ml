@@ -17,7 +17,7 @@ let host =
     ~now:(fun () ->
       incr clock_calls;
       match !current_clock with
-      | At nanoseconds -> Ok (Observe.Instant.of_epoch_nanoseconds nanoseconds)
+      | At nanoseconds -> Ok (Observe.Timestamp.of_unix_ns nanoseconds)
       | Unavailable -> Error Observe.IO.Unavailable
       | Raised -> failwith "generated clock failure")
     ()
@@ -34,7 +34,7 @@ let levels =
 
 let level_gen = QCheck.Gen.oneof_list levels
 
-let instant_gen =
+let timestamp_gen =
   QCheck.Gen.oneof_weighted
     [
       (8, QCheck.Gen.int64);
@@ -55,7 +55,7 @@ let instant_gen =
 let clock_gen =
   QCheck.Gen.oneof_weighted
     [
-      (8, QCheck.Gen.map (fun value -> At value) instant_gen);
+      (8, QCheck.Gen.map (fun value -> At value) timestamp_gen);
       (1, QCheck.Gen.return Unavailable);
       (1, QCheck.Gen.return Raised);
     ]
@@ -110,13 +110,13 @@ let temporal_case =
     | Raised -> "raised"
   in
   let print_event event =
-    Printf.sprintf "{%s;%s;%d}"
+    Format.asprintf "{%s;%s;%d}"
       (Observe.Level.to_string event.level)
       (print_clock event.clock) event.value
   in
   QCheck.make ~shrink
     ~print:(fun case ->
-      Printf.sprintf "enabled=%b min=%s events=[%s]" case.enabled
+      Format.asprintf "enabled=%b min=%s events=[%s]" case.enabled
         (Observe.Level.to_string case.min_level)
         (String.concat ";" (List.map print_event case.events)))
     generator
@@ -149,7 +149,7 @@ let prop_temporal_pipeline_obeys_stage_boundaries =
               (fun event ->
                 current_clock := event.clock;
                 Observe.Logs.emit ~level:event.level
-                  (Observe.Logs.free (fun () ->
+                  (Observe.Logs.free_lazy (fun () ->
                        incr forced;
                        Observe.Value.int event.value)))
               case.events;
@@ -164,7 +164,7 @@ let prop_temporal_pipeline_obeys_stage_boundaries =
               0 case.events
           in
           let successful_events = List.filter (successful case) case.events in
-          let expected_instants =
+          let expected_timestamps =
             List.map
               (fun event ->
                 match event.clock with
@@ -172,10 +172,10 @@ let prop_temporal_pipeline_obeys_stage_boundaries =
                 | Unavailable | Raised -> assert false)
               successful_events
           in
-          let retained_instants =
+          let retained_timestamps =
             List.map
               (fun log ->
-                Observe.Instant.to_epoch_nanoseconds (Observe.Log.instant log))
+                Observe.Timestamp.to_unix_ns (Observe.Log.timestamp log))
               (Observe.Capture.logs capture)
           in
           let unavailable =
@@ -195,7 +195,7 @@ let prop_temporal_pipeline_obeys_stage_boundaries =
           in
           !clock_calls = admitted_count
           && !forced = List.length successful_events
-          && retained_instants = expected_instants
+          && retained_timestamps = expected_timestamps
           && diagnostic_count capture Observe.Diagnostics.Clock_unavailable
              = unavailable
           && diagnostic_count capture Observe.Diagnostics.Clock_raised = raised
@@ -204,7 +204,7 @@ let prop_temporal_pipeline_obeys_stage_boundaries =
 let capacity_case =
   QCheck.make
     ~print:(fun (capacity, offered) ->
-      Printf.sprintf "capacity=%d offered=%d" capacity offered)
+      Format.asprintf "capacity=%d offered=%d" capacity offered)
     ~shrink:
       QCheck.Shrink.(
         pair

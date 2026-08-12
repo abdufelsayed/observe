@@ -2,7 +2,7 @@ module Clock = struct
   let nanoseconds_per_day = 86_400_000_000_000L
   let picoseconds_per_nanosecond = 1_000L
 
-  let instant_of_day_and_picoseconds (days, picoseconds) =
+  let timestamp_of_day_and_picoseconds (days, picoseconds) =
     let days = Int64.of_int days in
     if
       Int64.compare days 0L < 0
@@ -21,10 +21,10 @@ module Clock = struct
       then Error Observe.IO.Unavailable
       else
         Ok
-          (Observe.Instant.of_epoch_nanoseconds
+          (Observe.Timestamp.of_unix_ns
              (Int64.add day_nanoseconds subday_nanoseconds))
 
-  let now () = instant_of_day_and_picoseconds (Ptime_clock.now_d_ps ())
+  let now () = timestamp_of_day_and_picoseconds (Ptime_clock.now_d_ps ())
 end
 
 module Console = struct
@@ -35,8 +35,14 @@ module Console = struct
     let haystack_length = String.length haystack in
     let rec search offset =
       offset + needle_length <= haystack_length
-      && (String.sub haystack offset needle_length = needle
-         || search (offset + 1))
+      &&
+      let rec matches index =
+        index = needle_length
+        || String.unsafe_get haystack (offset + index)
+           = String.unsafe_get needle index
+           && matches (index + 1)
+      in
+      matches 0 || search (offset + 1)
     in
     needle_length = 0 || search 0
 
@@ -65,28 +71,32 @@ module Console = struct
     | (Out_of_memory | Stack_overflow | Sys.Break) as exn -> raise exn
     | _ -> Observe.Formatter.Plain
 
-  let rec write_all value offset remaining =
-    if remaining > 0 then
-      match Unix.write_substring Unix.stderr value offset remaining with
-      | 0 -> raise (Sys_error "Observe console write made no progress")
-      | written -> write_all value (offset + written) (remaining - written)
-      | exception Unix.Unix_error (Unix.EINTR, _, _) ->
-          write_all value offset remaining
+  let output = Output.create ~capacity:1_024 Lwt_unix.stderr
 
   let write value =
-    write_all value 0 (String.length value);
-    Observe.IO.Accepted
+    match Output.offer output value with
+    | Accepted -> Observe.IO.Accepted
+    | Full | Closed -> Observe.IO.Rejected
+
+  let flush () = Output.flush output
+  let shutdown () = Output.shutdown output
 end
 
 module Observer = Observe.Make (Observe_lwt.IO)
 
+let owner_thread = Thread.id (Thread.self ())
+
 let io =
   Observe_lwt.create ~clock:Clock.now ~console_style:Console.style
-    ~write_console:Console.write ()
+    ~write_console:Console.write
+    ~can_lookup_context:(fun () -> Thread.id (Thread.self ()) = owner_thread)
+    ()
 
 let observer = Observer.create io
 let init config = Observer.init observer config
 let init_exn config = Observer.init_exn observer config
+let flush = Console.flush
+let shutdown = Console.shutdown
 
 module Test = struct
   exception Capture_error of Observe.capture_error

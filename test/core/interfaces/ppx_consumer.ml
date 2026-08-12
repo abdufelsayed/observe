@@ -5,7 +5,7 @@ let typed =
   Observe.Logs.structured event_t (Request { request_id = "r1"; attempts = 2 })
 
 let free =
-  Observe.Logs.free
+  Observe.Logs.free_lazy
     [%observe.value
       {
         request_id = "r1";

@@ -89,12 +89,12 @@ end
 module Host = struct
   type t = {
     console_style : Observe.Formatter.style;
-    now : unit -> (Observe.Instant.t, Observe.IO.clock_error) result;
+    now : unit -> (Observe.Timestamp.t, Observe.IO.clock_error) result;
     write_console : string -> Observe.IO.console_acceptance;
   }
 
   let create ?(console_style = Observe.Formatter.Plain)
-      ?(now = fun () -> Ok (Observe.Instant.of_epoch_nanoseconds 42L))
+      ?(now = fun () -> Ok (Observe.Timestamp.of_unix_ns 42L))
       ?(write_console = fun _ -> Observe.IO.Accepted) () =
     { console_style; now; write_console }
 
@@ -159,10 +159,9 @@ module Inherited_io = struct
   end
 end
 
-let config ?environment ?version ?enabled ?pretty ?silent ?min_level ?drains
-    service =
-  Observe.Config.create_exn ~service ?environment ?version ?enabled ?pretty
-    ?silent ?min_level ?drains ()
+let config ?environment ?version ?enabled ?console ?min_level ?drains service =
+  Observe.Config.create_exn ~service ?environment ?version ?enabled ?console
+    ?min_level ?drains ()
 
 let diagnostic_count entries kind =
   List.fold_left

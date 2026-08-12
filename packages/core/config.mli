@@ -1,6 +1,7 @@
 (** Validated process-wide logging behavior. *)
 
 type t
+type console = Auto | Pretty | Ndjson | Silent
 type field = Service | Environment | Version
 type problem = Empty | Invalid_utf8
 type error = { field : field; problem : problem }
@@ -12,8 +13,7 @@ val create :
   ?environment:string ->
   ?version:string ->
   ?enabled:bool ->
-  ?pretty:bool ->
-  ?silent:bool ->
+  ?console:console ->
   ?min_level:Level.t ->
   ?drains:Drain.t list ->
   unit ->
@@ -21,19 +21,17 @@ val create :
 (** Construct validated logging behavior.
 
     [service] is required. Service, environment, and version values must be
-    non-empty valid UTF-8. If [pretty] is absent, readable output is selected
-    when [environment] is absent, [dev], or [development]; other environments
-    select JSON. An explicit [pretty] value overrides this selection. Other
-    defaults are [enabled=true], [silent=false], [min_level=Info], and no
-    drains. *)
+    non-empty valid UTF-8. [Auto] selects pretty output when [environment] is
+    absent, [dev], or [development], and NDJSON otherwise. [Pretty], [Ndjson],
+    and [Silent] override that selection. Other defaults are [enabled=true],
+    [console=Auto], [min_level=Info], and no drains. *)
 
 val create_exn :
   service:string ->
   ?environment:string ->
   ?version:string ->
   ?enabled:bool ->
-  ?pretty:bool ->
-  ?silent:bool ->
+  ?console:console ->
   ?min_level:Level.t ->
   ?drains:Drain.t list ->
   unit ->
@@ -44,8 +42,7 @@ val service : t -> string
 val environment : t -> string option
 val version : t -> string option
 val enabled : t -> bool
-val pretty : t -> bool
-val silent : t -> bool
+val console : t -> console
 val min_level : t -> Level.t
 val drains : t -> Drain.t list
 val pp_error : Format.formatter -> error -> unit

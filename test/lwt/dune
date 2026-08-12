@@ -1,7 +1,7 @@
 (executable
  (name test_lwt_io)
  (modules test_lwt_io)
- (libraries observe-lwt observe alcotest lwt lwt.unix))
+ (libraries observe-lwt observe alcotest lwt lwt.unix threads.posix))
 
 (rule
  (alias observe-lwt-contracts)

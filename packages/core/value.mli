@@ -27,7 +27,11 @@ val to_string : t -> string
 
 type json_error = Invalid_utf8 | Non_finite_float | Unsupported_value
 
-val is_valid_utf8 : string -> bool
+val append_json : Buffer.t -> t -> (unit, json_error) result
+(** Append one compact JSON value. Transactional: [Error] restores the buffer to
+    its length at entry. *)
+
+val append_pretty : Pretty.t -> Pretty.placement -> t -> unit
 
 val to_json_string : t -> (string, json_error) result
 (** Project one JSON value without repairing invalid strings or non-finite

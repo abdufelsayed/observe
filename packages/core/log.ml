@@ -7,7 +7,7 @@ type t = {
   service : string;
   environment : string option;
   version : string option;
-  instant : Instant.t;
+  timestamp : Timestamp.t;
   level : Level.t;
   payload : payload;
 }
@@ -15,11 +15,11 @@ type t = {
 let service log = log.service
 let environment log = log.environment
 let version log = log.version
-let instant log = log.instant
+let timestamp log = log.timestamp
 let level log = log.level
 let payload log = log.payload
 
 module Producer = struct
-  let make ~service ?environment ?version ~instant ~level payload =
-    { service; environment; version; instant; level; payload }
+  let make ~service ?environment ?version ~timestamp ~level payload =
+    { service; environment; version; timestamp; level; payload }
 end

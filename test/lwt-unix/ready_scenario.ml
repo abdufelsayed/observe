@@ -1,7 +1,9 @@
-let fail format = Printf.ksprintf failwith format
+let fail format = Format.kasprintf failwith format
 
 let check condition format =
-  Printf.ksprintf (fun message -> if not condition then failwith message) format
+  Format.kasprintf
+    (fun message -> if not condition then failwith message)
+    format
 
 let contains value fragment =
   let value_length = String.length value in
@@ -26,25 +28,40 @@ let read_all descriptor =
   loop ()
 
 let capture_stderr callback =
-  let input, output = Unix.pipe () in
+  let path = Filename.temp_file "observe" ".stderr" in
+  let output = Unix.openfile path [ Unix.O_RDWR ] 0o600 in
+  Sys.remove path;
   let saved = Unix.dup Unix.stderr in
   Unix.dup2 output Unix.stderr;
-  Unix.close output;
   let outcome =
     match callback () with
-    | value -> Ok value
+    | value ->
+        Lwt_main.run (Observe_lwt_unix.flush ());
+        Ok value
     | exception exn -> Error (exn, Printexc.get_raw_backtrace ())
   in
   Unix.dup2 saved Unix.stderr;
   Unix.close saved;
-  let captured = read_all input in
-  Unix.close input;
+  ignore (Unix.lseek output 0 Unix.SEEK_SET : int);
+  let captured = read_all output in
+  Unix.close output;
   match outcome with
   | Ok value -> (value, captured)
   | Error (exn, backtrace) -> Printexc.raise_with_backtrace exn backtrace
 
-let config ?environment ?pretty ?silent ?drains service =
-  Observe.Config.create_exn ~service ?environment ?pretty ?silent ?drains ()
+let discard_stderr callback =
+  let output = Unix.openfile "/dev/null" [ Unix.O_WRONLY ] 0 in
+  let saved = Unix.dup Unix.stderr in
+  Unix.dup2 output Unix.stderr;
+  Unix.close output;
+  Fun.protect
+    ~finally:(fun () ->
+      Unix.dup2 saved Unix.stderr;
+      Unix.close saved)
+    callback
+
+let config ?environment ?console ?drains service =
+  Observe.Config.create_exn ~service ?environment ?console ?drains ()
 
 let text_tag log =
   match Observe.Log.payload log with
@@ -76,16 +93,15 @@ let clock () =
   in
   let before = Unix.gettimeofday () in
   Observe_lwt_unix.init_exn
-    (config ~silent:true ~drains:[ drain ] "ready-clock");
+    (config ~console:Observe.Config.Silent ~drains:[ drain ] "ready-clock");
   Observe.Logs.info (Observe.Logs.text ~tag:"clock" "sample");
   let after = Unix.gettimeofday () in
-  let instant =
+  let timestamp =
     match !captured with
-    | Some log ->
-        Observe.Log.instant log |> Observe.Instant.to_epoch_nanoseconds
+    | Some log -> Observe.Log.timestamp log |> Observe.Timestamp.to_unix_ns
     | None -> fail "ready I/O did not deliver the clock sample"
   in
-  let seconds = Int64.to_float instant /. 1_000_000_000.0 in
+  let seconds = Int64.to_float timestamp /. 1_000_000_000.0 in
   check (seconds >= before -. 0.001) "clock sample preceded test bounds";
   check (seconds <= after +. 0.001) "clock sample exceeded test bounds"
 
@@ -97,7 +113,7 @@ let console () =
   in
   check
     (contains output " INFO [startup] service ready\n")
-    "unexpected readable output: %S" output;
+    "unexpected pretty output: %S" output;
   check
     (not (contains output "\027["))
     "redirected console output contained ANSI styling: %S" output;
@@ -112,7 +128,8 @@ let json_console () =
   let (), output =
     capture_stderr (fun () ->
         Observe_lwt_unix.init_exn
-          (config ~environment:"development" ~pretty:false "ready-json");
+          (config ~environment:"development" ~console:Observe.Config.Ndjson
+             "ready-json");
         Observe.Logs.info (Observe.Logs.text ~tag:"json" "structured"))
   in
   check
@@ -132,7 +149,7 @@ let production_json_console () =
     "production did not select JSON: %S" output
 
 let repeated_init () =
-  let config = config ~silent:true "repeat" in
+  let config = config ~console:Observe.Config.Silent "repeat" in
   Observe_lwt_unix.init_exn config;
   check
     (Observe_lwt_unix.init config = Error Observe.Already_initialized)
@@ -153,17 +170,65 @@ let silent_drain () =
   let (), output =
     capture_stderr (fun () ->
         Observe_lwt_unix.init_exn
-          (config ~silent:true ~drains:[ drain ] "silent");
+          (config ~console:Observe.Config.Silent ~drains:[ drain ] "silent");
         Observe.Logs.info (Observe.Logs.text ~tag:"silent" "message"))
   in
   check (output = "") "silent logging wrote to stderr: %S" output;
   check (!delivered = 1) "silent logging skipped the configured drain"
 
 let no_output () =
-  Observe_lwt_unix.init_exn (config ~silent:true "no-output");
+  Observe_lwt_unix.init_exn (config ~console:Observe.Config.Silent "no-output");
   check
     (process_diagnostic_count Observe.Diagnostics.No_output = 1)
     "no-output initialization was not diagnosed once"
+
+let bounded_console () =
+  discard_stderr (fun () ->
+      Observe_lwt_unix.init_exn
+        (config ~environment:"production" "bounded-console");
+      for index = 0 to 1_024 do
+        Observe.Logs.info
+          (Observe.Logs.text ~tag:"bounded" (string_of_int index))
+      done;
+      check
+        (process_diagnostic_count Observe.Diagnostics.Console_rejected = 1)
+        "full console queue was not rejected exactly once";
+      Lwt_main.run (Observe_lwt_unix.flush ()))
+
+let serialized_console () =
+  let (), output =
+    capture_stderr (fun () ->
+        Observe_lwt_unix.init_exn
+          (config ~environment:"production" "serialized-console");
+        for index = 0 to 99 do
+          Observe.Logs.info
+            (Observe.Logs.text ~tag:"serialized" (string_of_int index))
+        done)
+  in
+  let lines = String.split_on_char '\n' output in
+  let lines = List.filter (fun line -> String.length line > 0) lines in
+  check (List.length lines = 100) "serialized record count changed";
+  List.iter
+    (fun line ->
+      check
+        (contains line "\"service\":\"serialized-console\"")
+        "serialized output contained a partial or foreign record: %S" line)
+    lines
+
+let shutdown () =
+  let (), output =
+    capture_stderr (fun () ->
+        Observe_lwt_unix.init_exn (config "shutdown");
+        Observe.Logs.info (Observe.Logs.text ~tag:"shutdown" "before");
+        Lwt_main.run (Observe_lwt_unix.shutdown ());
+        Observe.Logs.info (Observe.Logs.text ~tag:"shutdown" "after");
+        check
+          (process_diagnostic_count Observe.Diagnostics.Console_rejected = 1)
+          "post-shutdown output was not rejected")
+  in
+  check (contains output "before") "shutdown lost an accepted record";
+  check (not (contains output "after")) "shutdown accepted a later record";
+  Lwt_main.run (Observe_lwt_unix.shutdown ())
 
 let basic_capture () =
   let capture =
@@ -328,6 +393,9 @@ let scenarios =
     ("repeated-init", repeated_init);
     ("silent-drain", silent_drain);
     ("no-output", no_output);
+    ("bounded-console", bounded_console);
+    ("serialized-console", serialized_console);
+    ("shutdown", shutdown);
     ("basic-capture", basic_capture);
     ("capture-then-init", capture_then_init);
     ("concurrent-capture", concurrent_capture);

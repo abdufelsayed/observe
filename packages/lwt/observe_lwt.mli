@@ -8,13 +8,17 @@ type t
 (** A completed Lwt I/O state. *)
 
 val create :
-  clock:(unit -> (Observe.Instant.t, Observe.IO.clock_error) result) ->
+  clock:(unit -> (Observe.Timestamp.t, Observe.IO.clock_error) result) ->
   console_style:(unit -> Observe.Formatter.style) ->
   write_console:(string -> Observe.IO.console_acceptance) ->
+  can_lookup_context:(unit -> bool) ->
   unit ->
   t
 (** Complete the Lwt implementation with an application-owned clock and console.
-    Construction performs no I/O and does not initialize Observe. *)
+    [can_lookup_context] must return [false] outside the scheduler execution
+    context because Lwt's implicit callback storage is process-global and not
+    thread-safe. A single-threaded runtime can return [true]. Construction
+    performs no I/O and does not initialize Observe. *)
 
 (** Observe effects backed by Lwt promises and callback-local bindings.
 

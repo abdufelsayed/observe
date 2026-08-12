@@ -87,15 +87,15 @@ let run_worker configuration scenario =
       fail ("scenario " ^ Scenario.name scenario ^ " returned no measurement")
   | Unix.WEXITED code, _ ->
       fail
-        (Printf.sprintf "scenario %s exited with status %d"
+        (Format.asprintf "scenario %s exited with status %d"
            (Scenario.name scenario) code)
   | Unix.WSIGNALED signal, _ ->
       fail
-        (Printf.sprintf "scenario %s received signal %d"
+        (Format.asprintf "scenario %s received signal %d"
            (Scenario.name scenario) signal)
   | Unix.WSTOPPED signal, _ ->
       fail
-        (Printf.sprintf "scenario %s stopped with signal %d"
+        (Format.asprintf "scenario %s stopped with signal %d"
            (Scenario.name scenario) signal)
 
 let run_one configuration name =
@@ -132,7 +132,7 @@ let () =
       if !list_scenarios then
         List.iter
           (fun scenario ->
-            Printf.printf "%s\t%s\t%s\t%s\n" (Scenario.name scenario)
+            Format.printf "%s\t%s\t%s\t%s\n" (Scenario.name scenario)
               (Scenario.suite_name (Scenario.suite scenario))
               (Scenario.boundary scenario)
               (Scenario.payload scenario))
@@ -144,7 +144,7 @@ let () =
           Report.metadata ~commit:!commit ~suite:!suite configuration
         in
         Report.write_json ~path:!output_path metadata measurements;
-        Printf.printf "\nWrote %s\n%!" !output_path;
+        Format.printf "\nWrote %s\n%!" !output_path;
         Option.iter
           (fun path -> Report.print_comparison ~baseline:path measurements)
           !baseline

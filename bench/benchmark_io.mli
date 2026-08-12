@@ -2,7 +2,7 @@ type t
 
 val create :
   ?style:Observe.Formatter.style ->
-  ?clock:(unit -> (Observe.Instant.t, Observe.IO.clock_error) result) ->
+  ?clock:(unit -> (Observe.Timestamp.t, Observe.IO.clock_error) result) ->
   ?console:(string -> Observe.IO.console_acceptance) ->
   unit ->
   t

@@ -21,5 +21,5 @@ module Make (IO : Io.S) : sig
     ('a, capture_error) result io
 end
 
-val emit : level:Level.t -> Engine.message -> unit
+val emit : level:Level.t -> Message.t -> unit
 (** Internal entry point for the static [Logs] API. *)

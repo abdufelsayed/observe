@@ -5,16 +5,20 @@
   capture
   config
   diagnostics
-  display
   drain
   engine
   formatter
-  instant
+  formatter_intf
+  timestamp
   io
+  json_writer
   level
   log
   logs
+  message
   observer
+  pretty
+  repr_projection
   type
   utf8
   value)

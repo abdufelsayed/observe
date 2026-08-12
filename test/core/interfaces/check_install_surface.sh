@@ -69,6 +69,8 @@ expected() {
     private_engine.ml.fail) printf '%s' 'Observe__Engine' ;;
     private_observer.ml.fail) printf '%s' 'Observe__Observer' ;;
     untagged_text.ml.fail) printf '%s' 'tag' ;;
+    type_generic.ml.fail) printf '%s' 'Unbound value.*Observe.Type.equal' ;;
+    value_append.ml.fail) printf '%s' 'Unbound value.*Observe.Value.append_json' ;;
     with_tag.ml.fail) printf '%s' 'Unbound value.*Observe.Logs.with_tag' ;;
     *) return 1 ;;
   esac

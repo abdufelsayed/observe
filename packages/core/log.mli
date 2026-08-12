@@ -10,7 +10,7 @@ type payload =
 val service : t -> string
 val environment : t -> string option
 val version : t -> string option
-val instant : t -> Instant.t
+val timestamp : t -> Timestamp.t
 val level : t -> Level.t
 val payload : t -> payload
 
@@ -19,7 +19,7 @@ module Producer : sig
     service:string ->
     ?environment:string ->
     ?version:string ->
-    instant:Instant.t ->
+    timestamp:Timestamp.t ->
     level:Level.t ->
     payload ->
     t

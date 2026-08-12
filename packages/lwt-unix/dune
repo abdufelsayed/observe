@@ -1,4 +1,5 @@
 (library
  (name observe_lwt_unix)
  (public_name observe-lwt-unix)
- (libraries observe observe-lwt lwt lwt.unix ptime.clock unix))
+ (private_modules output)
+ (libraries observe observe-lwt lwt lwt.unix ptime.clock unix threads.posix))

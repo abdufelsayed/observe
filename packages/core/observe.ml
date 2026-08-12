@@ -1,6 +1,13 @@
 module Type = Type
+
+module Generated_runtime = struct
+  type 'a description = 'a Type.t
+
+  include Type.Generated_runtime
+end
+
 module Level = Level
-module Instant = Instant
+module Timestamp = Timestamp
 module Value = Value
 module Log = Log
 module Diagnostics = Diagnostics

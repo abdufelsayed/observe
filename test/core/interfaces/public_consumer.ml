@@ -17,7 +17,7 @@ module IO = struct
   let is_control_exception () _ = false
 
   module Clock = struct
-    let now () = Ok (Observe.Instant.of_epoch_nanoseconds 0L)
+    let now () = Ok (Observe.Timestamp.of_unix_ns 0L)
   end
 
   module Console = struct
@@ -31,7 +31,7 @@ module Observer = Observe.Make (IO)
 let config = Observe.Config.create_exn ~service:"consumer" ()
 let observer = Observer.create ()
 let text = Observe.Logs.text ~tag:"consumer" "message"
-let free = Observe.Logs.free (fun () -> Observe.Value.int 1)
+let free = Observe.Logs.free (Observe.Value.int 1)
 let structured = Observe.Logs.structured Observe.Type.int 1
-let readable = Observe.Formatter.readable Observe.Formatter.Plain
-let _ = (config, observer, text, free, structured, readable)
+let pretty = Observe.Formatter.pretty Observe.Formatter.Plain
+let _ = (config, observer, text, free, structured, pretty)

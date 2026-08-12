@@ -17,7 +17,7 @@ The repository ships a runtime-neutral `observe` package, configurable
 core performs no I/O. Integrations implement one completed `Observe.IO.S`;
 `Observe.Make (IO)` owns observer behavior over that implementation.
 
-Readable console presentation is owned by the portable core. The ready
+Pretty console presentation is owned by the portable core. The ready
 Lwt-Unix composition reports standard error's detected terminal capability and
 writes the completed bytes unchanged. One semantic palette is automatically
 rendered as truecolor, 256-color, 16-color, or plain output.

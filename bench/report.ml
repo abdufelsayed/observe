@@ -67,7 +67,7 @@ let architecture () =
 
 let timestamp () =
   let time = Unix.gmtime (Unix.gettimeofday ()) in
-  Printf.sprintf "%04d-%02d-%02dT%02d:%02d:%02dZ" (time.tm_year + 1900)
+  Format.asprintf "%04d-%02d-%02dT%02d:%02d:%02dZ" (time.tm_year + 1900)
     (time.tm_mon + 1) time.tm_mday time.tm_hour time.tm_min time.tm_sec
 
 let metadata ~commit ~suite (configuration : Measurement.configuration) =
@@ -140,14 +140,14 @@ let write_json ~path metadata measurements =
   let report =
     { schema_version = 1; metadata; results = List.map entry measurements }
   in
-  write_file path (Observe.Type.to_json_string ~minify:false report_t report)
+  write_file path (Observe.Type.to_json_string report_t report)
 
 let print_table measurements =
-  Printf.printf "%-43s %12s %12s %12s %12s %8s\n%!" "scenario" "ns/op" "ops/s"
+  Format.printf "%-43s %12s %12s %12s %12s %8s\n%!" "scenario" "ns/op" "ops/s"
     "minor B/op" "major B/op" "samples";
   List.iter
     (fun (measurement : Measurement.t) ->
-      Printf.printf "%-43s %12.1f %12.0f %12.1f %12.1f %8d\n%!" measurement.name
+      Format.printf "%-43s %12.1f %12.0f %12.1f %12.1f %8d\n%!" measurement.name
         measurement.nanoseconds_per_operation measurement.operations_per_second
         measurement.minor_bytes_per_operation
         measurement.major_bytes_per_operation measurement.samples)
@@ -173,14 +173,14 @@ let print_comparison ~baseline measurements =
   List.iter
     (fun entry -> Hashtbl.replace baseline_by_name entry.name entry)
     baseline_report.results;
-  Printf.printf "\nComparison against %s\n" baseline;
-  Printf.printf "%-43s %12s %12s %10s\n%!" "scenario" "baseline ns" "current ns"
+  Format.printf "\nComparison against %s\n" baseline;
+  Format.printf "%-43s %12s %12s %10s\n%!" "scenario" "baseline ns" "current ns"
     "delta";
   List.iter
     (fun (measurement : Measurement.t) ->
       match Hashtbl.find_opt baseline_by_name measurement.name with
       | None ->
-          Printf.printf "%-43s %12s %12.1f %10s\n%!" measurement.name "new"
+          Format.printf "%-43s %12s %12.1f %10s\n%!" measurement.name "new"
             measurement.nanoseconds_per_operation "new"
       | Some previous -> (
           match
@@ -188,11 +188,11 @@ let print_comparison ~baseline measurements =
               ~after:measurement.nanoseconds_per_operation
           with
           | None ->
-              Printf.printf "%-43s %12.1f %12.1f %10s\n%!" measurement.name
+              Format.printf "%-43s %12.1f %12.1f %10s\n%!" measurement.name
                 previous.nanoseconds_per_operation
                 measurement.nanoseconds_per_operation "n/a"
           | Some delta ->
-              Printf.printf "%-43s %12.1f %12.1f %+9.1f%%\n%!" measurement.name
+              Format.printf "%-43s %12.1f %12.1f %+9.1f%%\n%!" measurement.name
                 previous.nanoseconds_per_operation
                 measurement.nanoseconds_per_operation delta))
     measurements

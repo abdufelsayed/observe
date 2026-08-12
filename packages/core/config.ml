@@ -3,11 +3,12 @@ type t = {
   environment : string option;
   version : string option;
   enabled : bool;
-  pretty : bool;
-  silent : bool;
+  console : console;
   min_level : Level.t;
   drains : Drain.t list;
 }
+
+and console = Auto | Pretty | Ndjson | Silent
 
 type field = Service | Environment | Version
 type problem = Empty | Invalid_utf8
@@ -17,23 +18,15 @@ exception Invalid_configuration of error
 
 let validate field value =
   if String.length value = 0 then Error { field; problem = Empty }
-  else if not (Value.is_valid_utf8 value) then
-    Error { field; problem = Invalid_utf8 }
+  else if not (Utf8.is_valid value) then Error { field; problem = Invalid_utf8 }
   else Ok ()
 
 let validate_optional field = function
   | None -> Ok ()
   | Some value -> validate field value
 
-let default_pretty = function
-  | None -> true
-  | Some environment -> (
-      match String.lowercase_ascii environment with
-      | "dev" | "development" -> true
-      | _ -> false)
-
-let create ~service ?environment ?version ?(enabled = true) ?pretty
-    ?(silent = false) ?(min_level = Level.Info) ?(drains = []) () =
+let create ~service ?environment ?version ?(enabled = true) ?(console = Auto)
+    ?(min_level = Level.Info) ?(drains = []) () =
   match validate Service service with
   | Error _ as error -> error
   | Ok () -> (
@@ -43,17 +36,13 @@ let create ~service ?environment ?version ?(enabled = true) ?pretty
           match validate_optional Version version with
           | Error _ as error -> error
           | Ok () ->
-              let pretty =
-                Option.value pretty ~default:(default_pretty environment)
-              in
               Ok
                 {
                   service;
                   environment;
                   version;
                   enabled;
-                  pretty;
-                  silent;
+                  console;
                   min_level;
                   drains;
                 }))
@@ -70,11 +59,11 @@ let pp_problem formatter = function
 let pp_error formatter { field; problem } =
   Format.fprintf formatter "%a %a" pp_field field pp_problem problem
 
-let create_exn ~service ?environment ?version ?enabled ?pretty ?silent
-    ?min_level ?drains () =
+let create_exn ~service ?environment ?version ?enabled ?console ?min_level
+    ?drains () =
   match
-    create ~service ?environment ?version ?enabled ?pretty ?silent ?min_level
-      ?drains ()
+    create ~service ?environment ?version ?enabled ?console ?min_level ?drains
+      ()
   with
   | Ok config -> config
   | Error error -> raise (Invalid_configuration error)
@@ -83,7 +72,6 @@ let service t = t.service
 let environment t = t.environment
 let version t = t.version
 let enabled t = t.enabled
-let pretty t = t.pretty
-let silent t = t.silent
+let console t = t.console
 let min_level t = t.min_level
 let drains t = t.drains

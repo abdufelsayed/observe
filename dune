@@ -69,15 +69,21 @@
  (package observe-lwt)
  (deps
   observe-lwt.install
+  %{lib:observe:observe.cmi}
+  %{lib:observe-lwt:observe_lwt.cmi}
   test/lwt/interfaces/check_install_surface.sh
-  test/lwt/interfaces/consumer.exe)
+  test/lwt/interfaces/consumer.exe
+  test/lwt/interfaces/consumer.ml)
  (action
   (progn
    (run
     bash
     %{dep:test/lwt/interfaces/check_install_surface.sh}
+    %{bin:ocamlfind}
     %{dep:observe-lwt.install}
-    "/lib/observe-lwt/observe_lwt.cmi\"")
+    %{lib:observe:observe.cmi}
+    %{lib:observe-lwt:observe_lwt.cmi}
+    %{dep:test/lwt/interfaces/consumer.ml})
    (run %{exe:test/lwt/interfaces/consumer.exe}))))
 
 (rule

@@ -7,7 +7,7 @@ let flat_case =
   let open QCheck.Gen in
   QCheck.make
     ~print:(fun (capacity, values) ->
-      Printf.sprintf "capacity=%d values=[%s]" capacity
+      Format.asprintf "capacity=%d values=[%s]" capacity
         (String.concat ";" (List.map string_of_int values)))
     ~shrink:
       QCheck.Shrink.(
@@ -53,7 +53,7 @@ let nested_case =
   in
   QCheck.make ~shrink
     ~print:(fun case ->
-      Printf.sprintf
+      Format.asprintf
         "outer_capacity=%d before=%s inner_capacity=%d inner=%s after=%s"
         case.outer_capacity (print_values case.before) case.inner_capacity
         (print_values case.inner) (print_values case.after))

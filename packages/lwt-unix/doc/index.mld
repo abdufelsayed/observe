@@ -19,12 +19,17 @@ let () =
 ]}
 
 The initializer is synchronous. It installs Lwt callback-local context, the OS
-wall clock, and automatic formatted output on standard error. It starts no
-scheduler and returns no logging handle. See {!module:Observe_lwt_unix}.
+wall clock, and automatic formatted output on standard error. Console records
+are submitted without blocking the producer and written in order by one bounded
+Lwt worker. It starts no scheduler and returns no logging handle. See
+{!module:Observe_lwt_unix}.
 
-If [pretty] is absent, an absent, [dev], or [development] environment selects
-readable output. Other environments select JSON. An explicit [pretty] value
-overrides this default.
+[Config.Auto] selects pretty output for an absent, [dev], or [development]
+environment and NDJSON otherwise. [Pretty], [Ndjson], and [Silent] are explicit
+overrides.
+
+Before process exit, run {!val:Observe_lwt_unix.shutdown} through the active Lwt
+scheduler. Use {!val:Observe_lwt_unix.flush} when the worker should remain open.
 
 {1 Capture}
 

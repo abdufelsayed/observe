@@ -22,23 +22,21 @@ let prop_level_compare_is_antisymmetric =
       Int.compare (Observe.Level.compare left right) 0
       = -Int.compare (Observe.Level.compare right left) 0)
 
-let prop_instant_round_trips =
+let prop_timestamp_round_trips =
   QCheck.Test.make ~count:(Test_profile.qcheck_count ~default:500)
-    ~name:"epoch nanoseconds round-trip" QCheck.int64 (fun nanoseconds ->
-      nanoseconds
-      = Observe.Instant.(
-          to_epoch_nanoseconds (of_epoch_nanoseconds nanoseconds)))
+    ~name:"Unix nanoseconds round-trip" QCheck.int64 (fun nanoseconds ->
+      nanoseconds = Observe.Timestamp.(to_unix_ns (of_unix_ns nanoseconds)))
 
-let prop_instant_compare_agrees_with_int64 =
+let prop_timestamp_compare_agrees_with_int64 =
   QCheck.Test.make
     ~count:(Test_profile.qcheck_count ~default:300)
-    ~name:"instant comparison agrees with epoch nanoseconds"
+    ~name:"timestamp comparison agrees with Unix nanoseconds"
     QCheck.(pair int64 int64)
     (fun (left, right) ->
       Int.compare
-        (Observe.Instant.compare
-           (Observe.Instant.of_epoch_nanoseconds left)
-           (Observe.Instant.of_epoch_nanoseconds right))
+        (Observe.Timestamp.compare
+           (Observe.Timestamp.of_unix_ns left)
+           (Observe.Timestamp.of_unix_ns right))
         0
       = Int.compare (Int64.compare left right) 0)
 
@@ -51,7 +49,7 @@ let () =
           [
             prop_level_compare_and_equal_agree;
             prop_level_compare_is_antisymmetric;
-            prop_instant_round_trips;
-            prop_instant_compare_agrees_with_int64;
+            prop_timestamp_round_trips;
+            prop_timestamp_compare_agrees_with_int64;
           ] );
     ]

@@ -13,13 +13,13 @@ top of this foundation but are not part of the current public API.
 ## What You Get
 
 - Process-wide tagged text and structured logging.
-- Deferred messages and values that run only after admission.
-- Typed structured values with Repr machine behavior and type-aware readable
+- Explicit lazy messages and values that run only after admission.
+- Typed structured values with Repr machine behavior and type-aware pretty
   presentation.
 - A concise PPX for free-form values and Observe type descriptions.
-- Readable console output with automatic truecolor, 256-color, 16-color, and
+- Pretty console output with automatic truecolor, 256-color, 16-color, and
   plain fallback.
-- Pure readable, JSON, and JSON Lines formatters.
+- Pure pretty, JSON, and NDJSON formatters.
 - Additional application-owned drains and finite diagnostics.
 - Deterministic scoped capture for tests.
 - A portable completed-I/O contract, plus a ready Lwt-Unix initializer.
@@ -56,21 +56,26 @@ let config =
     ~environment:"development"
     ~min_level:Observe.Level.Debug ()
 
-let () = Observe_lwt_unix.init_exn config
+let main () =
+  Observe.Logs.info
+    (Observe.Logs.text ~tag:"startup" "service ready");
+  Lwt.return_unit
 
 let () =
-  Observe.Logs.info
-    (Observe.Logs.text ~tag:"startup" "service ready")
+  Observe_lwt_unix.init_exn config;
+  Lwt_main.run (Lwt.finalize main Observe_lwt_unix.shutdown)
 ```
 
 The initializer installs Lwt callback-local context, the Unix wall clock, and
-automatic readable output on standard error. It is synchronous, starts no
-scheduler, and returns no logger handle. Application code emits through the
-same process-wide `Observe.Logs` module.
+automatic output on standard error. It is synchronous, starts no scheduler,
+and returns no logger handle. A bounded Lwt worker serializes accepted console
+records once a scheduler runs. Application code emits through the same
+process-wide `Observe.Logs` module.
 
-When `pretty` is not set, an absent, `dev`, or `development` environment uses
-readable console output. Other environments, including `production`, use
-JSON. Set `~pretty:false` or `~pretty:true` to override the environment default.
+`Observe.Config.Auto` uses pretty output for an absent, `dev`, or `development`
+environment and NDJSON otherwise. Set `~console:Observe.Config.Pretty`,
+`~console:Observe.Config.Ndjson`, or `~console:Observe.Config.Silent` to
+override that selection.
 
 ## Logging
 
@@ -92,9 +97,12 @@ The PPX constructs free-form structured values lazily:
 
 ```ocaml
 Observe.Logs.info
-  (Observe.Logs.free
+  (Observe.Logs.free_lazy
      [%observe.value { action = "user_login"; user_id = 42 }])
 ```
+
+`free` accepts an already-built `Observe.Value.t`; `free_lazy` accepts a thunk.
+Typed authoring follows the same rule with `structured` and `structured_lazy`.
 
 OCaml values can carry an Observe type description:
 
@@ -128,11 +136,12 @@ select plain output. Observe does not query or consume terminal input.
 
 Derived descriptions preserve distinctions that JSON cannot: strings remain
 quoted, ordinary constructors render as `Granted`, and polymorphic constructors
-render as `` `Development``. Machine encoding and decoding still delegate to
-Repr. Use `Observe.Type.repr` to pass an Observe description to Repr APIs, or
-`Observe.Type.of_repr` to lift an existing Repr description. A lifted raw
-description cannot recover presentation distinctions already erased by its
-JSON encoding.
+render as `` `Development``. Observe's production JSON path writes directly
+from the attached type description into the formatter's existing buffer. Repr
+continues to own decoding, equality, comparison, binary operations, and other
+machine interoperability. Use `Observe.Type.repr` to pass an Observe
+description to Repr APIs, or `Observe.Type.of_repr` to lift an existing Repr
+description through the compatibility path.
 
 ## Example
 
@@ -161,15 +170,18 @@ effect, and ready-composition boundaries:
 
 The core does not depend on Lwt or Unix. `Observe.Make (IO)` accepts one
 completed I/O implementation; `Observe_lwt_unix` is the ready path for
-ordinary Lwt applications.
+ordinary Lwt applications. Call `Observe_lwt_unix.flush ()` for a sequence
+barrier or `Observe_lwt_unix.shutdown ()` before process exit.
 
 ## Drains And Capture
 
 The platform console is the automatic formatted output. On Unix it writes to
 standard error, which may be a terminal, file, or pipe. Configured
 `Observe.Drain.t` values are additional outputs that receive completed
-`Observe.Log.t` values and may apply `Observe.Formatter.readable`, `.json`,
-`.json_lines`, or a custom pure formatter.
+`Observe.Log.t` values and may apply `Observe.Formatter.pretty`, `.json`,
+`.ndjson`, or a custom pure formatter. A future filesystem output may use the
+conventional `.jsonl` filename extension; that storage name does not change the
+format's public name.
 
 Tests can capture ordinary `Observe.Logs` calls without resetting global
 production state:

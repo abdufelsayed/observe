@@ -1,5 +1,5 @@
-type clock_error = Engine.clock_error = Unavailable
-type console_acceptance = Engine.console_acceptance = Accepted | Rejected
+type clock_error = Unavailable
+type console_acceptance = Accepted | Rejected
 
 module type S = sig
   type +'a t
@@ -15,7 +15,7 @@ module type S = sig
   val is_control_exception : state -> exn -> bool
 
   module Clock : sig
-    val now : state -> (Instant.t, clock_error) result
+    val now : state -> (Timestamp.t, clock_error) result
   end
 
   module Console : sig

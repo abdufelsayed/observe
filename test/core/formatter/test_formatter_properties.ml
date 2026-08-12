@@ -109,9 +109,9 @@ let capture message =
   | Error _ -> failwith "I/O implementation unexpectedly conflicted"
 
 let capture_text tag message = capture (Observe.Logs.text ~tag message)
-let capture_value value = capture (Observe.Logs.free (fun () -> value))
+let capture_value value = capture (Observe.Logs.free value)
 let format formatter log = Observe.Formatter.format formatter log
-let readable style log = format (Observe.Formatter.readable style) log
+let pretty style log = format (Observe.Formatter.pretty style) log
 
 let strip_ansi value =
   let buffer = Buffer.create (String.length value) in
@@ -154,12 +154,12 @@ let prop_color_preserves_plain_and_controls_are_escaped =
     ~name:"color strips to plain and caller controls stay escaped" text_case
     (fun (tag, message) ->
       let log = capture_text tag message in
-      match readable Observe.Formatter.Plain log with
+      match pretty Observe.Formatter.Plain log with
       | Error _ -> false
       | Ok plain ->
           List.for_all
             (fun style ->
-              match readable style log with
+              match pretty style log with
               | Ok styled -> strip_ansi styled = plain
               | Error _ -> false)
             [
@@ -170,20 +170,20 @@ let prop_color_preserves_plain_and_controls_are_escaped =
           && (not (has_raw_terminal_control plain))
           && not (String.contains plain '\n'))
 
-let prop_rich_values_have_equivalent_readable_and_valid_json_projections =
+let prop_rich_values_have_equivalent_pretty_and_valid_json_projections =
   QCheck.Test.make ~count:(Test_profile.qcheck_count ~default:300)
-    ~name:"rich values preserve readable styling and form one valid JSON value"
+    ~name:"rich values preserve pretty styling and form one valid JSON value"
     sample (fun sample ->
       let log = capture_value (value_of_sample sample) in
       match
-        ( readable Observe.Formatter.Plain log,
+        ( pretty Observe.Formatter.Plain log,
           format Observe.Formatter.json log,
-          format Observe.Formatter.json_lines log )
+          format Observe.Formatter.ndjson log )
       with
-      | Ok plain, Ok json, Ok json_lines ->
+      | Ok plain, Ok json, Ok ndjson ->
           List.for_all
             (fun style ->
-              match readable style log with
+              match pretty style log with
               | Ok styled -> strip_ansi styled = plain
               | Error _ -> false)
             [
@@ -193,13 +193,13 @@ let prop_rich_values_have_equivalent_readable_and_valid_json_projections =
             ]
           && (not (has_raw_terminal_control plain))
           && valid_json json
-          && json_lines = json ^ "\n"
-          && count '\n' json_lines = 1
+          && ndjson = json ^ "\n"
+          && count '\n' ndjson = 1
       | Error _, _, _ | _, Error _, _ | _, _, Error _ -> false)
 
 let invalid_utf8 =
   QCheck.make
-    ~print:(fun value -> Printf.sprintf "0x%02x" (Char.code value.[0]))
+    ~print:(fun value -> Format.asprintf "0x%02x" (Char.code value.[0]))
     (QCheck.Gen.map
        (fun byte -> String.make 1 (Char.chr byte))
        (QCheck.Gen.int_range 0x80 0xff))
@@ -222,9 +222,9 @@ let prop_invalid_utf8_is_rejected_at_every_projection_boundary =
       in
       List.for_all
         (fun log ->
-          is_invalid_utf8 (readable Observe.Formatter.Plain log)
+          is_invalid_utf8 (pretty Observe.Formatter.Plain log)
           && is_invalid_utf8 (format Observe.Formatter.json log)
-          && is_invalid_utf8 (format Observe.Formatter.json_lines log))
+          && is_invalid_utf8 (format Observe.Formatter.ndjson log))
         [ invalid_key; invalid_value ])
 
 let test_non_finite_floats_are_rejected () =
@@ -238,12 +238,23 @@ let test_non_finite_floats_are_rejected () =
           | Error Observe.Formatter.Non_finite_float -> true
           | Ok _ | Error _ -> false)
       in
-      check "readable rejects non-finite float"
-        (readable Observe.Formatter.Plain log);
+      check "pretty rejects non-finite float"
+        (pretty Observe.Formatter.Plain log);
       check "JSON rejects non-finite float" (format Observe.Formatter.json log);
-      check "JSON Lines rejects non-finite float"
-        (format Observe.Formatter.json_lines log))
+      check "NDJSON rejects non-finite float"
+        (format Observe.Formatter.ndjson log))
     [ Float.nan; Float.infinity; Float.neg_infinity ]
+
+let test_finite_float_matches_repr_precision () =
+  let value = 1.2345678901234567 in
+  let expected =
+    "{\"service\":\"property\",\"timestamp\":\"42\",\"level\":\"info\",\"payload\":"
+    ^ Repr.to_json_string ~minify:true Repr.float value
+    ^ "}"
+  in
+  Alcotest.(check (result string reject))
+    "free-form float uses the Repr/Jsonm representation" (Ok expected)
+    (format Observe.Formatter.json (capture_value (Observe.Value.float value)))
 
 let () =
   Alcotest.run "observe-formatter-properties"
@@ -253,7 +264,7 @@ let () =
           QCheck_alcotest.to_alcotest ~speed_level:`Quick
             prop_color_preserves_plain_and_controls_are_escaped;
           QCheck_alcotest.to_alcotest ~speed_level:`Quick
-            prop_rich_values_have_equivalent_readable_and_valid_json_projections;
+            prop_rich_values_have_equivalent_pretty_and_valid_json_projections;
           QCheck_alcotest.to_alcotest ~speed_level:`Quick
             prop_invalid_utf8_is_rejected_at_every_projection_boundary;
         ] );
@@ -261,5 +272,7 @@ let () =
         [
           Alcotest.test_case "non-finite floats are rejected" `Quick
             test_non_finite_floats_are_rejected;
+          Alcotest.test_case "finite float precision" `Quick
+            test_finite_float_matches_repr_precision;
         ] );
     ]

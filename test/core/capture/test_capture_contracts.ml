@@ -27,12 +27,12 @@ let test_payloads_and_metadata () =
     capture config (fun capture ->
         Observe.Logs.info (Observe.Logs.text ~tag:"auth" "signed in");
         Observe.Logs.warn
-          (Observe.Logs.free (fun () ->
-               Observe.Value.object_
-                 [
-                   ("attempt", Observe.Value.int 2);
-                   ("ok", Observe.Value.bool true);
-                 ]));
+          (Observe.Logs.free
+             (Observe.Value.object_
+                [
+                  ("attempt", Observe.Value.int 2);
+                  ("ok", Observe.Value.bool true);
+                ]));
         Observe.Logs.error (Observe.Logs.structured Observe.Type.int 7);
         capture)
   in
@@ -45,8 +45,8 @@ let test_payloads_and_metadata () =
       Alcotest.(check (option string))
         "version" (Some "1") (Observe.Log.version text);
       Alcotest.(check int64)
-        "instant" 42L
-        (Observe.Log.instant text |> Observe.Instant.to_epoch_nanoseconds);
+        "timestamp" 42L
+        (Observe.Log.timestamp text |> Observe.Timestamp.to_unix_ns);
       Alcotest.(check bool)
         "level" true
         (Observe.Level.equal Observe.Level.Info (Observe.Log.level text));
@@ -54,7 +54,7 @@ let test_payloads_and_metadata () =
       (match Observe.Log.payload free with
       | Observe.Log.Free value ->
           Alcotest.(check bool)
-            "free payload readable" true
+            "free payload pretty" true
             (String.length (Observe.Value.to_string value) > 0)
       | Observe.Log.Text _ | Observe.Log.Structured _ ->
           Alcotest.fail "expected a free payload");
@@ -62,13 +62,15 @@ let test_payloads_and_metadata () =
       | Observe.Log.Structured (description, value) ->
           Alcotest.(check string)
             "structured value" "7"
-            (Format.asprintf "%a" (Observe.Type.pp description) value)
+            (Format.asprintf "%a"
+               (Repr.pp (Observe.Type.repr description))
+               value)
       | Observe.Log.Text _ | Observe.Log.Free _ ->
           Alcotest.fail "expected a structured payload")
   | logs -> Alcotest.failf "expected three logs, received %d" (List.length logs)
 
 let test_formatter_semantics () =
-  let config = Test_io.config ~pretty:false "formatter" in
+  let config = Test_io.config ~console:Observe.Config.Ndjson "formatter" in
   let log =
     capture config (fun capture ->
         Observe.Logs.info (Observe.Logs.text ~tag:"json" "hello");
@@ -83,12 +85,12 @@ let test_formatter_semantics () =
   in
   Alcotest.(check string)
     "semantic JSON envelope"
-    "{\"service\":\"formatter\",\"instant\":\"42\",\"level\":\"info\",\"payload\":{\"kind\":\"text\",\"tag\":\"json\",\"message\":\"hello\"}}"
+    "{\"service\":\"formatter\",\"timestamp\":\"42\",\"level\":\"info\",\"payload\":{\"kind\":\"text\",\"tag\":\"json\",\"message\":\"hello\"}}"
     json;
-  (match Observe.Formatter.format Observe.Formatter.json_lines log with
+  (match Observe.Formatter.format Observe.Formatter.ndjson log with
   | Ok line ->
       Alcotest.(check char)
-        "JSON Lines owns one final newline" '\n'
+        "NDJSON owns one final newline" '\n'
         line.[String.length line - 1];
       Alcotest.(check int)
         "exactly one newline" 1
@@ -96,7 +98,7 @@ let test_formatter_semantics () =
            (fun count character ->
              if character = '\n' then count + 1 else count)
            0 line)
-  | Error _ -> Alcotest.fail "JSON Lines rejected a valid text log");
+  | Error _ -> Alcotest.fail "NDJSON rejected a valid text log");
   let explicit =
     Observe.Formatter.create (fun _ -> Error Observe.Formatter.Failed)
   in
@@ -119,7 +121,7 @@ let test_admission_laziness_and_diagnostics () =
                incr lazy_calls;
                "rejected"));
         Observe.Logs.debug
-          (Observe.Logs.free (fun () ->
+          (Observe.Logs.free_lazy (fun () ->
                incr free_calls;
                Observe.Value.int 0));
         Observe.Logs.info
@@ -128,7 +130,7 @@ let test_admission_laziness_and_diagnostics () =
                "accepted"));
         Observe.Logs.warn (Observe.Logs.text ~tag:"overflow" "withheld");
         Observe.Logs.error
-          (Observe.Logs.free (fun () ->
+          (Observe.Logs.free_lazy (fun () ->
                incr free_calls;
                failwith "authoring"));
         capture)
@@ -161,7 +163,9 @@ let test_structured_values_are_by_reference () =
   | Observe.Log.Structured (description, retained) ->
       Alcotest.(check string)
         "later projection sees referenced value" "9"
-        (Format.asprintf "%a" (Observe.Type.pp description) retained)
+        (Format.asprintf "%a"
+           (Repr.pp (Observe.Type.repr description))
+           retained)
   | Observe.Log.Text _ | Observe.Log.Free _ ->
       Alcotest.fail "expected a structured payload"
 

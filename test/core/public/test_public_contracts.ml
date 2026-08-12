@@ -23,20 +23,54 @@ let test_level_contract () =
   in
   Alcotest.(check bool) "documented admission order" true (ordered levels)
 
-let test_instant_contract () =
+let test_timestamp_contract () =
   List.iter
     (fun nanoseconds ->
-      let instant = Observe.Instant.of_epoch_nanoseconds nanoseconds in
+      let timestamp = Observe.Timestamp.of_unix_ns nanoseconds in
       Alcotest.(check int64)
-        "epoch nanoseconds round-trip" nanoseconds
-        (Observe.Instant.to_epoch_nanoseconds instant);
+        "Unix nanoseconds round-trip" nanoseconds
+        (Observe.Timestamp.to_unix_ns timestamp);
       Alcotest.(check string)
-        "instant printer"
+        "timestamp printer"
         (Int64.to_string nanoseconds)
-        (Format.asprintf "%a" Observe.Instant.pp instant))
+        (Format.asprintf "%a" Observe.Timestamp.pp timestamp))
     [ Int64.min_int; -1L; 0L; 1L; Int64.max_int ]
 
 let invalid byte = String.make 1 (Char.chr byte)
+
+type manual_access = Granted | Denied of string
+
+let manual_access_t =
+  let open Observe.Type in
+  variant "manual_access" (fun granted denied -> function
+    | Granted -> granted
+    | Denied reason -> denied reason)
+  |~ case0
+       ~is:(function Granted -> true | Denied _ -> false)
+       "Granted" Granted
+  |~ case1
+       ~project:(function Denied reason -> Some reason | Granted -> None)
+       "Denied" string
+       (fun reason -> Denied reason)
+  |> sealv
+
+type manual_node = Leaf of string | Branch of manual_node list
+
+let manual_node_t =
+  Observe.Type.mu (fun node_t ->
+      let open Observe.Type in
+      variant "manual_node" (fun leaf branch -> function
+        | Leaf value -> leaf value
+        | Branch children -> branch children)
+      |~ case1
+           ~project:(function Leaf value -> Some value | Branch _ -> None)
+           "Leaf" string
+           (fun value -> Leaf value)
+      |~ case1
+           ~project:(function Branch values -> Some values | Leaf _ -> None)
+           "Branch" (list node_t)
+           (fun values -> Branch values)
+      |> sealv)
 
 let check_config_error ~field ~problem = function
   | Ok _ -> Alcotest.fail "invalid configuration was accepted"
@@ -60,8 +94,9 @@ let test_config_contract () =
     "version" None
     (Observe.Config.version defaults);
   Alcotest.(check bool) "enabled" true (Observe.Config.enabled defaults);
-  Alcotest.(check bool) "pretty" true (Observe.Config.pretty defaults);
-  Alcotest.(check bool) "silent" false (Observe.Config.silent defaults);
+  Alcotest.(check bool)
+    "automatic console" true
+    (Observe.Config.console defaults = Observe.Config.Auto);
   Alcotest.(check bool)
     "minimum info" true
     (Observe.Level.equal Observe.Level.Info (Observe.Config.min_level defaults));
@@ -70,8 +105,8 @@ let test_config_contract () =
     (List.length (Observe.Config.drains defaults));
   let explicit =
     Observe.Config.create_exn ~service:"api" ~environment:"test" ~version:"1"
-      ~enabled:false ~pretty:false ~silent:true ~min_level:Observe.Level.Error
-      ()
+      ~enabled:false ~console:Observe.Config.Silent
+      ~min_level:Observe.Level.Error ()
   in
   Alcotest.(check (option string))
     "explicit environment" (Some "test")
@@ -82,40 +117,45 @@ let test_config_contract () =
   Alcotest.(check bool)
     "explicit enabled" false
     (Observe.Config.enabled explicit);
-  Alcotest.(check bool) "explicit pretty" false (Observe.Config.pretty explicit);
+  Alcotest.(check bool)
+    "explicit silent" true
+    (Observe.Config.console explicit = Observe.Config.Silent);
   let development =
     Observe.Config.create_exn ~service:"api" ~environment:"development" ()
   in
   Alcotest.(check bool)
-    "development is readable" true
-    (Observe.Config.pretty development);
+    "development remains automatic" true
+    (Observe.Config.console development = Observe.Config.Auto);
   let dev = Observe.Config.create_exn ~service:"api" ~environment:"dev" () in
-  Alcotest.(check bool) "dev is readable" true (Observe.Config.pretty dev);
+  Alcotest.(check bool)
+    "dev remains automatic" true
+    (Observe.Config.console dev = Observe.Config.Auto);
   let production =
     Observe.Config.create_exn ~service:"api" ~environment:"production" ()
   in
   Alcotest.(check bool)
-    "production is JSON" false
-    (Observe.Config.pretty production);
+    "production remains automatic" true
+    (Observe.Config.console production = Observe.Config.Auto);
   let staging =
     Observe.Config.create_exn ~service:"api" ~environment:"staging" ()
   in
-  Alcotest.(check bool) "staging is JSON" false (Observe.Config.pretty staging);
+  Alcotest.(check bool)
+    "staging remains automatic" true
+    (Observe.Config.console staging = Observe.Config.Auto);
   let development_override =
     Observe.Config.create_exn ~service:"api" ~environment:"development"
-      ~pretty:false ()
+      ~console:Observe.Config.Ndjson ()
   in
   Alcotest.(check bool)
-    "development override" false
-    (Observe.Config.pretty development_override);
+    "development override" true
+    (Observe.Config.console development_override = Observe.Config.Ndjson);
   let production_override =
     Observe.Config.create_exn ~service:"api" ~environment:"production"
-      ~pretty:true ()
+      ~console:Observe.Config.Pretty ()
   in
   Alcotest.(check bool)
     "production override" true
-    (Observe.Config.pretty production_override);
-  Alcotest.(check bool) "explicit silent" true (Observe.Config.silent explicit);
+    (Observe.Config.console production_override = Observe.Config.Pretty);
   check_config_error ~field:Observe.Config.Service ~problem:Observe.Config.Empty
     (Observe.Config.create ~service:"" ());
   check_config_error ~field:Observe.Config.Environment
@@ -155,10 +195,23 @@ let test_value_contract () =
       ]
   in
   let rendered = Observe.Value.to_string value in
-  Alcotest.(check bool) "readable object" true (String.length rendered > 0);
+  Alcotest.(check bool) "pretty object" true (String.length rendered > 0);
   Alcotest.(check string)
     "pp and to_string agree" rendered
-    (Format.asprintf "%a" Observe.Value.pp value)
+    (Format.asprintf "%a" Observe.Value.pp value);
+  (match value with
+  | Observe.Value.Object fields ->
+      Alcotest.(check int)
+        "private structure is inspectable" 9 (List.length fields)
+  | Observe.Value.Null | Observe.Value.Bool _ | Observe.Value.Int _
+  | Observe.Value.Float _ | Observe.Value.String _ | Observe.Value.List _
+  | Observe.Value.Embedded _ ->
+      Alcotest.fail "object constructor was not observable");
+  Alcotest.(check bool)
+    "direct JSON is public" true
+    (match Observe.Value.to_json_string value with
+    | Ok encoded -> String.length encoded > 2 && encoded.[0] = '{'
+    | Error _ -> false)
 
 let test_type_interoperability () =
   Alcotest.(check string)
@@ -167,15 +220,47 @@ let test_type_interoperability () =
   let description = Observe.Type.of_repr Repr.string in
   Alcotest.(check string)
     "raw Repr description remains machine-compatible" "\"value\""
-    (Observe.Type.to_json_string ~minify:true description "value")
+    (Observe.Type.to_json_string description "value")
+
+let test_manual_description_json () =
+  let check description value =
+    let direct = Observe.Type.to_json_string description value in
+    let repr =
+      Repr.to_json_string ~minify:true (Observe.Type.repr description) value
+    in
+    Alcotest.(check string) "direct JSON agrees with Repr" repr direct;
+    match Observe.Type.of_json_string description direct with
+    | Ok decoded -> decoded
+    | Error (`Msg message) -> Alcotest.failf "JSON did not decode: %s" message
+  in
+  Alcotest.(check bool)
+    "manual nullary variant" true
+    (check manual_access_t Granted = Granted);
+  Alcotest.(check bool)
+    "manual payload variant" true
+    (check manual_access_t (Denied "policy") = Denied "policy");
+  let node = Branch [ Leaf "one"; Branch [ Leaf "two" ] ] in
+  Alcotest.(check bool)
+    "manual recursive variant" true
+    (check manual_node_t node = node)
+
+let test_large_list_json_is_stack_safe () =
+  let values = List.init 100_000 Fun.id in
+  let encoded =
+    Observe.Type.to_json_string (Observe.Type.list Observe.Type.int) values
+  in
+  Alcotest.(check char) "opening bracket" '[' encoded.[0];
+  Alcotest.(check char)
+    "closing bracket" ']'
+    encoded.[String.length encoded - 1]
 
 let () =
   Alcotest.run "observe-public-contracts"
     [
-      ( "unit:observe:level-instant",
+      ( "unit:observe:level-timestamp",
         [
           Alcotest.test_case "levels" `Quick test_level_contract;
-          Alcotest.test_case "instants" `Quick test_instant_contract;
+          Alcotest.test_case "timestamps" `Quick test_timestamp_contract;
         ] );
       ( "unit:observe:configuration",
         [
@@ -188,5 +273,9 @@ let () =
           Alcotest.test_case "public constructors" `Quick test_value_contract;
           Alcotest.test_case "Repr interoperability" `Quick
             test_type_interoperability;
+          Alcotest.test_case "manual descriptions compile JSON" `Quick
+            test_manual_description_json;
+          Alcotest.test_case "large-list JSON is stack safe" `Quick
+            test_large_list_json_is_stack_safe;
         ] );
     ]

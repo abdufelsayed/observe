@@ -34,9 +34,9 @@ let test_namespaced_value_is_deferred () =
   let capture =
     match
       Observer.with_capture observer config (fun capture ->
-          Observe.Logs.debug (Observe.Logs.free value);
+          Observe.Logs.debug (Observe.Logs.free_lazy value);
           Alcotest.(check int) "filtered value remains deferred" 0 !forces;
-          Observe.Logs.info (Observe.Logs.free value);
+          Observe.Logs.info (Observe.Logs.free_lazy value);
           Test_io.Direct.return capture)
     with
     | Ok capture -> capture

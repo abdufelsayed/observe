@@ -61,7 +61,7 @@ let main () =
   Observe.Logs.warn (Observe.Logs.text ~tag:"cache" "cache miss for user:42");
   Observe.Logs.error (Observe.Logs.text ~tag:"payment" "payment webhook failed");
   Observe.Logs.info
-    (Observe.Logs.free
+    (Observe.Logs.free_lazy
        [%observe.value
          {
            action = "request_finished";
@@ -120,4 +120,4 @@ let main () =
           }));
   Lwt.return_unit
 
-let () = Lwt_main.run (main ())
+let () = Lwt_main.run (Lwt.finalize main Observe_lwt_unix.shutdown)

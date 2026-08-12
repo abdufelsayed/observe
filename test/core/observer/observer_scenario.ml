@@ -13,11 +13,11 @@ let make_observer ?console_style ?now ?write_console () =
   let host = Test_io.Host.create ?console_style ?now ?write_console () in
   Observer.create host
 
-let config ?enabled ?pretty ?silent ?min_level ?drains () =
-  Test_io.config ?enabled ?pretty ?silent ?min_level ?drains "observer"
+let config ?enabled ?console ?min_level ?drains () =
+  Test_io.config ?enabled ?console ?min_level ?drains "observer"
 
-let inherited_config ?enabled ?pretty ?silent ?min_level ?drains () =
-  Test_io.config ?enabled ?pretty ?silent ?min_level ?drains "inherited"
+let inherited_config ?enabled ?console ?min_level ?drains () =
+  Test_io.config ?enabled ?console ?min_level ?drains "inherited"
 
 let init_ok observer config =
   match Observer.init observer config with
@@ -52,7 +52,7 @@ let check_capture_tags name expected capture =
 let not_initialized () =
   let forced = ref 0 in
   Observe.Logs.info
-    (Observe.Logs.free (fun () ->
+    (Observe.Logs.free_lazy (fun () ->
          incr forced;
          Observe.Value.int 1));
   Alcotest.(check int) "unrouted authoring remains lazy" 0 !forced;
@@ -148,7 +148,10 @@ let clock_unavailable () =
 
 let scope_raised () =
   let observer = Raising_get_observer.create (Test_io.Host.create ()) in
-  (match Raising_get_observer.init observer (config ~silent:true ()) with
+  (match
+     Raising_get_observer.init observer
+       (config ~console:Observe.Config.Silent ())
+   with
   | Ok () -> ()
   | Error _ -> Alcotest.fail "raising I/O implementation failed to initialize");
   Observe.Logs.info (Observe.Logs.text ~tag:"scope" "lookup");
@@ -190,15 +193,15 @@ let callback_containment () =
     make_observer
       ~now:(fun () ->
         incr clock_calls;
-        if !clock_calls = 1 then Ok (Observe.Instant.of_epoch_nanoseconds 1L)
+        if !clock_calls = 1 then Ok (Observe.Timestamp.of_unix_ns 1L)
         else failwith "clock")
       ()
   in
   init_ok observer
-    (config ~silent:true
+    (config ~console:Observe.Config.Silent
        ~drains:[ Observe.Drain.create (fun _ -> raise Exit) ]
        ());
-  Observe.Logs.info (Observe.Logs.free (fun () -> failwith "authoring"));
+  Observe.Logs.info (Observe.Logs.free_lazy (fun () -> failwith "authoring"));
   Observe.Logs.info (Observe.Logs.text ~tag:"drain" "raises");
   Alcotest.(check int)
     "authoring diagnosed" 1
@@ -256,8 +259,7 @@ let ansi_console () =
   let output = Buffer.create 128 in
   let observer =
     make_observer ~console_style:Observe.Formatter.Ansi_16
-      ~now:(fun () ->
-        Ok (Observe.Instant.of_epoch_nanoseconds 37_425_612_000_000L))
+      ~now:(fun () -> Ok (Observe.Timestamp.of_unix_ns 37_425_612_000_000L))
       ~write_console:(fun value ->
         Buffer.add_string output value;
         Observe.IO.Accepted)
@@ -283,7 +285,7 @@ let disabled () =
   init_ok observer (config ~enabled:false ());
   let forced = ref 0 in
   Observe.Logs.info
-    (Observe.Logs.free (fun () ->
+    (Observe.Logs.free_lazy (fun () ->
          incr forced;
          Observe.Value.int 1));
   Alcotest.(check int) "disabled logging remains lazy" 0 !forced;
@@ -294,7 +296,7 @@ let disabled () =
 
 let no_output () =
   let observer = make_observer () in
-  init_ok observer (config ~silent:true ());
+  init_ok observer (config ~console:Observe.Config.Silent ());
   Alcotest.(check int)
     "enabled installation with no output is diagnosed" 1
     (Test_io.process_diagnostic_count Observe.Diagnostics.No_output)
@@ -488,13 +490,13 @@ let callback_restoration () =
 let control_exception () =
   let observer = make_observer () in
   init_ok observer
-    (config ~silent:true
+    (config ~console:Observe.Config.Silent
        ~drains:[ Observe.Drain.create (fun _ -> Observe.Drain.Accepted) ]
        ());
   Alcotest.check_raises "I/O control exception preserved" Test_io.Direct.Control
     (fun () ->
       Observe.Logs.info
-        (Observe.Logs.free (fun () -> raise Test_io.Direct.Control)))
+        (Observe.Logs.free_lazy (fun () -> raise Test_io.Direct.Control)))
 
 let control_backtrace () =
   Printexc.record_backtrace true;
@@ -510,9 +512,10 @@ let control_backtrace () =
   let actual =
     try
       ignore
-        (Observer.with_capture observer (config ~silent:true ()) (fun _ ->
+        (Observer.with_capture observer
+           (config ~console:Observe.Config.Silent ()) (fun _ ->
              Observe.Logs.info
-               (Observe.Logs.free (fun () ->
+               (Observe.Logs.free_lazy (fun () ->
                     Printexc.raise_with_backtrace Test_io.Direct.Control
                       original));
              Test_io.Direct.return ()));

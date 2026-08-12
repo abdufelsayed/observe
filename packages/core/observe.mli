@@ -14,11 +14,14 @@ module Type : sig
   (** Recover the underlying Repr description for machine operations and
       interoperability. *)
 
-  val of_repr : 'a Repr.t -> 'a t
-  (** Lift a raw Repr description. Readable formatting then uses Repr's JSON
-      projection and cannot recover distinctions erased by that encoding.
-      Descriptions produced by [@@deriving observe] retain those distinctions.
-  *)
+  val of_repr : ?json:(Buffer.t -> 'a -> unit) -> 'a Repr.t -> 'a t
+  (** Lift a raw Repr description. The optional writer appends exactly one
+      compact JSON value and must agree with the representation accepted by the
+      Repr decoder. Without it, JSON and pretty formatting use the generic
+      compatibility path and cannot recover distinctions erased by that
+      encoding. Fully described {!Type} combinators and descriptions produced by
+      [@@deriving observe] use direct Observe writers instead and retain those
+      distinctions. *)
 
   type len = Repr.len
 
@@ -69,8 +72,21 @@ module Type : sig
   type 'a case_p
 
   val variant : string -> 'b -> ('a, 'b, 'b) open_variant
-  val case0 : string -> 'a -> ('a, 'a case_p) case
-  val case1 : string -> 'b t -> ('b -> 'a) -> ('a, 'b -> 'a case_p) case
+
+  val case0 :
+    ?polymorphic:bool ->
+    ?is:('a -> bool) ->
+    string ->
+    'a ->
+    ('a, 'a case_p) case
+
+  val case1 :
+    ?polymorphic:bool ->
+    ?project:('a -> 'b option) ->
+    string ->
+    'b t ->
+    ('b -> 'a) ->
+    ('a, 'b -> 'a case_p) case
 
   val ( |~ ) :
     ('a, 'b, 'c -> 'd) open_variant ->
@@ -82,97 +98,66 @@ module Type : sig
   val mu : ('a t -> 'a t) -> 'a t
   val mu2 : ('a t -> 'b t -> 'a t * 'b t) -> 'a t * 'b t
 
-  type +'a staged = 'a Repr.staged
-  type 'a equal = 'a Repr.equal
-  type 'a compare = 'a Repr.compare
-  type 'a pp = 'a Repr.pp
-  type 'a of_string = 'a Repr.of_string
-  type 'a encode_json = 'a Repr.encode_json
-  type 'a decode_json = 'a Repr.decode_json
-  type 'a encode_bin = 'a Repr.encode_bin
-  type 'a decode_bin = 'a Repr.decode_bin
-  type -'a size_of = 'a Repr.size_of
-  type 'a impl = 'a Repr.impl = Structural | Custom of 'a | Undefined
+  val to_json_string : 'a t -> 'a -> string
+  (** Allocate one compact JSON value using the description's attached writer.
+  *)
 
-  val stage : 'a -> 'a staged
-  val unstage : 'a staged -> 'a
-  val equal : 'a t -> 'a equal staged
-  val compare : 'a t -> 'a compare staged
-  val pp : 'a t -> 'a pp
-  val pp_dump : 'a t -> 'a pp
-  val to_string : 'a t -> 'a -> string
-  val of_string : 'a t -> 'a of_string
-  val encode_json : 'a t -> Jsonm.encoder -> 'a -> unit
-  val decode_json : 'a t -> Jsonm.decoder -> ('a, [ `Msg of string ]) result
-
-  val decode_json_lexemes :
-    'a t -> Jsonm.lexeme list -> ('a, [ `Msg of string ]) result
-
-  val to_json_string : ?minify:bool -> 'a t -> 'a -> string
   val of_json_string : 'a t -> string -> ('a, [ `Msg of string ]) result
-  val encode_bin : 'a t -> 'a encode_bin staged
-  val decode_bin : 'a t -> 'a decode_bin staged
-  val to_bin_string : 'a t -> ('a -> string) staged
-  val of_bin_string : 'a t -> (string -> ('a, [ `Msg of string ]) result) staged
-  val size_of : 'a t -> ('a -> int option) staged
+  val map : 'b t -> ('b -> 'a) -> ('a -> 'b) -> 'a t
+end
 
-  val like :
-    ?pp:'a pp ->
-    ?of_string:'a of_string ->
-    ?json:'a encode_json * 'a decode_json ->
-    ?bin:'a encode_bin * 'a decode_bin * 'a size_of ->
-    ?unboxed_bin:'a encode_bin * 'a decode_bin * 'a size_of ->
-    ?equal:'a equal ->
-    ?compare:'a compare ->
-    ?short_hash:(?seed:int -> 'a -> int) ->
-    ?pre_hash:'a encode_bin ->
-    'a t ->
-    'a t
+module Generated_runtime : sig
+  (** Compatibility contract for code emitted by [observe.ppx]. Application code
+      should use {!Type}; this module may only evolve with a coordinated
+      PPX/runtime compatibility change. *)
 
-  val partially_abstract :
-    pp:'a pp impl ->
-    of_string:'a of_string impl ->
-    json:('a encode_json * 'a decode_json) impl ->
-    bin:('a encode_bin * 'a decode_bin * 'a size_of) impl ->
-    unboxed_bin:('a encode_bin * 'a decode_bin * 'a size_of) impl ->
-    equal:'a equal impl ->
-    compare:'a compare impl ->
-    short_hash:(?seed:int -> 'a -> int) impl ->
-    pre_hash:'a encode_bin impl ->
-    'a t ->
-    'a t
+  type 'a description = 'a Type.t
+  type renderer
+  type placement
 
-  val map :
-    ?pp:'a pp ->
-    ?of_string:'a of_string ->
-    ?json:'a encode_json * 'a decode_json ->
-    ?bin:'a encode_bin * 'a decode_bin * 'a size_of ->
-    ?unboxed_bin:'a encode_bin * 'a decode_bin * 'a size_of ->
-    ?equal:'a equal ->
-    ?compare:'a compare ->
-    ?short_hash:(?seed:int -> 'a -> int) ->
-    ?pre_hash:'a encode_bin ->
-    'b t ->
-    ('b -> 'a) ->
-    ('a -> 'b) ->
-    'a t
+  type rendered =
+    | Scalar of (renderer -> unit)
+    | Node of (renderer -> placement -> unit)
 
-  module For_ppx : sig
-    type view
-    (** Runtime support for code generated by [observe.ppx]. Application code
-        should use the ordinary description combinators above. *)
+  val with_json : 'a description -> (Buffer.t -> 'a -> unit) -> 'a description
+  val with_plan : 'a description -> ('a -> rendered) -> 'a description
 
-    type error
-    type result = (view, error) Stdlib.result
+  val with_recursive_plan :
+    'a description -> ('a description -> 'a -> rendered) -> 'a description
 
-    val with_present : 'a t -> ('a -> result) -> 'a t
-    val present : 'a t -> 'a -> result
-    val record : (string * result) list -> result
-    val list : result list -> result
-    val list_map : ('a -> result) -> 'a list -> result
-    val option : result option -> result
-    val variant : polymorphic:bool -> string -> result option -> result
-  end
+  val json : 'a description -> Buffer.t -> 'a -> unit
+  val plan : 'a description -> 'a -> rendered
+  val is_scalar : 'a description -> 'a -> bool
+  val render : 'a description -> renderer -> placement -> 'a -> unit
+  val inline : placement
+  val start : renderer -> placement -> scalar:bool -> bool
+  val finish : renderer -> bool -> unit
+
+  val field :
+    'a description -> renderer -> last:bool -> name:string -> 'a -> unit
+
+  val constructor :
+    'a description -> renderer -> last:bool -> name:string -> 'a -> unit
+
+  val constructor_start :
+    renderer -> last:bool -> name:string -> scalar:bool -> bool
+
+  val variant : renderer -> placement -> polymorphic:bool -> string -> unit
+  val variant_label : renderer -> polymorphic:bool -> string -> unit
+  val empty_record : renderer -> unit
+  val json_unit : Buffer.t -> unit -> unit
+  val json_bool : Buffer.t -> bool -> unit
+  val json_char : Buffer.t -> char -> unit
+  val json_int : Buffer.t -> int -> unit
+  val json_int32 : Buffer.t -> int32 -> unit
+  val json_int64 : Buffer.t -> int64 -> unit
+  val json_float : Buffer.t -> float -> unit
+  val json_string : Buffer.t -> string -> unit
+  val json_bytes : Buffer.t -> bytes -> unit
+  val json_list : (Buffer.t -> 'a -> unit) -> Buffer.t -> 'a list -> unit
+  val json_array : (Buffer.t -> 'a -> unit) -> Buffer.t -> 'a array -> unit
+  val json_option : (Buffer.t -> 'a -> unit) -> Buffer.t -> 'a option -> unit
+  val json_field : 'a description -> Buffer.t -> bool -> string -> 'a -> bool
 end
 
 module Level : sig
@@ -189,12 +174,12 @@ module Level : sig
   val t : t Type.t
 end
 
-module Instant : sig
+module Timestamp : sig
   type t
-  (** A wall-clock occurrence instant expressed as epoch nanoseconds. *)
+  (** A wall-clock occurrence timestamp expressed as Unix nanoseconds. *)
 
-  val of_epoch_nanoseconds : int64 -> t
-  val to_epoch_nanoseconds : t -> int64
+  val of_unix_ns : int64 -> t
+  val to_unix_ns : t -> int64
   val compare : t -> t -> int
   val equal : t -> t -> bool
   val pp : Format.formatter -> t -> unit
@@ -202,9 +187,19 @@ module Instant : sig
 end
 
 module Value : sig
-  type t
-  (** A free-form structured value. The outer tree is immutable; values added
-      with {!embed} are retained by reference and may themselves be mutable. *)
+  type t = private
+    | Null
+    | Bool of bool
+    | Int of int
+    | Float of float
+    | String of string
+    | List of t list
+    | Object of (string * t) list
+    | Embedded : 'a Type.t * 'a -> t
+        (** A free-form structured value. The outer tree is immutable; values
+            added with {!embed} are retained by reference and may themselves be
+            mutable. The private constructors support stable structural
+            inspection while the functions below remain the construction API. *)
 
   val null : t
   val bool : bool -> t
@@ -220,6 +215,11 @@ module Value : sig
 
   val pp : Format.formatter -> t -> unit
   val to_string : t -> string
+
+  type json_error = Invalid_utf8 | Non_finite_float | Unsupported_value
+
+  val to_json_string : t -> (string, json_error) result
+  (** Encode one compact JSON value with Observe's direct writer. *)
 end
 
 module Log : sig
@@ -237,7 +237,7 @@ module Log : sig
   val service : t -> string
   val environment : t -> string option
   val version : t -> string option
-  val instant : t -> Instant.t
+  val timestamp : t -> Timestamp.t
   val level : t -> Level.t
   val payload : t -> payload
 end
@@ -298,12 +298,14 @@ module Formatter : sig
   (** Invoke a formatter. Callback exceptions remain exceptions; the logging
       engine contains them at the application boundary. *)
 
-  val readable : style -> t
+  val pretty : style -> t
   (** Render compact tagged text or an ordered structured tree with UTC
       millisecond timestamps and console-safe caller data. *)
 
   val json : t
-  val json_lines : t
+
+  val ndjson : t
+  (** One compact JSON object followed by one line feed. *)
 end
 
 module Capture : sig
@@ -320,6 +322,7 @@ end
 
 module Config : sig
   type t
+  type console = Auto | Pretty | Ndjson | Silent
   type field = Service | Environment | Version
   type problem = Empty | Invalid_utf8
   type error = { field : field; problem : problem }
@@ -331,24 +334,21 @@ module Config : sig
     ?environment:string ->
     ?version:string ->
     ?enabled:bool ->
-    ?pretty:bool ->
-    ?silent:bool ->
+    ?console:console ->
     ?min_level:Level.t ->
     ?drains:Drain.t list ->
     unit ->
     (t, error) result
-  (** Construct validated logging behavior. If [pretty] is absent, readable
-      output is selected when [environment] is absent, [dev], or [development];
-      other environments select JSON. An explicit [pretty] value overrides this
-      selection. *)
+  (** Construct validated logging behavior. [Auto] selects pretty output when
+      [environment] is absent, [dev], or [development], and NDJSON otherwise.
+      The other console policies explicitly override that selection. *)
 
   val create_exn :
     service:string ->
     ?environment:string ->
     ?version:string ->
     ?enabled:bool ->
-    ?pretty:bool ->
-    ?silent:bool ->
+    ?console:console ->
     ?min_level:Level.t ->
     ?drains:Drain.t list ->
     unit ->
@@ -359,8 +359,7 @@ module Config : sig
   val environment : t -> string option
   val version : t -> string option
   val enabled : t -> bool
-  val pretty : t -> bool
-  val silent : t -> bool
+  val console : t -> console
   val min_level : t -> Level.t
   val drains : t -> Drain.t list
   val pp_error : Format.formatter -> error -> unit
@@ -368,8 +367,8 @@ end
 
 module Logs : sig
   type message
-  (** A pending message. Expensive free-form construction remains deferred until
-      after admission. *)
+  (** A pending message. Eager forms retain completed values; [_lazy] forms run
+      their thunk only after admission. *)
 
   val text : tag:string -> string -> message
 
@@ -377,8 +376,10 @@ module Logs : sig
   (** Construct text only after admission. Ordinary exceptions are withheld and
       diagnosed as [Diagnostics.Authoring_raised]. *)
 
-  val free : (unit -> Value.t) -> message
+  val free : Value.t -> message
+  val free_lazy : (unit -> Value.t) -> message
   val structured : 'a Type.t -> 'a -> message
+  val structured_lazy : 'a Type.t -> (unit -> 'a) -> message
 
   val emit : level:Level.t -> message -> unit
   (** Emit through the active scoped or production route. Before installation,
@@ -414,15 +415,16 @@ module IO : sig
         cancellation. *)
 
     val protect : state -> finally:(unit -> unit) -> (unit -> 'a t) -> 'a t
-    (** Run [finally] exactly once and preserve the callback's original result,
-        exception, or native cancellation. *)
+    (** Run [finally] exactly once after the callback settles. When [finally]
+        returns normally, preserve the callback's result, exception, or native
+        cancellation. The cleanup hook must not raise. *)
 
     val is_control_exception : state -> exn -> bool
     (** Identify native cancellation and other control-flow exceptions that the
         core must preserve rather than contain. *)
 
     module Clock : sig
-      val now : state -> (Instant.t, clock_error) result
+      val now : state -> (Timestamp.t, clock_error) result
       (** Return wall-clock epoch time. [Unavailable] means that no timestamp
           can be supplied. Ordinary exceptions are diagnosed by the core. *)
     end
@@ -471,5 +473,6 @@ module Make (IO : IO.S) : sig
       suppresses production delivery for the dynamic extent. Prior bindings are
       restored and the capture is closed exactly once after callback success,
       exception, or cancellation. The callback outcome is preserved; a retained
-      capture remains readable but closed to further delivery. *)
+      capture remains available for inspection but closed to further delivery.
+  *)
 end

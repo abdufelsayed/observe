@@ -17,10 +17,11 @@ let first_string_argument arguments =
 let call_key path argument =
   match argument with None -> path | Some value -> path ^ " " ^ value
 
-let fail format = Printf.ksprintf failwith format
+let fail format = Format.kasprintf failwith format
 
 let () =
-  if Array.length Sys.argv <> 2 then fail "usage: %s EXPANSION" Sys.argv.(0);
+  if Array.length Sys.argv < 2 || Array.length Sys.argv > 3 then
+    fail "usage: %s EXPANSION [recursive]" Sys.argv.(0);
   let channel = open_in_bin Sys.argv.(1) in
   let lexbuf = Lexing.from_channel channel in
   Lexing.set_filename lexbuf Sys.argv.(1);
@@ -61,14 +62,23 @@ let () =
     if actual <> expected then
       fail "expected %S %d time(s), found %d" key expected actual
   in
-  require bindings "event_t" 1;
-  require calls "Observe.Type.sealv" 1;
-  require calls "Observe.Type.|~" 2;
-  require calls "Observe.Type.variant event" 1;
-  require calls "Observe.Type.case1 User_login" 1;
-  require calls "Observe.Type.sealr" 1;
-  require calls "Observe.Type.|+" 2;
-  require calls "Observe.Type.record User_login" 1;
-  require calls "Observe.Type.field user_id" 1;
-  require calls "Observe.Type.field method_" 1;
-  require calls "Observe.Type.case0 Idle" 1
+  match if Array.length Sys.argv = 3 then Some Sys.argv.(2) else None with
+  | None ->
+      require bindings "event_t" 1;
+      require calls "Observe.Generated_runtime.with_plan" 1;
+      require calls "Observe.Type.sealv" 1;
+      require calls "Observe.Type.|~" 2;
+      require calls "Observe.Type.variant event" 1;
+      require calls "Observe.Type.case1 User_login" 1;
+      require calls "Observe.Type.sealr" 1;
+      require calls "Observe.Type.|+" 2;
+      require calls "Observe.Type.record User_login" 1;
+      require calls "Observe.Type.field user_id" 1;
+      require calls "Observe.Type.field method_" 1;
+      require calls "Observe.Type.case0 Idle" 1
+  | Some "recursive" ->
+      require bindings "node_t" 1;
+      require calls "Observe.Generated_runtime.with_recursive_plan" 1;
+      require calls "Observe.Generated_runtime.constructor Leaf" 1;
+      require calls "Observe.Generated_runtime.constructor Branch" 1
+  | Some mode -> fail "unknown expansion mode %S" mode

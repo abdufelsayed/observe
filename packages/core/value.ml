@@ -41,75 +41,139 @@ let rec pp formatter = function
 
 let to_string value = Format.asprintf "%a" pp value
 
+open Pretty
+
+let rec plan value =
+  match value with
+  | Null -> Scalar (fun renderer -> null renderer)
+  | Bool value -> Scalar (fun renderer -> bool renderer value)
+  | Int value -> Scalar (fun renderer -> int renderer value)
+  | Float value -> Scalar (fun renderer -> float renderer value)
+  | String value -> Scalar (fun renderer -> string renderer value)
+  | List values -> plan_list values
+  | Object [] -> Scalar (fun renderer -> empty_record renderer)
+  | Object fields ->
+      Node
+        (fun renderer placement ->
+          let nested = place renderer placement ~scalar:false in
+          append_fields renderer fields;
+          finish renderer nested)
+  | Embedded (description, value) -> Type.plan description value
+
+and plan_list values =
+  match List.map plan values with
+  | [] -> Scalar (fun renderer -> empty_list renderer)
+  | plans
+    when List.for_all (function Scalar _ -> true | Node _ -> false) plans ->
+      Scalar
+        (fun renderer ->
+          list_start renderer;
+          append_scalars renderer plans;
+          list_end renderer)
+  | plans ->
+      Node
+        (fun renderer placement ->
+          let nested = place renderer placement ~scalar:false in
+          append_indexed renderer 0 plans;
+          finish renderer nested)
+
+and append_scalars renderer = function
+  | [] -> ()
+  | [ Scalar append ] -> append renderer
+  | Scalar append :: rest ->
+      append renderer;
+      list_separator renderer;
+      append_scalars renderer rest
+  | Node _ :: _ -> invalid_arg "Observe.Value: non-scalar plan in scalar list"
+
+and append_indexed renderer index = function
+  | [] -> ()
+  | [ planned ] -> render renderer (Index { last = true; index }) planned
+  | planned :: rest ->
+      render renderer (Index { last = false; index }) planned;
+      newline renderer;
+      append_indexed renderer (index + 1) rest
+
+and append_fields renderer = function
+  | [] -> ()
+  | [ (name, value) ] ->
+      render renderer (Field { last = true; name }) (plan value)
+  | (name, value) :: rest ->
+      render renderer (Field { last = false; name }) (plan value);
+      newline renderer;
+      append_fields renderer rest
+
+let append_pretty renderer placement value =
+  render renderer placement (plan value)
+
 type json_error = Invalid_utf8 | Non_finite_float | Unsupported_value
 
 exception Json_error of json_error
-
-let is_valid_utf8 = Utf8.is_valid
-
-let add_control_escape buffer byte =
-  Buffer.add_string buffer (Printf.sprintf "\\u%04x" byte)
-
-let add_json_string buffer value =
-  if not (is_valid_utf8 value) then raise (Json_error Invalid_utf8);
-  Buffer.add_char buffer '"';
-  String.iter
-    (function
-      | '"' -> Buffer.add_string buffer "\\\""
-      | '\\' -> Buffer.add_string buffer "\\\\"
-      | '\b' -> Buffer.add_string buffer "\\b"
-      | '\012' -> Buffer.add_string buffer "\\f"
-      | '\n' -> Buffer.add_string buffer "\\n"
-      | '\r' -> Buffer.add_string buffer "\\r"
-      | '\t' -> Buffer.add_string buffer "\\t"
-      | character when Char.code character < 0x20 ->
-          add_control_escape buffer (Char.code character)
-      | character -> Buffer.add_char buffer character)
-    value;
-  Buffer.add_char buffer '"'
 
 let add_json_float buffer value =
   match classify_float value with
   | FP_nan | FP_infinite -> raise (Json_error Non_finite_float)
   | FP_normal | FP_subnormal | FP_zero ->
-      Buffer.add_string buffer (Printf.sprintf "%.17g" value)
+      Buffer.add_string buffer (Json_writer.float_to_string value)
 
 let rec add_json buffer = function
-  | Null -> Buffer.add_string buffer "null"
+  | Null -> Json_writer.null buffer
   | Bool value -> Buffer.add_string buffer (string_of_bool value)
-  | Int value -> Buffer.add_string buffer (string_of_int value)
+  | Int value -> Json_writer.decimal_int buffer value
   | Float value -> add_json_float buffer value
-  | String value -> add_json_string buffer value
+  | String value -> Json_writer.string buffer value
   | List values ->
       Buffer.add_char buffer '[';
-      List.iteri
-        (fun index value ->
-          if index <> 0 then Buffer.add_char buffer ',';
-          add_json buffer value)
-        values;
+      let rec add_values = function
+        | [] -> ()
+        | [ value ] -> add_json buffer value
+        | value :: rest ->
+            add_json buffer value;
+            Buffer.add_char buffer ',';
+            add_values rest
+      in
+      add_values values;
       Buffer.add_char buffer ']'
   | Object fields ->
       Buffer.add_char buffer '{';
-      List.iteri
-        (fun index (name, value) ->
-          if index <> 0 then Buffer.add_char buffer ',';
-          add_json_string buffer name;
-          Buffer.add_char buffer ':';
-          add_json buffer value)
-        fields;
-      Buffer.add_char buffer '}'
-  | Embedded (type_, value) ->
-      let encoded =
-        try Type.to_json_string ~minify:true type_ value
-        with Repr.Unsupported_operation _ | Failure _ ->
-          raise (Json_error Unsupported_value)
+      let rec add_fields = function
+        | [] -> ()
+        | [ (name, value) ] ->
+            Json_writer.name buffer name;
+            add_json buffer value
+        | (name, value) :: rest ->
+            Json_writer.name buffer name;
+            add_json buffer value;
+            Buffer.add_char buffer ',';
+            add_fields rest
       in
-      if not (is_valid_utf8 encoded) then raise (Json_error Invalid_utf8);
-      Buffer.add_string buffer encoded
+      add_fields fields;
+      Buffer.add_char buffer '}'
+  | Embedded (type_, value) -> Type.append_json buffer type_ value
+
+let append_json buffer value =
+  (* Transactional: a failed append leaves the buffer at its length at entry.
+     Only Repr's typed unsupported-projection signal is classified; arbitrary
+     callback exceptions propagate so the engine records [Formatting_raised]. *)
+  let start = Buffer.length buffer in
+  try
+    add_json buffer value;
+    Ok ()
+  with raised -> (
+    Buffer.truncate buffer start;
+    match raised with
+    | Json_writer.Invalid_utf8 -> Error Invalid_utf8
+    | Repr.Unsupported_operation _ -> Error Unsupported_value
+    | Json_error error -> Error error
+    | _ -> raise raised)
+
+let append_json_string buffer value =
+  match Json_writer.string buffer value with
+  | () -> Ok ()
+  | exception Json_writer.Invalid_utf8 -> Error Invalid_utf8
 
 let to_json_string value =
-  try
-    let buffer = Buffer.create 128 in
-    add_json buffer value;
-    Ok (Buffer.contents buffer)
-  with Json_error error -> Error error
+  let buffer = Buffer.create 128 in
+  match append_json buffer value with
+  | Ok () -> Ok (Buffer.contents buffer)
+  | Error _ as error -> error
