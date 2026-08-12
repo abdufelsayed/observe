@@ -2,21 +2,22 @@
  (name observe)
  (public_name observe)
  (private_modules
-  observe_capture
-  observe_config
-  observe_diagnostics
-  observe_display
-  observe_drain
-  observe_engine
-  observe_formatter
-  observe_instant
-  observe_level
-  observe_log
-  observe_logs
-  observe_runtime
-  observe_type
-  observe_utf8
-  observe_value)
+  capture
+  config
+  diagnostics
+  display
+  drain
+  engine
+  formatter
+  instant
+  io
+  level
+  log
+  logs
+  observer
+  type
+  utf8
+  value)
  (libraries
   (re_export repr)
   jsonm))

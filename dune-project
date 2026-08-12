@@ -54,31 +54,15 @@
 
 (package
  (name observe-lwt)
- (synopsis "Lwt runtime support for Observe")
+ (synopsis "Configurable Lwt I/O for Observe")
  (description
-  "Lwt dynamic-context support for the portable Observe logging core.")
+  "Lwt effects and dynamic context completed with caller-provided Observe clock and console functions.")
  (depends
   (ocaml
    (>= 4.14))
   (observe
    (= :version))
   lwt
-  (alcotest
-   (and
-    :with-test
-    (>= 1.9.1)))))
-
-(package
- (name observe-unix)
- (synopsis "Unix platform support for Observe")
- (description
-  "Unix wall-clock and console mechanisms for the portable Observe logging core.")
- (depends
-  (ocaml
-   (>= 4.14))
-  (observe
-   (= :version))
-  ptime
   (alcotest
    (and
     :with-test
@@ -96,7 +80,6 @@
    (= :version))
   (observe-lwt
    (= :version))
-  (observe-unix
-   (= :version))
   lwt
+  ptime
   (ocamlfind :with-test)))

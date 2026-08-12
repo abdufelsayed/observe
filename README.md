@@ -22,7 +22,7 @@ top of this foundation but are not part of the current public API.
 - Pure readable, JSON, and JSON Lines formatters.
 - Additional application-owned drains and finite diagnostics.
 - Deterministic scoped capture for tests.
-- Portable runtime and platform contracts, plus a ready Lwt-Unix initializer.
+- A portable completed-I/O contract, plus a ready Lwt-Unix initializer.
 
 ## Installation
 
@@ -43,8 +43,8 @@ An Lwt-Unix executable links the ready composition:
   (pps observe.ppx)))
 ```
 
-Use only `(libraries observe)` for the portable core or for a custom runtime
-and platform composition. The PPX is optional.
+Use only `(libraries observe)` for the portable core or for a custom I/O
+composition. The PPX is optional.
 
 ## Quick Start
 
@@ -150,18 +150,17 @@ and constructor payloads. The same executable is exercised by
 ## Packages
 
 Observe is distributed as a small package family with explicit portable,
-runtime, platform, and ready-composition boundaries:
+effect, and ready-composition boundaries:
 
 | Package or library | Purpose |
 | --- | --- |
-| `observe` | Portable logging core, public authoring API, formatters, drains, diagnostics, capture, and runtime/platform contracts. |
+| `observe` | Portable logging core, public authoring API, formatters, drains, diagnostics, capture, and the completed `Observe.IO` contract. |
 | `observe.ppx` | Core-package sublibrary for `[@@deriving observe]`, `[%observe.value ...]`, and embedded typed values. |
-| `observe-lwt` | Lwt callback-local runtime mechanism. |
-| `observe-unix` | Unix clock and standard-error platform mechanism. |
-| `observe-lwt-unix` | Ready composition and Lwt-scoped test capture. |
+| `observe-lwt` | Lwt callback-local effects completed with caller-provided clock and console functions. |
+| `observe-lwt-unix` | Ready Lwt-Unix composition, standard-error output, and Lwt-scoped test capture. |
 
-The core does not depend on Lwt or Unix. `Observe.Runtime.Make` composes any
-compatible runtime and platform; `Observe_lwt_unix` is the ready path for
+The core does not depend on Lwt or Unix. `Observe.Make (IO)` accepts one
+completed I/O implementation; `Observe_lwt_unix` is the ready path for
 ordinary Lwt applications.
 
 ## Drains And Capture
@@ -193,6 +192,17 @@ opam install . --deps-only --with-test --with-doc --with-dev-setup
 opam exec -- dune build @fmt @correctness @examples @doc @opam
 opam exec -- dune build @stress
 ```
+
+CI also proves each installable package independently:
+
+```sh
+opam exec -- dune build -p observe @install @runtest
+opam exec -- dune build -p observe-lwt @install @runtest
+opam exec -- dune build -p observe-lwt-unix @install @runtest
+```
+
+The latter two commands expect their package dependencies to be installed,
+matching opam's package build environment.
 
 The public API reference is published at
 [abdufelsayed.github.io/observe](https://abdufelsayed.github.io/observe/).

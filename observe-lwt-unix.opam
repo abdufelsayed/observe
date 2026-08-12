@@ -14,8 +14,8 @@ depends: [
   "ocaml" {>= "4.14"}
   "observe" {= version}
   "observe-lwt" {= version}
-  "observe-unix" {= version}
   "lwt"
+  "ptime"
   "ocamlfind" {with-test}
   "odoc" {with-doc}
 ]

@@ -1,13 +1,24 @@
-module Type = Observe_type
-module Level = Observe_level
-module Instant = Observe_instant
-module Value = Observe_value
-module Log = Observe_log
-module Diagnostics = Observe_diagnostics
-module Drain = Observe_drain
-module Formatter = Observe_formatter
-module Capture = Observe_capture
-module Config = Observe_config
-module Logs = Observe_logs
-module Platform = Observe_runtime.Platform
-module Runtime = Observe_runtime
+module Type = Type
+module Level = Level
+module Instant = Instant
+module Value = Value
+module Log = Log
+module Diagnostics = Diagnostics
+module Drain = Drain
+module Formatter = Formatter
+module Capture = Capture
+module Config = Config
+module Logs = Logs
+module IO = Io
+
+type init_error = Observer.init_error =
+  | Already_initialized
+  | IO_already_registered
+
+type capture_error = Observer.capture_error =
+  | IO_already_registered
+  | Invalid_capacity of int
+
+exception Init_error = Observer.Init_error
+
+module Make = Observer.Make

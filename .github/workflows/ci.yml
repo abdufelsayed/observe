@@ -56,8 +56,8 @@ jobs:
           git diff --check
           git diff --exit-code
 
-  correctness:
-    name: Correctness (${{ matrix.os }}, OCaml ${{ matrix.ocaml-compiler }})
+  package-install-build-test:
+    name: Package install/build/test (${{ matrix.package }}, ${{ matrix.os }}, OCaml ${{ matrix.ocaml-compiler }})
     if: github.event_name != 'pull_request' || github.event.pull_request.draft == false
     strategy:
       fail-fast: false
@@ -68,6 +68,10 @@ jobs:
         ocaml-compiler:
           - "4.14"
           - "5"
+        package:
+          - observe
+          - observe-lwt
+          - observe-lwt-unix
 
     runs-on: ${{ matrix.os }}
     timeout-minutes: 45
@@ -88,15 +92,10 @@ jobs:
         run: opam option --global 'archive-mirrors=["https://opam.ocaml.org/cache"]'
 
       - name: Install package test dependencies
-        run: >-
-          opam install --yes --with-test --deps-only
-          observe observe-lwt observe-unix observe-lwt-unix
+        run: opam install --yes --with-test --deps-only "${{ matrix.package }}"
 
-      - name: Build package installs and correctness targets
-        run: >-
-          opam exec -- dune build
-          -p observe,observe-lwt,observe-unix,observe-lwt-unix
-          @install @runtest
+      - name: Build package install and test targets
+        run: opam exec -- dune build -p "${{ matrix.package }}" @install @runtest
 
   docs-examples:
     name: Documentation and examples
@@ -161,7 +160,7 @@ jobs:
     if: always() && (github.event_name != 'pull_request' || github.event.pull_request.draft == false)
     needs:
       - hygiene
-      - correctness
+      - package-install-build-test
       - docs-examples
       - stress
     runs-on: ubuntu-latest
@@ -171,7 +170,7 @@ jobs:
       - name: Summarize required checks
         env:
           HYGIENE: ${{ needs.hygiene.result }}
-          CORRECTNESS: ${{ needs.correctness.result }}
+          PACKAGE_TESTS: ${{ needs.package-install-build-test.result }}
           DOCS_EXAMPLES: ${{ needs.docs-examples.result }}
           STRESS: ${{ needs.stress.result }}
         run: |
@@ -193,7 +192,7 @@ jobs:
 
           echo "### Required CI" >> "$GITHUB_STEP_SUMMARY"
           check_result "Hygiene" "$HYGIENE"
-          check_result "Correctness matrix" "$CORRECTNESS"
+          check_result "Package install/build/test matrix" "$PACKAGE_TESTS"
           check_result "Documentation and examples" "$DOCS_EXAMPLES"
           check_result "No-service stress tests" "$STRESS"
 

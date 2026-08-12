@@ -14,8 +14,8 @@ wide-event or metric APIs.
 
 Link the portable core with [(libraries observe)]. Add
 [(preprocess (pps observe.ppx))] when using the deriver or free-form extension.
-Runtime, platform, and ready compositions are distributed in the
-[observe-lwt], [observe-unix], and [observe-lwt-unix] packages.
+Configurable Lwt I/O and the ready Unix composition are distributed in the
+[observe-lwt] and [observe-lwt-unix] packages.
 
 {1 Authoring}
 
@@ -49,14 +49,14 @@ automatic formatted output. {!module:Observe.Drain} values are additional
 application-owned outputs that receive completed {!type:Observe.Log.t} values.
 Silent configuration suppresses the console, not drains.
 
-{1 Runtime composition and capture}
+{1 I/O composition and capture}
 
-{!module-type:Observe.Runtime.S} owns dynamic binding, cleanup, and native
-cancellation. {!module-type:Observe.Platform.S} owns the wall clock, console
-presentation capability, and console write. {!module:Observe.Runtime.Make} composes
-them without adding a runtime or platform dependency to the core.
+{!module-type:Observe.IO.S} owns effects, dynamic binding, cleanup, native
+control exceptions, the wall clock, console presentation capability, and
+console writes. {!module:Observe.Make} consumes that completed contract without
+adding a runtime or platform dependency to the core.
 
-{!val:Observe.Runtime.Make.with_capture} installs capture as the innermost
+{!val:Observe.Make.with_capture} installs capture as the innermost
 dynamic route, suppresses production delivery for the callback, restores the
 previous binding, and closes the capture exactly once.
 

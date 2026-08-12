@@ -3,15 +3,15 @@
     Initialize once at the application composition root. Ordinary application
     and library code then logs through [Observe.Logs]. *)
 
-val init : Observe.Config.t -> (unit, Observe.Runtime.init_error) result
+val init : Observe.Config.t -> (unit, Observe.init_error) result
 (** Install the process-wide Observe engine with Lwt dynamic context, the OS
     wall clock, and automatic standard-error output. *)
 
 val init_exn : Observe.Config.t -> unit
-(** Like {!init}, but raises [Observe.Runtime.Init_error] on failure. *)
+(** Like {!init}, but raises [Observe.Init_error] on failure. *)
 
 module Test : sig
-  exception Capture_error of Observe.Runtime.capture_error
+  exception Capture_error of Observe.capture_error
   (** A capture could not start. The callback is not called. *)
 
   val with_capture :
@@ -25,6 +25,6 @@ module Test : sig
       The inner scope wins when scopes are nested. The prior scope is restored
       after success, exception, or [Lwt.Canceled]. A callback registered in the
       scope but run after closure cannot fall through to production. Bindings do
-      not propagate through [Lwt_preemptive.detach], OS threads, or another
-      runtime. *)
+      not propagate through [Lwt_preemptive.detach], OS threads, or another I/O
+      implementation. *)
 end

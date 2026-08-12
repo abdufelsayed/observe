@@ -1,10 +1,10 @@
-(** Runtime-neutral structured logging.
+(** Portable structured logging.
 
-    The core owns logging policy and performs no I/O. Runtime adapters provide
-    dynamic context; platform adapters provide the clock and console output.
-    Ordinary application code logs through {!Logs}. *)
+    The core owns logging policy and performs no I/O. Integrations provide one
+    completed {!module-type:IO.S} implementation. Ordinary application code logs
+    through {!Logs}. *)
 
-(** Runtime descriptions used by typed structured logs. Each description keeps
+(** Type descriptions used by typed structured logs. Each description keeps
     Repr's machine representation together with Observe's presentation
     semantics. {!Type.repr} is the explicit interoperability escape hatch. *)
 module Type : sig
@@ -391,33 +391,13 @@ module Logs : sig
   val error : message -> unit
 end
 
-module Platform : sig
+module IO : sig
   type clock_error = Unavailable
   type console_acceptance = Accepted | Rejected
 
   module type S = sig
-    type t
-
-    val console_style : t -> Formatter.style
-    (** Report the console's maximum supported presentation capability. Return
-        [Plain] when support is unknown. This query must not raise. *)
-
-    val now : t -> (Instant.t, clock_error) result
-    (** Return wall-clock epoch time. [Unavailable] means that no timestamp can
-        be supplied. Ordinary exceptions are diagnosed by the core. *)
-
-    val write_console : t -> string -> console_acceptance
-    (** Write one completely formatted record exactly as supplied. The core owns
-        record termination. [Accepted] promises immediate handoff only, not
-        flushing or durability. Ordinary exceptions are diagnosed by the core.
-    *)
-  end
-end
-
-module Runtime : sig
-  module type S = sig
     type +'a t
-    type context
+    type state
     type 'a key
 
     val return : 'a -> 'a t
@@ -426,53 +406,70 @@ module Runtime : sig
     val create_key : unit -> 'a key
     (** Return a fresh generative dynamic-context key. *)
 
-    val get : context -> 'a key -> 'a option
+    val get : state -> 'a key -> 'a option
     (** Read only the binding associated with the supplied key. *)
 
-    val with_binding : context -> 'a key -> 'a -> (unit -> 'b t) -> 'b t
+    val with_binding : state -> 'a key -> 'a -> (unit -> 'b t) -> 'b t
     (** Restore the previous binding after success, exception, or native
         cancellation. *)
 
-    val protect : context -> finally:(unit -> unit) -> (unit -> 'a t) -> 'a t
+    val protect : state -> finally:(unit -> unit) -> (unit -> 'a t) -> 'a t
     (** Run [finally] exactly once and preserve the callback's original result,
         exception, or native cancellation. *)
 
-    val is_control_exception : context -> exn -> bool
+    val is_control_exception : state -> exn -> bool
     (** Identify native cancellation and other control-flow exceptions that the
         core must preserve rather than contain. *)
+
+    module Clock : sig
+      val now : state -> (Instant.t, clock_error) result
+      (** Return wall-clock epoch time. [Unavailable] means that no timestamp
+          can be supplied. Ordinary exceptions are diagnosed by the core. *)
+    end
+
+    module Console : sig
+      val style : state -> Formatter.style
+      (** Report the console's maximum supported presentation capability. Return
+          [Plain] when support is unknown. This query must not raise. *)
+
+      val write : state -> string -> console_acceptance
+      (** Write one completely formatted record exactly as supplied. The core
+          owns record termination. [Accepted] promises immediate handoff only,
+          not flushing or durability. Ordinary exceptions are diagnosed by the
+          core. *)
+    end
   end
+end
 
-  type init_error = Already_initialized | Runtime_already_registered
-  type capture_error = Runtime_already_registered | Invalid_capacity of int
+type init_error = Already_initialized | IO_already_registered
+type capture_error = IO_already_registered | Invalid_capacity of int
 
-  exception Init_error of init_error
+exception Init_error of init_error
 
-  module Make (Runtime : S) (Platform : Platform.S) : sig
-    type +'a io = 'a Runtime.t
-    type t
+module Make (IO : IO.S) : sig
+  type +'a io = 'a IO.t
+  type t
 
-    val create : runtime_context:Runtime.context -> platform:Platform.t -> t
-    (** Create an inert composition. This does not register or initialize the
-        process route. *)
+  val create : IO.state -> t
+  (** Create an inert observer from a completed I/O state. This does not
+      register or initialize the process route. *)
 
-    val init : t -> Config.t -> (unit, init_error) result
+  val init : t -> Config.t -> (unit, init_error) result
 
-    val init_exn : t -> Config.t -> unit
-    (** [init_exn] raises [Init_error error] when [init] returns [Error error].
-    *)
+  val init_exn : t -> Config.t -> unit
+  (** [init_exn] raises [Init_error error] when [init] returns [Error error]. *)
 
-    val with_capture :
-      t ->
-      Config.t ->
-      ?capacity:int ->
-      (Capture.t -> 'a io) ->
-      ('a, capture_error) result io
-    (** Run with capture as the innermost dynamic route.
+  val with_capture :
+    t ->
+    Config.t ->
+    ?capacity:int ->
+    (Capture.t -> 'a io) ->
+    ('a, capture_error) result io
+  (** Run with capture as the innermost dynamic route.
 
-        Registration and capacity errors occur before [callback]. The capture
-        suppresses production delivery for the dynamic extent. Prior bindings
-        are restored and the capture is closed exactly once after callback
-        success, exception, or cancellation. The callback outcome is preserved;
-        a retained capture remains readable but closed to further delivery. *)
-  end
+      Registration and capacity errors occur before [callback]. The capture
+      suppresses production delivery for the dynamic extent. Prior bindings are
+      restored and the capture is closed exactly once after callback success,
+      exception, or cancellation. The callback outcome is preserved; a retained
+      capture remains readable but closed to further delivery. *)
 end

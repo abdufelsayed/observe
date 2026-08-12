@@ -2,8 +2,10 @@
  (name correctness)
  (deps
   dune-project
-  (alias test/observe/observe-contracts)
-  (alias observe-installed-surface)))
+  (alias observe-core-contracts)
+  (alias observe-lwt-contracts)
+  (alias observe-lwt-unix-contracts)
+  (alias package-installed-surfaces)))
 
 (alias
  (name stress)
@@ -17,6 +19,21 @@
  (deps
   (alias examples/observe-examples)))
 
+(alias
+ (name observe-core-contracts)
+ (deps
+  (alias test/core/observe-core-contracts)))
+
+(alias
+ (name observe-lwt-contracts)
+ (deps
+  (alias test/lwt/observe-lwt-contracts)))
+
+(alias
+ (name observe-lwt-unix-contracts)
+ (deps
+  (alias test/lwt-unix/observe-lwt-unix-contracts)))
+
 (rule
  (alias observe-core-installed-surface)
  (package observe)
@@ -26,86 +43,75 @@
   %{lib:observe:observe.mli}
   %{lib:observe:META}
   %{lib:observe:dune-package}
-  test/observe/interfaces/check_install_surface.sh
-  test/observe/interfaces/public_consumer.exe
-  test/observe/interfaces/ppx_consumer.exe
-  test/observe/interfaces/public_consumer.ml
-  (source_tree test/observe/interfaces/negative))
+  test/core/interfaces/check_install_surface.sh
+  test/core/interfaces/public_consumer.exe
+  test/core/interfaces/ppx_consumer.exe
+  test/core/interfaces/public_consumer.ml
+  (source_tree test/core/interfaces/negative))
  (action
   (progn
    (run
     bash
-    %{dep:test/observe/interfaces/check_install_surface.sh}
+    %{dep:test/core/interfaces/check_install_surface.sh}
     %{bin:ocamlfind}
     %{dep:observe.install}
     %{lib:observe:observe.cmi}
     %{lib:observe:observe.mli}
     %{lib:observe:META}
     %{lib:observe:dune-package}
-    %{dep:test/observe/interfaces/public_consumer.ml}
-    test/observe/interfaces/negative)
-   (run %{exe:test/observe/interfaces/public_consumer.exe})
-   (run %{exe:test/observe/interfaces/ppx_consumer.exe}))))
+    %{dep:test/core/interfaces/public_consumer.ml}
+    test/core/interfaces/negative)
+   (run %{exe:test/core/interfaces/public_consumer.exe})
+   (run %{exe:test/core/interfaces/ppx_consumer.exe}))))
 
 (rule
  (alias observe-lwt-installed-surface)
  (package observe-lwt)
- (deps observe-lwt.install test/observe/interfaces/check_package_manifest.sh)
- (action
-  (run
-   bash
-   %{dep:test/observe/interfaces/check_package_manifest.sh}
-   %{dep:observe-lwt.install}
-   "/lib/observe-lwt/observe_lwt.cmi\"")))
-
-(rule
- (alias observe-unix-installed-surface)
- (package observe-unix)
  (deps
-  observe-unix.install
-  test/observe/interfaces/check_package_manifest.sh)
+  observe-lwt.install
+  test/lwt/interfaces/check_install_surface.sh
+  test/lwt/interfaces/consumer.exe)
  (action
-  (run
-   bash
-   %{dep:test/observe/interfaces/check_package_manifest.sh}
-   %{dep:observe-unix.install}
-   "/lib/observe-unix/observe_unix.cmi\"")))
+  (progn
+   (run
+    bash
+    %{dep:test/lwt/interfaces/check_install_surface.sh}
+    %{dep:observe-lwt.install}
+    "/lib/observe-lwt/observe_lwt.cmi\"")
+   (run %{exe:test/lwt/interfaces/consumer.exe}))))
 
 (rule
- (alias observe-adapter-installed-surface)
+ (alias observe-lwt-unix-installed-surface)
  (package observe-lwt-unix)
  (deps
   observe-lwt-unix.install
   %{lib:observe:observe.cmi}
   %{lib:observe-lwt:observe_lwt.cmi}
-  %{lib:observe-unix:observe_unix.cmi}
   %{lib:observe-lwt-unix:observe_lwt_unix.cmi}
-  test/observe/interfaces/check_adapter_install_surface.sh
-  test/observe/interfaces/adapter_consumer.exe
-  test/observe/interfaces/adapter_consumer.ml
-  (source_tree test/observe/interfaces/negative_adapters))
+  test/lwt-unix/interfaces/check_install_surface.sh
+  test/lwt-unix/interfaces/consumer.exe
+  test/lwt-unix/interfaces/consumer.ml
+  (source_tree test/lwt-unix/interfaces/negative))
  (action
   (progn
    (run
     bash
-    %{dep:test/observe/interfaces/check_adapter_install_surface.sh}
+    %{dep:test/lwt-unix/interfaces/check_install_surface.sh}
     %{bin:ocamlfind}
     %{dep:observe-lwt-unix.install}
     %{lib:observe:observe.cmi}
     %{lib:observe-lwt:observe_lwt.cmi}
-    %{lib:observe-unix:observe_unix.cmi}
     %{lib:observe-lwt-unix:observe_lwt_unix.cmi}
-    %{dep:test/observe/interfaces/adapter_consumer.ml}
-    test/observe/interfaces/negative_adapters)
-   (run %{exe:test/observe/interfaces/adapter_consumer.exe}))))
+    %{dep:test/lwt-unix/interfaces/consumer.ml}
+    test/lwt-unix/interfaces/negative)
+   (run %{exe:test/lwt-unix/interfaces/consumer.exe}))))
 
 (alias
- (name observe-installed-surface)
+ (name package-installed-surfaces)
  (deps
   (alias observe-core-installed-surface)
   (alias observe-lwt-installed-surface)
-  (alias observe-unix-installed-surface)
-  (alias observe-adapter-installed-surface)))
+  (alias observe-lwt-unix-installed-surface)))
 
 (alias
  (name runtest)
@@ -121,12 +127,6 @@
 
 (alias
  (name runtest)
- (package observe-unix)
- (deps
-  (alias observe-unix-installed-surface)))
-
-(alias
- (name runtest)
  (package observe-lwt-unix)
  (deps
-  (alias observe-adapter-installed-surface)))
+  (alias observe-lwt-unix-installed-surface)))

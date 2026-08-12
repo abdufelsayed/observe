@@ -1,0 +1,4 @@
+(executable
+ (name consumer)
+ (modules consumer)
+ (libraries observe-lwt observe lwt))

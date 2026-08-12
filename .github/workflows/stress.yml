@@ -9,7 +9,7 @@ on:
         default: "2000"
         type: string
       race_trials:
-        description: Runtime publication race trials
+        description: I/O publication race trials
         required: false
         default: "100"
         type: string

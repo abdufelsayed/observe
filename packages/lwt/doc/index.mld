@@ -1,9 +1,10 @@
 {0 Observe Lwt}
 
-[observe-lwt] supplies the Lwt implementation of [Observe.Runtime.S].
+[observe-lwt] supplies a configurable Lwt implementation of [Observe.IO.S].
 It provides callback-local dynamic bindings, cleanup, and native
-[Lwt.Canceled] handling without selecting a platform or performing I/O.
+[Lwt.Canceled] handling, then {!val:Observe_lwt.create} completes it with a
+caller-provided clock and console.
 
-Use {!module:Observe_lwt.Runtime} with [Observe.Runtime.Make] when an
+Use {!module:Observe_lwt.IO} with [Observe.Make] when an
 application needs a custom Lwt composition. Most Lwt applications on Unix can
 use the ready [observe-lwt-unix] package instead.

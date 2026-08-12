@@ -1,0 +1,17 @@
+(executable
+ (name test_lwt_io)
+ (modules test_lwt_io)
+ (libraries observe-lwt observe alcotest lwt lwt.unix))
+
+(rule
+ (alias observe-lwt-contracts)
+ (package observe-lwt)
+ (deps test_lwt_io.exe)
+ (action
+  (run %{exe:test_lwt_io.exe})))
+
+(alias
+ (name runtest)
+ (package observe-lwt)
+ (deps
+  (alias observe-lwt-contracts)))

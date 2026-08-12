@@ -1,4 +1,0 @@
-(library
- (name observe_unix)
- (public_name observe-unix)
- (libraries observe ptime.clock unix))
