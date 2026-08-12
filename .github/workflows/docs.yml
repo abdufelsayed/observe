@@ -42,12 +42,9 @@ jobs:
           ref: ${{ github.event_name == 'workflow_run' && github.event.workflow_run.head_sha || github.sha }}
 
       - name: Set-up OCaml ${{ env.OCAML_LATEST }}
-        uses: ocaml/setup-ocaml@v3
+        uses: ./.github/actions/setup-ocaml
         with:
           ocaml-compiler: ${{ env.OCAML_LATEST }}
-          dune-cache: true
-          opam-local-packages: |
-            *.opam
 
       - name: Use opam archive cache
         run: opam option --global 'archive-mirrors=["https://opam.ocaml.org/cache"]'

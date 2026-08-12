@@ -1,0 +1,29 @@
+name: Set up OCaml
+description: Set up the requested OCaml compiler with one transient-failure retry
+
+inputs:
+  ocaml-compiler:
+    description: OCaml compiler constraint passed to ocaml/setup-ocaml
+    required: true
+
+runs:
+  using: composite
+  steps:
+    - name: Set up OCaml
+      id: primary
+      continue-on-error: true
+      uses: ocaml/setup-ocaml@v3
+      with:
+        ocaml-compiler: ${{ inputs.ocaml-compiler }}
+        dune-cache: true
+        opam-local-packages: |
+          *.opam
+
+    - name: Retry OCaml setup after a transient failure
+      if: steps.primary.outcome == 'failure'
+      uses: ocaml/setup-ocaml@v3
+      with:
+        ocaml-compiler: ${{ inputs.ocaml-compiler }}
+        dune-cache: true
+        opam-local-packages: |
+          *.opam
