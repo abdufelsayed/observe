@@ -12,10 +12,10 @@ bug-reports: "https://github.com/abdufelsayed/observe/issues"
 depends: [
   "dune" {>= "3.22"}
   "ocaml" {>= "4.14"}
-  "repr" {>= "0.7.0"}
+  "repr" {>= "0.8.0"}
   "jsonm" {>= "1.0.2"}
-  "ppxlib"
-  "ppx_repr" {>= "0.7.0"}
+  "ppxlib" {>= "0.38.0"}
+  "ppx_repr" {>= "0.8.0"}
   "dune-release" {with-dev-setup}
   "opam-publish" {with-dev-setup}
   "alcotest" {with-test & >= "1.9.1"}

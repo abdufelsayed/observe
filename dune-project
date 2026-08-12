@@ -26,12 +26,13 @@
   (ocaml
    (>= 4.14))
   (repr
-   (>= 0.7.0))
+   (>= 0.8.0))
   (jsonm
    (>= 1.0.2))
-  ppxlib
+  (ppxlib
+   (>= 0.38.0))
   (ppx_repr
-   (>= 0.7.0))
+   (>= 0.8.0))
   (dune-release :with-dev-setup)
   (opam-publish :with-dev-setup)
   (alcotest

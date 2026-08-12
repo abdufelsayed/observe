@@ -61,6 +61,7 @@
   value_record_update.ml
   deriver_abstract.ml
   deriver_gadt.ml
+  deriver_local_open.ml
   deriver_open_polyvariant.ml
   ppx_driver.exe)
  (action
@@ -95,6 +96,12 @@
     %{exe:ppx_driver.exe}
     %{dep:deriver_gadt.ml}
     "GADT result types are not supported")
+   (run
+    bash
+    %{dep:check_negative.sh}
+    %{exe:ppx_driver.exe}
+    %{dep:deriver_local_open.ml}
+    "locally opened types are not supported")
    (run
     bash
     %{dep:check_negative.sh}

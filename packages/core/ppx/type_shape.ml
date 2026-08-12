@@ -61,7 +61,7 @@ let builtin description =
     | Ptyp_constr ({ txt; _ }, _) -> builtin_of_path txt
     | Ptyp_any | Ptyp_var _ | Ptyp_arrow _ | Ptyp_tuple _ | Ptyp_object _
     | Ptyp_class _ | Ptyp_alias _ | Ptyp_variant _ | Ptyp_poly _
-    | Ptyp_package _ | Ptyp_extension _ ->
+    | Ptyp_package _ | Ptyp_extension _ | Ptyp_open _ ->
         None
 
 let error ~loc format =
@@ -96,6 +96,9 @@ let validate_core_type description =
             error ~loc:description.ptyp_loc "package types are not supported"
         | Ptyp_extension _ ->
             error ~loc:description.ptyp_loc "type extensions are not supported"
+        | Ptyp_open _ ->
+            error ~loc:description.ptyp_loc
+              "locally opened types are not supported"
         | Ptyp_any | Ptyp_var _ | Ptyp_constr _ | Ptyp_tuple _ | Ptyp_alias _
         | Ptyp_poly _ ->
             ());

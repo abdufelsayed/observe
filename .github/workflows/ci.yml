@@ -94,6 +94,7 @@ jobs:
           name: no-service-stress-report
           path: .logs/
           if-no-files-found: ignore
+          include-hidden-files: true
 
   docs-examples:
     name: Documentation and example build

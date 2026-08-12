@@ -221,7 +221,7 @@ let needs_runtime_field_policy description =
       | Ptyp_var _ | Ptyp_constr _ -> true
       | Ptyp_any | Ptyp_arrow _ | Ptyp_tuple _ | Ptyp_object _ | Ptyp_class _
       | Ptyp_alias _ | Ptyp_variant _ | Ptyp_poly _ | Ptyp_package _
-      | Ptyp_extension _ ->
+      | Ptyp_extension _ | Ptyp_open _ ->
           false)
 
 let json_field_write (module Engine : Ppx_repr_lib.Engine.S) ~library ~encoders
