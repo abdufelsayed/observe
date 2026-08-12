@@ -61,7 +61,6 @@
   value_record_update.ml
   deriver_abstract.ml
   deriver_gadt.ml
-  deriver_local_open.ml
   deriver_open_polyvariant.ml
   ppx_driver.exe)
  (action
@@ -100,14 +99,22 @@
     bash
     %{dep:check_negative.sh}
     %{exe:ppx_driver.exe}
-    %{dep:deriver_local_open.ml}
-    "locally opened types are not supported")
-   (run
-    bash
-    %{dep:check_negative.sh}
-    %{exe:ppx_driver.exe}
     %{dep:deriver_open_polyvariant.ml}
     "open polymorphic variants are not supported"))))
+
+(rule
+ (alias observe-ppx-negative)
+ (package observe)
+ (enabled_if
+  (>= %{ocaml_version} 5.2))
+ (deps check_negative.sh deriver_local_open.ml ppx_driver.exe)
+ (action
+  (run
+   bash
+   %{dep:check_negative.sh}
+   %{exe:ppx_driver.exe}
+   %{dep:deriver_local_open.ml}
+   "locally opened types are not supported")))
 
 (rule
  (alias observe-ppx-expansion)
