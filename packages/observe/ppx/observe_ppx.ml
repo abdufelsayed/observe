@@ -636,32 +636,32 @@ let with_presentation (module Engine : Ppx_repr_lib.Engine.S) ~library
   in
   for_ppx_call ~loc "with_present" [ description; presenter_expression ]
 
-let rec wrap_descriptor_parameters count wrap expression =
-  if count = 0 then wrap expression
-  else
-    match expression.pexp_desc with
-    | Pexp_fun (label, default, pattern, body) ->
-        {
-          expression with
-          pexp_desc =
-            Pexp_fun
-              ( label,
-                default,
-                pattern,
-                wrap_descriptor_parameters (count - 1) wrap body );
-        }
-    | _ ->
-        inline_error ~loc:expression.pexp_loc
-          "unexpected parameterized descriptor expansion"
+let descriptor_parameters declaration =
+  List.mapi
+    (fun index (parameter, _) ->
+      match parameter.ptyp_desc with
+      | Ptyp_var name -> name
+      | Ptyp_any -> Printf.sprintf "__observe_parameter_%d" index
+      | _ -> assert false)
+    declaration.ptype_params
+
+let wrap_descriptor_parameters declaration wrap expression =
+  let loc = declaration.ptype_loc in
+  let parameters = descriptor_parameters declaration in
+  let machine =
+    match parameters with
+    | [] -> expression
+    | _ -> apply ~loc expression (List.map (evar ~loc) parameters)
+  in
+  lambda ~loc (List.map (pvar ~loc) parameters) (wrap machine)
 
 let add_presentation (module Engine : Ppx_repr_lib.Engine.S) ~library ~recursive
     declaration items =
   match items with
   | ({ pstr_desc = Pstr_value (flag, [ binding ]); _ } as representation)
     :: rest ->
-      let parameter_count = List.length declaration.ptype_params in
       let expression =
-        wrap_descriptor_parameters parameter_count
+        wrap_descriptor_parameters declaration
           (with_presentation (module Engine) ~library ~recursive declaration)
           binding.pvb_expr
       in
@@ -724,15 +724,7 @@ let add_group_presentation (module Engine : Ppx_repr_lib.Engine.S) ~library
         else
           List.map2
             (fun declaration machine ->
-              let parameters =
-                List.mapi
-                  (fun index (parameter, _) ->
-                    match parameter.ptyp_desc with
-                    | Ptyp_var name -> name
-                    | Ptyp_any -> Printf.sprintf "__observe_parameter_%d" index
-                    | _ -> assert false)
-                  declaration.ptype_params
-              in
+              let parameters = descriptor_parameters declaration in
               let machine =
                 apply ~loc (evar ~loc machine) (List.map (evar ~loc) parameters)
               in
