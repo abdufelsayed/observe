@@ -15,7 +15,6 @@ runs:
       uses: ocaml/setup-ocaml@v3
       with:
         ocaml-compiler: ${{ inputs.ocaml-compiler }}
-        dune-cache: true
         opam-local-packages: |
           *.opam
 
@@ -24,6 +23,5 @@ runs:
       uses: ocaml/setup-ocaml@v3
       with:
         ocaml-compiler: ${{ inputs.ocaml-compiler }}
-        dune-cache: true
         opam-local-packages: |
           *.opam
