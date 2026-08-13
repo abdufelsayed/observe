@@ -107,15 +107,17 @@ let main () =
 ```
 
 The directory is created recursively. Each log is projected to owned compact
-NDJSON before synchronous drain acceptance, then one bounded Lwt worker
+NDJSON before synchronous drain acceptance, then one bounded background writer
 appends it to the UTC file selected by the log timestamp:
 
 ```text
 .observe/logs/2026-08-13.jsonl
 ```
 
+The writer coalesces records already queued for the same file into a reusable
+write buffer; it never waits to accumulate records or crosses a flush barrier.
 The queue holds at most 1,024 pending records by default. A full or stopped
-worker rejects the newest record without discarding earlier acceptance.
+writer rejects the newest record without discarding earlier acceptance.
 `Observe_lwt_unix.flush` and `shutdown` include registered filesystem workers.
 Acceptance does not promise `fsync`, crash durability, retry, retention,
 compression, or cross-process coordination.
@@ -227,7 +229,7 @@ barrier or `Observe_lwt_unix.shutdown ()` before process exit.
 
 ## Drains And Capture
 
-The platform console is the automatic formatted output. On Unix it writes to
+Automatic console output is the built-in formatted output. On Unix it writes to
 standard error, which may be a terminal, file, or pipe. Configured
 `Observe.Drain.t` values are additional outputs that receive completed
 `Observe.Log.t` values and may apply `Observe.Formatter.pretty`, `.json`,

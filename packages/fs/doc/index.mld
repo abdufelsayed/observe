@@ -1,13 +1,17 @@
-{0 Portable filesystem delivery}
+{0 Portable filesystem writer}
 
 {!Observe_fs} owns daily UTC filename selection, compact NDJSON projection,
-finite admission, FIFO delivery, flush barriers, failure, and shutdown. It
+finite admission, FIFO writing, flush barriers, failure, and shutdown. It
 performs no concrete filesystem or scheduler operation.
 
 Integration authors implement {!Observe_fs.IO.S} and apply
 {!Observe_fs.Make}. The drain callback synchronously converts a completed log
-into owned bytes before returning [Accepted]. The resulting worker can then
+into owned bytes before returning [Accepted]. The resulting writer can then
 perform effects without retaining the consumer's OCaml value.
+
+The background writer coalesces records that are already queued for the same
+daily file into one buffered write. It never waits to accumulate records and
+never crosses a file change or registered flush barrier.
 
 Most Lwt-Unix applications should use [Observe_fs_lwt_unix.create] from the
 ready package instead.

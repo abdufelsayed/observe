@@ -1,8 +1,8 @@
-(** Lwt execution for portable Observe filesystem delivery. *)
+(** Lwt execution for the portable Observe filesystem writer. *)
 
-module Platform : sig
-  (** Filesystem and scheduler-crossing mechanisms supplied to the Lwt maker.
-      Implementations may be Unix-free, including Mirage filesystems. *)
+module IO : sig
+  (** Filesystem I/O and scheduler-crossing mechanisms supplied to the Lwt
+      maker. Implementations may be Unix-free, including Mirage filesystems. *)
 
   module type S = sig
     type file
@@ -31,7 +31,8 @@ module Platform : sig
     val write :
       file -> string -> offset:int -> length:int -> (int, error) result Lwt.t
     (** Return the number of bytes written from the requested slice. Partial
-        progress is supported; zero progress is a delivery failure. *)
+        progress is supported; zero progress is a writer failure. The
+        implementation must not retain the string after the promise settles. *)
 
     val flush : file -> (unit, error) result Lwt.t
     val close : file -> (unit, error) result Lwt.t
@@ -39,11 +40,11 @@ module Platform : sig
   end
 end
 
-module Make (Platform : Platform.S) : sig
+module Make (IO : IO.S) : sig
   type error =
     | Invalid_path
     | Invalid_capacity of int
-    | Io of Platform.error
+    | Io of IO.error
     | Zero_progress
     | Invalid_write_count of int
     | Unexpected of exn

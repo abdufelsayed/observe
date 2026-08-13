@@ -135,11 +135,19 @@ let rec ensure_directory path =
 let open_append path =
   Lwt.catch
     (fun () ->
-      Lwt.map
-        (fun descriptor -> Ok { path; descriptor })
+      Lwt.bind
         (Lwt_unix.openfile path
            [ Unix.O_WRONLY; Unix.O_CREAT; Unix.O_APPEND ]
-           0o640))
+           0o640)
+        (fun descriptor ->
+          match Lwt_unix.set_blocking descriptor false with
+          | () -> Lwt.return (Ok { path; descriptor })
+          | exception exn ->
+              Lwt.bind
+                (Lwt.catch
+                   (fun () -> Lwt_unix.close descriptor)
+                   (fun _ -> Lwt.return_unit))
+                (fun () -> Lwt.fail exn)))
     (function
       | Unix.Unix_error (cause, _, _) -> Lwt.return (error Open path cause)
       | exn -> Lwt.fail exn)

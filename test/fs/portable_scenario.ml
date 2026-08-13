@@ -1,5 +1,5 @@
 module IO = struct
-  include Observe_fs_test_support.Fs_fixture.Platform
+  include Observe_fs_test_support.Fs_fixture.IO
 
   type 'a t = 'a Lwt.t
 
@@ -9,7 +9,7 @@ module IO = struct
   let async = Lwt.async
 end
 
-module Delivery = Observe_fs.Make (IO)
+module Writer = Observe_fs.Make (IO)
 module Observer = Observe.Make (Observe_lwt.IO)
 
 let fail format = Format.kasprintf failwith format
@@ -65,15 +65,15 @@ let install ?(extra_drains = []) timestamps drain =
 
 let create ?capacity () =
   Observe_fs_test_support.Fs_fixture.reset ();
-  match Lwt_main.run (Delivery.create ~path:"/logs" ?capacity ()) with
-  | Ok worker -> worker
-  | Error error -> fail "create failed: %a" Delivery.pp_error error
+  match Lwt_main.run (Writer.create ~path:"/logs" ?capacity ()) with
+  | Ok writer -> writer
+  | Error error -> fail "create failed: %a" Writer.pp_error error
 
 let emit tag message = Observe.Logs.info (Observe.Logs.text ~tag message)
 
 let daily () =
-  let worker = create () in
-  install [ -1L; 0L; 86_400_000_000_000L; 0L ] (Delivery.drain worker);
+  let writer = create () in
+  install [ -1L; 0L; 86_400_000_000_000L; 0L ] (Writer.drain writer);
   emit "before" "before epoch";
   emit "epoch" "epoch";
   emit "tomorrow" "tomorrow";
@@ -86,26 +86,24 @@ let daily () =
         "/logs/1970-01-02.jsonl";
       ])
     "unexpected daily paths";
-  Lwt_main.run (Delivery.flush worker) |> Result.get_ok;
+  Lwt_main.run (Writer.flush writer) |> Result.get_ok;
   let epoch =
     Observe_fs_test_support.Fs_fixture.contents "/logs/1970-01-01.jsonl"
   in
   check (line_count epoch = 2) "day switch-back lost a record: %S" epoch;
   check (contains epoch "\"tag\":\"epoch\"") "epoch record missing";
   check (contains epoch "\"tag\":\"back\"") "switch-back record missing";
-  Lwt_main.run (Delivery.shutdown worker) |> Result.get_ok
+  Lwt_main.run (Writer.shutdown writer) |> Result.get_ok
 
 let append_and_partial () =
   Observe_fs_test_support.Fs_fixture.reset ();
   Observe_fs_test_support.Fs_fixture.seed "/logs/1970-01-01.jsonl"
     "{\"existing\":true}\n";
   Observe_fs_test_support.Fs_fixture.set_max_write 3;
-  let worker =
-    Lwt_main.run (Delivery.create ~path:"/logs" ()) |> Result.get_ok
-  in
-  install [ 0L ] (Delivery.drain worker);
+  let writer = Lwt_main.run (Writer.create ~path:"/logs" ()) |> Result.get_ok in
+  install [ 0L ] (Writer.drain writer);
   emit "partial" "complete me";
-  Lwt_main.run (Delivery.shutdown worker) |> Result.get_ok;
+  Lwt_main.run (Writer.shutdown writer) |> Result.get_ok;
   let output =
     Observe_fs_test_support.Fs_fixture.contents "/logs/1970-01-01.jsonl"
   in
@@ -124,12 +122,12 @@ let sample_t =
   |> sealr
 
 let mutation () =
-  let worker = create () in
-  install [ 0L ] (Delivery.drain worker);
+  let writer = create () in
+  install [ 0L ] (Writer.drain writer);
   let sample = { value = "before" } in
   Observe.Logs.info (Observe.Logs.structured sample_t sample);
   sample.value <- "after";
-  Lwt_main.run (Delivery.shutdown worker) |> Result.get_ok;
+  Lwt_main.run (Writer.shutdown writer) |> Result.get_ok;
   let output =
     Observe_fs_test_support.Fs_fixture.contents "/logs/1970-01-01.jsonl"
   in
@@ -139,7 +137,7 @@ let mutation () =
   check (not (contains output "after")) "mutation changed queued output"
 
 let projection () =
-  let worker = create () in
+  let writer = create () in
   let expected = Buffer.create 256 in
   let witness =
     Observe.Drain.create (fun log ->
@@ -149,7 +147,7 @@ let projection () =
             Buffer.add_string expected bytes;
             Observe.Drain.Accepted)
   in
-  install ~extra_drains:[ witness ] [ 0L; 1L; 2L ] (Delivery.drain worker);
+  install ~extra_drains:[ witness ] [ 0L; 1L; 2L ] (Writer.drain writer);
   emit "text" "text payload";
   Observe.Logs.info
     (Observe.Logs.free
@@ -160,7 +158,7 @@ let projection () =
           ]));
   Observe.Logs.info
     (Observe.Logs.structured sample_t { value = "typed payload" });
-  Lwt_main.run (Delivery.shutdown worker) |> Result.get_ok;
+  Lwt_main.run (Writer.shutdown writer) |> Result.get_ok;
   let actual =
     Observe_fs_test_support.Fs_fixture.contents "/logs/1970-01-01.jsonl"
   in
@@ -170,8 +168,8 @@ let projection () =
     (Buffer.contents expected) actual
 
 let capacity () =
-  let worker = create ~capacity:1 () in
-  install [ 0L; 1L; 2L ] (Delivery.drain worker);
+  let writer = create ~capacity:1 () in
+  install [ 0L; 1L; 2L ] (Writer.drain writer);
   let release = Observe_fs_test_support.Fs_fixture.block_writes () in
   let before = diagnostic_count Observe.Diagnostics.Drain_rejected in
   emit "one" "one";
@@ -182,7 +180,7 @@ let capacity () =
     (diagnostic_count Observe.Diagnostics.Drain_rejected = before + 1)
     "full queue did not reject exactly the newest record";
   release ();
-  Lwt_main.run (Delivery.shutdown worker) |> Result.get_ok;
+  Lwt_main.run (Writer.shutdown writer) |> Result.get_ok;
   let output =
     Observe_fs_test_support.Fs_fixture.contents "/logs/1970-01-01.jsonl"
   in
@@ -194,8 +192,8 @@ let capacity () =
     "rejected record was written"
 
 let default_capacity () =
-  let worker = create () in
-  install (List.init 1_026 Int64.of_int) (Delivery.drain worker);
+  let writer = create () in
+  install (List.init 1_026 Int64.of_int) (Writer.drain writer);
   let release = Observe_fs_test_support.Fs_fixture.block_writes () in
   let rejected_before = diagnostic_count Observe.Diagnostics.Drain_rejected in
   emit "active" "active";
@@ -207,19 +205,19 @@ let default_capacity () =
     (diagnostic_count Observe.Diagnostics.Drain_rejected = rejected_before + 1)
     "default capacity did not reject exactly its newest overflow";
   release ();
-  Lwt_main.run (Delivery.shutdown worker) |> Result.get_ok;
+  Lwt_main.run (Writer.shutdown writer) |> Result.get_ok;
   let output =
     Observe_fs_test_support.Fs_fixture.contents "/logs/1970-01-01.jsonl"
   in
   check (line_count output = 1_025) "default capacity changed accepted work"
 
 let flush_barriers () =
-  let worker = create () in
-  install [ 0L; 1L ] (Delivery.drain worker);
+  let writer = create () in
+  install [ 0L; 1L ] (Writer.drain writer);
   emit "first" "first";
-  let first = Delivery.flush worker in
+  let first = Writer.flush writer in
   emit "second" "second";
-  let second = Delivery.flush worker in
+  let second = Writer.flush writer in
   Lwt_main.run
     (Lwt.bind first (fun first ->
          Lwt.bind second (fun second -> Lwt.return (first, second))))
@@ -230,22 +228,63 @@ let flush_barriers () =
     (Observe_fs_test_support.Fs_fixture.operations ()
     = [ `Write; `Flush; `Write; `Flush ])
     "later acceptance extended an earlier flush barrier";
-  Lwt_main.run (Delivery.shutdown worker) |> Result.get_ok
+  Lwt_main.run (Writer.shutdown writer) |> Result.get_ok
+
+let coalesced_writes () =
+  let records = 100 in
+  let writer = create ~capacity:records () in
+  install (List.init records Int64.of_int) (Writer.drain writer);
+  let release = Observe_fs_test_support.Fs_fixture.block_writes () in
+  emit "coalesced" "0";
+  Lwt_main.run (Lwt.pause ());
+  for index = 1 to records - 1 do
+    emit "coalesced" (Int.to_string index)
+  done;
+  let notifications =
+    Observe_fs_test_support.Fs_fixture.worker_notification_count ()
+  in
+  check (notifications <= 1) "burst woke the background writer %d times"
+    notifications;
+  release ();
+  Lwt_main.run (Writer.shutdown writer) |> Result.get_ok;
+  let operations = Observe_fs_test_support.Fs_fixture.operations () in
+  let writes =
+    List.fold_left
+      (fun count -> function `Write -> count + 1 | `Flush | `Close -> count)
+      0 operations
+  in
+  check (writes = 2)
+    "active write plus queued burst used %d writes instead of two" writes;
+  check
+    (operations = [ `Write; `Write; `Flush; `Close ])
+    "coalesced write changed flush or close ordering";
+  let lines =
+    Observe_fs_test_support.Fs_fixture.contents "/logs/1970-01-01.jsonl"
+    |> String.split_on_char '\n'
+    |> List.filter (fun line -> String.length line > 0)
+  in
+  check (List.length lines = records) "coalesced write lost records";
+  List.iteri
+    (fun index line ->
+      check
+        (contains line (Format.asprintf "\"message\":\"%d\"" index))
+        "coalesced write changed FIFO order at record %d: %S" index line)
+    lines
 
 let failure () =
-  let worker = create () in
+  let writer = create () in
   let independent = ref 0 in
   let independent_drain =
     Observe.Drain.create (fun _ ->
         incr independent;
         Observe.Drain.Accepted)
   in
-  install ~extra_drains:[ independent_drain ] [ 0L; 1L ] (Delivery.drain worker);
+  install ~extra_drains:[ independent_drain ] [ 0L; 1L ] (Writer.drain writer);
   let failed_before = diagnostic_count Observe.Diagnostics.Drain_failed in
   let rejected_before = diagnostic_count Observe.Diagnostics.Drain_rejected in
   Observe_fs_test_support.Fs_fixture.fail_next_write ();
   emit "failure" "fail";
-  let outcome = Lwt_main.run (Delivery.flush worker) in
+  let outcome = Lwt_main.run (Writer.flush writer) in
   check (Result.is_error outcome) "write failure did not fail flush";
   check
     (diagnostic_count Observe.Diagnostics.Drain_failed = failed_before + 1)
@@ -253,16 +292,16 @@ let failure () =
   emit "later" "reject";
   check
     (diagnostic_count Observe.Diagnostics.Drain_rejected = rejected_before + 1)
-    "failed worker accepted a later record";
+    "failed writer accepted a later record";
   check (!independent = 2) "filesystem failure stopped an independent drain"
 
 let expect_failure setup =
-  let worker = create () in
-  install [ 0L ] (Delivery.drain worker);
+  let writer = create () in
+  install [ 0L ] (Writer.drain writer);
   setup ();
   emit "failure" "fail";
   check
-    (Result.is_error (Lwt_main.run (Delivery.flush worker)))
+    (Result.is_error (Lwt_main.run (Writer.flush writer)))
     "filesystem failure did not settle flush with an error"
 
 let failure_open () =
@@ -275,35 +314,35 @@ let failure_flush () =
   expect_failure Observe_fs_test_support.Fs_fixture.fail_next_flush
 
 let failure_close () =
-  let worker = create () in
-  install [ 0L ] (Delivery.drain worker);
+  let writer = create () in
+  install [ 0L ] (Writer.drain writer);
   emit "failure" "fail";
   Observe_fs_test_support.Fs_fixture.fail_next_close ();
   check
-    (Result.is_error (Lwt_main.run (Delivery.shutdown worker)))
+    (Result.is_error (Lwt_main.run (Writer.shutdown writer)))
     "close failure did not settle shutdown with an error"
 
 let invalid_write_count () =
-  let worker = create () in
-  install [ 0L ] (Delivery.drain worker);
+  let writer = create () in
+  install [ 0L ] (Writer.drain writer);
   Observe_fs_test_support.Fs_fixture.set_max_write (-1);
   emit "invalid" "invalid write count";
-  match Lwt_main.run (Delivery.flush worker) with
-  | Error (Delivery.Invalid_write_count -1) -> ()
-  | Error error -> fail "unexpected failure: %a" Delivery.pp_error error
+  match Lwt_main.run (Writer.flush writer) with
+  | Error (Writer.Invalid_write_count -1) -> ()
+  | Error error -> fail "unexpected failure: %a" Writer.pp_error error
   | Ok () -> fail "invalid write count was accepted"
 
 let shutdown () =
-  let worker = create () in
-  install [ 0L; 1L ] (Delivery.drain worker);
+  let writer = create () in
+  install [ 0L; 1L ] (Writer.drain writer);
   emit "before" "before";
-  Lwt_main.run (Delivery.shutdown worker) |> Result.get_ok;
-  Lwt_main.run (Delivery.shutdown worker) |> Result.get_ok;
+  Lwt_main.run (Writer.shutdown writer) |> Result.get_ok;
+  Lwt_main.run (Writer.shutdown writer) |> Result.get_ok;
   let rejected_before = diagnostic_count Observe.Diagnostics.Drain_rejected in
   emit "after" "after";
   check
     (diagnostic_count Observe.Diagnostics.Drain_rejected = rejected_before + 1)
-    "shutdown worker accepted later output";
+    "shutdown writer accepted later output";
   check
     (Observe_fs_test_support.Fs_fixture.close_count () = 1)
     "shutdown did not close exactly once"
@@ -317,6 +356,7 @@ let () =
   | [ _; "capacity" ] -> capacity ()
   | [ _; "default-capacity" ] -> default_capacity ()
   | [ _; "flush-barriers" ] -> flush_barriers ()
+  | [ _; "coalesced-writes" ] -> coalesced_writes ()
   | [ _; "failure" ] -> failure ()
   | [ _; "failure-open" ] -> failure_open ()
   | [ _; "failure-zero-progress" ] -> failure_zero_progress ()

@@ -1,1 +1,1 @@
-module type Platform = Observe_fs_lwt.Platform.S
+module type IO = Observe_fs_lwt.IO.S

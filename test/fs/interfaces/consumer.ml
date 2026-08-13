@@ -24,6 +24,6 @@ module Direct = struct
   let pp_error _ () = ()
 end
 
-module Delivery = Observe_fs.Make (Direct)
+module Writer = Observe_fs.Make (Direct)
 
-let _ = Delivery.pp_error
+let _ = Writer.pp_error

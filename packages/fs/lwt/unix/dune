@@ -1,7 +1,7 @@
 (library
  (name observe_fs_lwt_unix)
  (public_name observe-fs-lwt-unix)
- (private_modules platform)
+ (private_modules io)
  (libraries
   observe
   observe-fs-lwt

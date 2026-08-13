@@ -1,4 +1,4 @@
-module Platform = struct
+module IO = struct
   module type S = sig
     type file
     type error
@@ -24,32 +24,30 @@ module Platform = struct
   end
 end
 
-module Make (Platform : Platform.S) = struct
-  module IO = struct
+module Make (IO : IO.S) = struct
+  include Observe_fs.Make (struct
     type 'a t = 'a Lwt.t
-    type file = Platform.file
-    type error = Platform.error
-    type lock = Platform.lock
-    type notifier = Platform.notifier
+    type file = IO.file
+    type error = IO.error
+    type lock = IO.lock
+    type notifier = IO.notifier
 
     let return = Lwt.return
     let bind = Lwt.bind
     let catch = Lwt.catch
     let async = Lwt.async
-    let create_lock = Platform.create_lock
-    let with_lock = Platform.with_lock
-    let create_notifier = Platform.create_notifier
-    let await notifier = Lwt.protected (Platform.await notifier)
-    let notify = Platform.notify
-    let dispose = Platform.dispose
-    let child = Platform.child
-    let ensure_directory = Platform.ensure_directory
-    let open_append = Platform.open_append
-    let write = Platform.write
-    let flush = Platform.flush
-    let close = Platform.close
-    let pp_error = Platform.pp_error
-  end
-
-  include Observe_fs.Make (IO)
+    let create_lock = IO.create_lock
+    let with_lock = IO.with_lock
+    let create_notifier = IO.create_notifier
+    let await notifier = Lwt.protected (IO.await notifier)
+    let notify = IO.notify
+    let dispose = IO.dispose
+    let child = IO.child
+    let ensure_directory = IO.ensure_directory
+    let open_append = IO.open_append
+    let write = IO.write
+    let flush = IO.flush
+    let close = IO.close
+    let pp_error = IO.pp_error
+  end)
 end

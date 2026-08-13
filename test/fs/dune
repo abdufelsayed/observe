@@ -22,6 +22,7 @@
    (run %{exe:portable_scenario.exe} capacity)
    (run %{exe:portable_scenario.exe} default-capacity)
    (run %{exe:portable_scenario.exe} flush-barriers)
+   (run %{exe:portable_scenario.exe} coalesced-writes)
    (run %{exe:portable_scenario.exe} failure)
    (run %{exe:portable_scenario.exe} failure-open)
    (run %{exe:portable_scenario.exe} failure-zero-progress)

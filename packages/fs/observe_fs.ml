@@ -1,2 +1,2 @@
 module IO = Io
-module Make = Delivery.Make
+module Make = Writer.Make

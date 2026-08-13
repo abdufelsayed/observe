@@ -1,6 +1,4 @@
-module Delivery =
-  Observe_fs_lwt.Make (Observe_fs_test_support.Fs_fixture.Platform)
-
+module Writer = Observe_fs_lwt.Make (Observe_fs_test_support.Fs_fixture.IO)
 module Observer = Observe.Make (Observe_lwt.IO)
 
 let fail format = Format.kasprintf failwith format
@@ -21,17 +19,15 @@ let install drain =
 
 let cancellation () =
   Observe_fs_test_support.Fs_fixture.reset ();
-  let worker =
-    Lwt_main.run (Delivery.create ~path:"/logs" ()) |> Result.get_ok
-  in
-  install (Delivery.drain worker);
+  let writer = Lwt_main.run (Writer.create ~path:"/logs" ()) |> Result.get_ok in
+  install (Writer.drain writer);
   let release = Observe_fs_test_support.Fs_fixture.block_writes () in
   Observe.Logs.info (Observe.Logs.text ~tag:"lwt" "survives cancellation");
   Lwt_main.run (Lwt.pause ());
-  let waiting = Delivery.flush worker in
+  let waiting = Writer.flush writer in
   Lwt.cancel waiting;
   release ();
-  Lwt_main.run (Delivery.shutdown worker) |> Result.get_ok;
+  Lwt_main.run (Writer.shutdown writer) |> Result.get_ok;
   let output =
     Observe_fs_test_support.Fs_fixture.contents "/logs/1970-01-01.jsonl"
   in

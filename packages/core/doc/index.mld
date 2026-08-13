@@ -48,7 +48,7 @@ than raising an initialization exception.
 
 {!val:Observe.Config.create} returns a validated result;
 {!val:Observe.Config.create_exn} raises
-{!exception:Observe.Config.Invalid_configuration}. The platform console is the
+{!exception:Observe.Config.Invalid_configuration}. Automatic console output is
 automatic formatted output. {!module:Observe.Drain} values are additional
 application-owned outputs that receive completed {!type:Observe.Log.t} values.
 [Config.Silent] suppresses the console, not drains. [Config.Auto] chooses
@@ -59,7 +59,7 @@ pretty development output or production NDJSON from the environment.
 {!module-type:Observe.IO.S} owns effects, dynamic binding, cleanup, native
 control exceptions, the wall clock, console presentation capability, and
 console writes. {!module:Observe.Make} consumes that completed contract without
-adding a runtime or platform dependency to the core.
+adding a runtime or operating-system dependency to the core.
 
 {!val:Observe.Make.with_capture} installs capture as the innermost
 dynamic route, suppresses production delivery for the callback, restores the

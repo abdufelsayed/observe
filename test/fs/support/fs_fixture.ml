@@ -7,7 +7,12 @@ type error =
 
 type file = { path : string; mutable closed : bool }
 type lock = unit
-type notifier = { mutable waiters : unit Lwt.u list; mutable disposed : bool }
+
+type notifier = {
+  id : int;
+  mutable waiters : unit Lwt.u list;
+  mutable disposed : bool;
+}
 
 let files : (string, Buffer.t) Hashtbl.t = Hashtbl.create 7
 let max_write = ref max_int
@@ -19,6 +24,8 @@ let write_gate : unit Lwt.t option ref = ref None
 let flushes = ref 0
 let closes = ref 0
 let recorded_operations = ref []
+let next_notifier_id = ref 0
+let notification_counts : (int, int) Hashtbl.t = Hashtbl.create 2
 
 let reset () =
   Hashtbl.clear files;
@@ -30,7 +37,9 @@ let reset () =
   write_gate := None;
   flushes := 0;
   closes := 0;
-  recorded_operations := []
+  recorded_operations := [];
+  next_notifier_id := 0;
+  Hashtbl.clear notification_counts
 
 let seed path value =
   let buffer = Buffer.create (String.length value + 32) in
@@ -52,6 +61,9 @@ let flush_count () = !flushes
 let close_count () = !closes
 let operations () = List.rev !recorded_operations
 
+let worker_notification_count () =
+  Option.value ~default:0 (Hashtbl.find_opt notification_counts 0)
+
 let block_writes () =
   let promise, wakener = Lwt.wait () in
   write_gate := Some promise;
@@ -59,7 +71,7 @@ let block_writes () =
     write_gate := None;
     Lwt.wakeup_later wakener ()
 
-module Platform = struct
+module IO = struct
   type nonrec file = file
 
   type nonrec error = error =
@@ -74,7 +86,11 @@ module Platform = struct
 
   let create_lock () = ()
   let with_lock () callback = callback ()
-  let create_notifier () = { waiters = []; disposed = false }
+
+  let create_notifier () =
+    let id = !next_notifier_id in
+    incr next_notifier_id;
+    { id; waiters = []; disposed = false }
 
   let await notifier =
     if notifier.disposed then Lwt.return_unit
@@ -87,6 +103,10 @@ module Platform = struct
     try Lwt.wakeup_later waiter () with Invalid_argument _ -> ()
 
   let notify notifier =
+    Hashtbl.replace notification_counts notifier.id
+      (1
+      + Option.value ~default:0
+          (Hashtbl.find_opt notification_counts notifier.id));
     let waiters = notifier.waiters in
     notifier.waiters <- [];
     List.iter wake waiters

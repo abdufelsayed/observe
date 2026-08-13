@@ -1,6 +1,6 @@
-module Delivery = Observe_fs_lwt.Make (Platform)
+module Writer = Observe_fs_lwt.Make (Io)
 
-type operation = Platform.operation =
+type operation = Io.operation =
   | Inspect
   | Create_directory
   | Open
@@ -18,22 +18,22 @@ type error =
 
 exception Error of error
 
-let error_of_delivery = function
-  | Delivery.Invalid_path -> Invalid_path
-  | Delivery.Invalid_capacity capacity -> Invalid_capacity capacity
-  | Delivery.Io { operation; path; cause } ->
+let error_of_writer = function
+  | Writer.Invalid_path -> Invalid_path
+  | Writer.Invalid_capacity capacity -> Invalid_capacity capacity
+  | Writer.Io { operation; path; cause } ->
       Filesystem { operation; path; cause }
-  | Delivery.Zero_progress -> Zero_progress
-  | Delivery.Invalid_write_count count -> Invalid_write_count count
-  | Delivery.Unexpected exn -> Unexpected exn
+  | Writer.Zero_progress -> Zero_progress
+  | Writer.Invalid_write_count count -> Invalid_write_count count
+  | Writer.Unexpected exn -> Unexpected exn
 
 let pp_error formatter = function
   | Invalid_path -> Format.pp_print_string formatter "invalid filesystem path"
   | Invalid_capacity capacity ->
       Format.fprintf formatter "invalid queue capacity %d" capacity
   | Filesystem { operation; path; cause } ->
-      let error : Platform.error = { operation; path; cause } in
-      Platform.pp_error formatter error
+      let error : Io.error = { operation; path; cause } in
+      Io.pp_error formatter error
   | Zero_progress ->
       Format.pp_print_string formatter "filesystem write made no progress"
   | Invalid_write_count count ->
@@ -48,20 +48,20 @@ let pp_error formatter = function
 let lifecycle_hook callback () =
   Lwt.bind (callback ()) (function
     | Result.Ok () -> Lwt.return_unit
-    | Result.Error error -> Lwt.fail (Error (error_of_delivery error)))
+    | Result.Error error -> Lwt.fail (Error (error_of_writer error)))
 
 let create ~path ?capacity () =
-  Lwt.bind (Delivery.create ~path ?capacity ()) (function
-    | Result.Error error -> Lwt.return (Result.Error (error_of_delivery error))
-    | Result.Ok worker -> (
+  Lwt.bind (Writer.create ~path ?capacity ()) (function
+    | Result.Error error -> Lwt.return (Result.Error (error_of_writer error))
+    | Result.Ok writer -> (
         match
           Observe_lwt_unix.Lifecycle.register
-            ~flush:(lifecycle_hook (fun () -> Delivery.flush worker))
-            ~shutdown:(lifecycle_hook (fun () -> Delivery.shutdown worker))
+            ~flush:(lifecycle_hook (fun () -> Writer.flush writer))
+            ~shutdown:(lifecycle_hook (fun () -> Writer.shutdown writer))
         with
-        | Result.Ok () -> Lwt.return (Result.Ok (Delivery.drain worker))
+        | Result.Ok () -> Lwt.return (Result.Ok (Writer.drain writer))
         | Result.Error Observe_lwt_unix.Lifecycle.Closed ->
-            Lwt.bind (Delivery.shutdown worker) (fun _ ->
+            Lwt.bind (Writer.shutdown writer) (fun _ ->
                 Lwt.return (Result.Error Lifecycle_closed))))
 
 let create_exn ~path ?capacity () =

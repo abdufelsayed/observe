@@ -1,4 +1,4 @@
-module Platform : sig
+module IO : sig
   type file
 
   type error =
@@ -42,3 +42,4 @@ val block_writes : unit -> unit -> unit
 val flush_count : unit -> int
 val close_count : unit -> int
 val operations : unit -> [ `Write | `Flush | `Close ] list
+val worker_notification_count : unit -> int

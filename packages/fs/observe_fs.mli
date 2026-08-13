@@ -1,7 +1,7 @@
-(** Portable daily filesystem delivery for Observe. *)
+(** Portable daily filesystem writer for Observe. *)
 
 module IO : sig
-  (** Completed mechanisms consumed by the portable delivery state machine. *)
+  (** Completed mechanisms consumed by the portable writer state machine. *)
 
   module type S = sig
     type 'a t
@@ -41,7 +41,9 @@ module IO : sig
       file -> string -> offset:int -> length:int -> (int, error) result t
     (** Write from the requested byte slice. Success returns a count in
         [0..length]; the portable state machine resumes partial writes and
-        rejects zero progress. *)
+        rejects zero progress. The implementation must not retain the string
+        after the returned effect settles; delivery may reuse its private
+        backing storage for a later write. *)
 
     val flush : file -> (unit, error) result t
     (** Complete runtime buffering only. This need not provide [fsync] or crash
@@ -65,7 +67,7 @@ module Make (Implementation : IO.S) : sig
 
   val create :
     path:string -> ?capacity:int -> unit -> (t, error) result Implementation.t
-  (** Prepare the directory and start one bounded serialized worker. *)
+  (** Prepare the directory and start one bounded background writer. *)
 
   val drain : t -> Observe.Drain.t
   (** The synchronous ownership-transfer boundary for application config. *)

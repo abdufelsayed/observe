@@ -7,6 +7,6 @@
 (library
  (name observe_fs)
  (public_name observe-fs)
- (modules observe_fs delivery io)
- (private_modules delivery io)
+ (modules observe_fs writer io)
+ (private_modules writer io)
  (libraries observe observe_fs_date))
