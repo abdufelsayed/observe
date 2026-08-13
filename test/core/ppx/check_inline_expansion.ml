@@ -32,6 +32,7 @@ let () =
   in
   let bindings = Hashtbl.create 1 in
   let calls = Hashtbl.create 16 in
+  let fields = Hashtbl.create 4 in
   let record table key =
     Hashtbl.replace table key
       (1 + Option.value ~default:0 (Hashtbl.find_opt table key))
@@ -52,6 +53,7 @@ let () =
           ->
             record calls
               (call_key (longident_name path) (first_string_argument arguments))
+        | Pexp_field (_, { txt = Lident field; _ }) -> record fields field
         | _ -> ());
         super#expression expression
     end
@@ -81,4 +83,13 @@ let () =
       require calls "Observe.Generated_runtime.with_recursive_plan" 1;
       require calls "Observe.Generated_runtime.constructor Leaf" 1;
       require calls "Observe.Generated_runtime.constructor Branch" 1
+  | Some "logging" ->
+      require calls "Observe.Logs.debug" 1;
+      require calls "Observe.Logs.info" 1;
+      require calls "Observe.Logs.warn" 1;
+      require calls "Observe.Logs.error" 1;
+      require calls "Observe.Logs.emit" 1;
+      require fields "text" 2;
+      require fields "untyped" 1;
+      require fields "typed" 2
   | Some mode -> fail "unknown expansion mode %S" mode

@@ -11,6 +11,22 @@ let value =
       typed = [%observe.value.embed Observe.Type.int, 7];
     }]
 
+let text_log () =
+  [%observe.info text ~tag:"request" "received request %s" "req-1"]
+
+let untyped_log () =
+  [%observe.warn untyped [%observe.value { action = "retry"; attempts = 2 }]]
+
+let typed_log () =
+  [%observe.error
+    typed event_t (Request { request_id = "req-1"; attempts = 2 })]
+
+let dynamic_log level () = [%observe.emit level, typed event_t Idle]
+
 let () =
   ignore description;
-  ignore value
+  ignore value;
+  ignore text_log;
+  ignore untyped_log;
+  ignore typed_log;
+  ignore dynamic_log

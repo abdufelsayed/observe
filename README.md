@@ -18,7 +18,7 @@ top of this foundation but are not part of the current public API.
 - Admission-first authoring callbacks shared by every message shape.
 - Typed structured values with Repr machine behavior and type-aware pretty
   presentation.
-- A concise PPX for untyped values and Observe type descriptions.
+- Concise logging, untyped-value, and type-description PPX syntax.
 - Pretty console output with automatic truecolor, 256-color, 16-color, and
   plain fallback.
 - Pure pretty, JSON, and NDJSON formatters.
@@ -67,7 +67,7 @@ let config =
     ~min_level:Observe.Level.Debug ()
 
 let main () =
-  Observe.Logs.info (fun m -> m.text ~tag:"startup" "service ready");
+  [%observe.info text ~tag:"startup" "service ready"];
   Lwt.return_unit
 
 let () =
@@ -126,20 +126,31 @@ compression, or cross-process coordination.
 Tagged text is the smallest log shape:
 
 ```ocaml
+[%observe.info text ~tag:"auth" "user logged in"]
+```
+
+The extension expands to the ordinary admission-first API:
+
+```ocaml
 Observe.Logs.info (fun m ->
   m.text ~tag:"auth" "user logged in")
 ```
 
-The authoring callback runs only after route and level admission. The supplied
-builder supports type-safe formatted text, so rejected logs do not evaluate
-their formatting arguments:
+The callback runs only after route and level admission. Formatted text remains
+type-safe, and rejected logs do not evaluate their formatting arguments:
 
 ```ocaml
-Observe.Logs.debug (fun m ->
-  m.text ~tag:"query" "%s" (explain_query query))
+[%observe.debug text ~tag:"query" "%s" (explain_query query)]
 ```
 
 The same admitted builder owns untyped structured values:
+
+```ocaml
+[%observe.info
+  untyped [%observe.value { action = "user_login"; user_id = 42 }]]
+```
+
+This expands to:
 
 ```ocaml
 Observe.Logs.info (fun m ->
@@ -147,9 +158,9 @@ Observe.Logs.info (fun m ->
     [%observe.value { action = "user_login"; user_id = 42 }])
 ```
 
-`[%observe.value ...]` produces an `Observe.Value.t` inside the callback. No
-payload-specific deferred variant is needed because the callback is the single
-deferred authoring boundary.
+`[%observe.value ...]` produces an `Observe.Value.t`; the outer logging
+extension places it inside the admitted callback. No payload-specific deferred
+variant is needed because that callback is the single deferred boundary.
 
 OCaml values can carry an Observe type description:
 
@@ -157,10 +168,21 @@ OCaml values can carry an Observe type description:
 type event = User_login of { user_id : int; method_ : string }
 [@@deriving observe]
 
-Observe.Logs.info (fun m ->
-  m.typed event_t
-    (User_login { user_id = 42; method_ = "oauth" }))
+[%observe.info
+  typed event_t (User_login { user_id = 42; method_ = "oauth" })]
 ```
+
+Its manual expansion is:
+
+```ocaml
+Observe.Logs.info (fun m ->
+  m.typed event_t (User_login { user_id = 42; method_ = "oauth" }))
+```
+
+`[%observe.debug ...]`, `[%observe.info ...]`, `[%observe.warn ...]`, and
+`[%observe.error ...]` accept the same three body forms. For a dynamic level,
+use `[%observe.emit (level, typed event_t event)]`; it lowers to
+`Observe.Logs.emit ~level (fun m -> m.typed event_t event)`.
 
 ## Console Output
 
@@ -217,7 +239,7 @@ effect, and ready-composition boundaries:
 | Package or library | Purpose |
 | --- | --- |
 | `observe` | Portable logging core, public authoring API, formatters, drains, diagnostics, capture, and the completed `Observe.IO` contract. |
-| `observe.ppx` | Core-package sublibrary for `[@@deriving observe]`, `[%observe.value ...]`, and embedded typed values. |
+| `observe.ppx` | Core-package sublibrary for concise logging, `[@@deriving observe]`, `[%observe.value ...]`, and embedded typed values. |
 | `observe-lwt` | Lwt callback-local effects completed with caller-provided clock and console functions. |
 | `observe-lwt-unix` | Ready Lwt-Unix composition, standard-error output, and Lwt-scoped test capture. |
 | `observe-fs` | Portable daily filename, NDJSON projection, bounded worker state, barriers, and failure behavior over injected I/O. |

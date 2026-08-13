@@ -108,6 +108,4 @@ let value_extension =
     Ast_pattern.(single_expr_payload __)
     expand_value
 
-let register () =
-  Driver.register_transformation "observe"
-    ~rules:[ Context_free.Rule.extension value_extension ]
+let rules = [ Context_free.Rule.extension value_extension ]

@@ -11,7 +11,8 @@
   clock access, and automatic console output.
 - Add pure pretty, JSON, and NDJSON formatters, additional drain fan-out,
   bounded diagnostics, and finite deterministic capture.
-- Add `observe.ppx` with `[@@deriving observe]`, `[%observe.value ...]`, and
+- Add `observe.ppx` with admission-preserving logging extensions,
+  `[@@deriving observe]`, `[%observe.value ...]`, and
   `[%observe.value.embed ...]`.
 - Add `Observe.Make (IO)` for custom integrations and `Observe_lwt.IO` for Lwt
   compositions completed with caller-provided clock and console functions.

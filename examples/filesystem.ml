@@ -11,16 +11,11 @@ let main () =
       ~environment:"development" ~drains:[ filesystem ] ()
   in
   Observe_lwt_unix.init_exn config;
-  Observe.Logs.info (fun m ->
-      m.text ~tag:"startup" "filesystem delivery is ready");
-  Observe.Logs.info (fun m ->
-      m.untyped
-        (Observe.Value.object_
-           [
-             ("action", Observe.Value.string "order_created");
-             ("order_id", Observe.Value.string "ord_01JQ9");
-             ("items", Observe.Value.int 3);
-           ]));
+  [%observe.info text ~tag:"startup" "filesystem delivery is ready"];
+  [%observe.info
+    untyped
+      [%observe.value
+        { action = "order_created"; order_id = "ord_01JQ9"; items = 3 }]];
   let* () = Observe_lwt_unix.shutdown () in
   Format.printf "daily NDJSON appended under %s@." directory;
   Lwt.return_unit

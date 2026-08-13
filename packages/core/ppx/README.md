@@ -1,8 +1,9 @@
 # Observe PPX
 
-`observe.ppx` provides the `[@@deriving observe]` type-description deriver and
-the namespaced `[%observe.value ...]` untyped-value extension. Generated code
-uses `Observe.Type`, `Observe.Value`, and the documented
+`observe.ppx` provides admission-preserving logging extensions, the
+`[@@deriving observe]` type-description deriver, and the namespaced
+`[%observe.value ...]` untyped-value extension. Generated code uses
+`Observe.Logs`, `Observe.Type`, `Observe.Value`, and the documented
 `Observe.Generated_runtime` compatibility ABI; application runtime code does
 not link the PPX implementation.
 
@@ -15,6 +16,58 @@ Enable it in Dune:
  (preprocess
   (pps observe.ppx)))
 ```
+
+## Logging
+
+The logging extensions remove the callback-builder boilerplate without adding
+a second logging model:
+
+```ocaml
+[%observe.info text ~tag:"auth" "user %d logged in" user_id]
+
+[%observe.warn
+  untyped [%observe.value { action = "retry"; attempt = 2 }]]
+
+[%observe.error
+  typed event_t (Sync_failed { source = "postgres"; attempts = 3 })]
+```
+
+They expand semantically to the ordinary public API:
+
+```ocaml
+Observe.Logs.info (fun m ->
+  m.text ~tag:"auth" "user %d logged in" user_id)
+
+Observe.Logs.warn (fun m ->
+  m.untyped
+    [%observe.value { action = "retry"; attempt = 2 }])
+
+Observe.Logs.error (fun m ->
+  m.typed event_t (Sync_failed { source = "postgres"; attempts = 3 }))
+```
+
+The callback remains the only deferred authoring boundary. The active route and
+configured level are checked before the generated callback runs, so formatted
+arguments, untyped objects, and typed values preserve the manual API's admission
+behavior. Ordinary callback exception containment is unchanged.
+
+The fixed-level forms are `[%observe.debug ...]`, `[%observe.info ...]`,
+`[%observe.warn ...]`, and `[%observe.error ...]`. Each accepts exactly one of
+`text`, `untyped`, or `typed`. A dynamic level uses a pair:
+
+```ocaml
+[%observe.emit (level, typed event_t event)]
+```
+
+which expands to:
+
+```ocaml
+Observe.Logs.emit ~level (fun m -> m.typed event_t event)
+```
+
+The restricted body vocabulary is deliberate: misspelled or unsupported forms
+receive a located PPX error instead of expanding into an unrelated expression.
+The manual `Observe.Logs` API remains available and requires no PPX.
 
 ## Typed descriptions
 
@@ -103,9 +156,9 @@ type event = User_login of { user_id : int; method_ : string }
 let description : event Observe.Type.t = event_t
 
 let () =
-  Observe.Logs.info (fun m ->
-    m.typed description
-      (User_login { user_id = 42; method_ = "oauth" }))
+  [%observe.info
+    typed description
+      (User_login { user_id = 42; method_ = "oauth" })]
 ```
 
 The corresponding manual description uses a named payload type because OCaml
@@ -231,15 +284,15 @@ expands to an `Observe.Value.t`. Put it inside the standard logging callback so
 construction runs only after admission:
 
 ```ocaml
-Observe.Logs.info (fun m ->
-  m.untyped
-     [%observe.value
-       {
-         action = "user_login";
-         user_id = 42;
-         methods = [ "oauth"; "passkey" ];
-         previous_user = None;
-       }])
+[%observe.info
+  untyped
+    [%observe.value
+      {
+        action = "user_login";
+        user_id = 42;
+        methods = [ "oauth"; "passkey" ];
+        previous_user = None;
+      }]]
 ```
 
 Record field names become object keys and must be unqualified identifiers.
@@ -251,14 +304,14 @@ description:
 
 ```ocaml
 let user_id = 42 in
-Observe.Logs.info (fun m ->
-  m.untyped
-     [%observe.value
-       {
-         action = "user_login";
-         user_id =
-           [%observe.value.embed (Observe.Type.int, user_id)];
-       }])
+[%observe.info
+  untyped
+    [%observe.value
+      {
+        action = "user_login";
+        user_id =
+          [%observe.value.embed (Observe.Type.int, user_id)];
+      }]]
 ```
 
 The embedded value is retained by reference and interpreted only when a

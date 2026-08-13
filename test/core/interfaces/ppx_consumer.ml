@@ -15,4 +15,12 @@ let untyped =
         typed = [%observe.value.embed Observe.Type.int, 7];
       }]
 
-let _ = (typed, untyped)
+let text_log () = [%observe.info text ~tag:"consumer" "request %s" "r1"]
+
+let untyped_log () =
+  [%observe.warn untyped [%observe.value { request_id = "r1"; attempts = 2 }]]
+
+let typed_log () =
+  [%observe.error typed event_t (Request { request_id = "r1"; attempts = 2 })]
+
+let _ = (typed, untyped, text_log, untyped_log, typed_log)

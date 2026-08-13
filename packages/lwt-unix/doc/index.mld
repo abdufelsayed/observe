@@ -14,8 +14,7 @@ let config =
 let () = Observe_lwt_unix.init_exn config
 
 let () =
-  Observe.Logs.info (fun m ->
-    m.text ~tag:"startup" "service ready")
+  [%observe.info text ~tag:"startup" "service ready"]
 ]}
 
 The initializer is synchronous. It installs Lwt callback-local context, the OS

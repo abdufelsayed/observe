@@ -6,8 +6,8 @@
 - [`../packages/core/doc/index.mld`](../packages/core/doc/index.mld) is the
   installed odoc landing page for the `observe` package.
 - [`../packages/core/ppx/README.md`](../packages/core/ppx/README.md)
-  documents `observe.ppx`, `[@@deriving observe]`, and the namespaced
-  `[%observe.value ...]` syntax.
+  documents `observe.ppx`, concise logging extensions,
+  `[@@deriving observe]`, and the namespaced `[%observe.value ...]` syntax.
 - [`../packages/lwt/doc/index.mld`](../packages/lwt/doc/index.mld) and
   [`../packages/lwt-unix/doc/index.mld`](../packages/lwt-unix/doc/index.mld)
   own the configurable-Lwt and ready-composition package pages.

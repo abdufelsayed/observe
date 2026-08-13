@@ -380,6 +380,12 @@ module Logs : sig
       {[
       Observe.Logs.info (fun m ->
           m.text ~tag:"auth" "user %d logged in" user_id)
+      ]}
+
+      With [observe.ppx], the exact call above can be written as:
+
+      {[
+      [%observe.info text ~tag:"auth" "user %d logged in" user_id]
       ]} *)
 
   type message

@@ -1,5 +1,6 @@
 (executable
  (name simple)
+ (modules simple)
  (libraries observe observe-lwt-unix lwt lwt.unix)
  (preprocess
   (pps observe.ppx)))
@@ -12,7 +13,10 @@
 
 (executable
  (name filesystem)
- (libraries observe observe-lwt-unix observe-fs-lwt-unix lwt lwt.unix))
+ (modules filesystem)
+ (libraries observe observe-lwt-unix observe-fs-lwt-unix lwt lwt.unix)
+ (preprocess
+  (pps observe.ppx)))
 
 (alias
  (name observe-fs-examples)

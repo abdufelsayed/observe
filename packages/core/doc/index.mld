@@ -25,17 +25,14 @@ Configurable Lwt I/O and the ready Unix composition are distributed in the
 Ordinary code logs through {!module:Observe.Logs}:
 
 {[
-Observe.Logs.info (fun m ->
-  m.text ~tag:"auth" "User logged in");
+[%observe.info text ~tag:"auth" "User logged in"];
 
-Observe.Logs.debug (fun m ->
-  m.text ~tag:"query" "%s" (explain_query query));
+[%observe.debug text ~tag:"query" "%s" (explain_query query)];
 
-Observe.Logs.info (fun m ->
-  m.untyped [%observe.value { action = "user_login"; user_id = 42 }]);
+[%observe.info
+  untyped [%observe.value { action = "user_login"; user_id = 42 }]];
 
-Observe.Logs.info (fun m ->
-  m.typed event_t event)
+[%observe.info typed event_t event]
 ]}
 
 The callback and every text, untyped, or typed value constructed inside it run
