@@ -4,6 +4,8 @@ Observe is structured logging for OCaml.
 
 It provides a portable logging core, typed and free-form structured values,
 additional drains, deterministic capture, and a ready Lwt-Unix composition.
+Official daily filesystem delivery is available through a separately
+installable package family.
 The core owns logging behavior without performing I/O or depending on a
 specific runtime.
 
@@ -23,6 +25,8 @@ top of this foundation but are not part of the current public API.
 - Additional application-owned drains and finite diagnostics.
 - Deterministic scoped capture for tests.
 - A portable completed-I/O contract, plus a ready Lwt-Unix initializer.
+- Bounded daily NDJSON files through portable, Lwt, and ready Lwt-Unix
+  filesystem packages.
 
 ## Installation
 
@@ -45,6 +49,12 @@ An Lwt-Unix executable links the ready composition:
 
 Use only `(libraries observe)` for the portable core or for a custom I/O
 composition. The PPX is optional.
+
+Add `observe-fs-lwt-unix` when the application writes daily local files:
+
+```lisp
+(libraries observe observe-lwt-unix observe-fs-lwt-unix lwt.unix)
+```
 
 ## Quick Start
 
@@ -76,6 +86,39 @@ process-wide `Observe.Logs` module.
 environment and NDJSON otherwise. Set `~console:Observe.Config.Pretty`,
 `~console:Observe.Config.Ndjson`, or `~console:Observe.Config.Silent` to
 override that selection.
+
+## Daily Files
+
+Create the filesystem drain before configuration and pass it with the other
+application-owned drains:
+
+```ocaml
+let main () =
+  let open Lwt.Syntax in
+  let* filesystem =
+    Observe_fs_lwt_unix.create_exn ~path:".observe/logs" ()
+  in
+  let config =
+    Observe.Config.create_exn ~service:"orders"
+      ~drains:[filesystem] ()
+  in
+  Observe_lwt_unix.init_exn config;
+  Lwt.finalize run_application Observe_lwt_unix.shutdown
+```
+
+The directory is created recursively. Each log is projected to owned compact
+NDJSON before synchronous drain acceptance, then one bounded Lwt worker
+appends it to the UTC file selected by the log timestamp:
+
+```text
+.observe/logs/2026-08-13.jsonl
+```
+
+The queue holds at most 1,024 pending records by default. A full or stopped
+worker rejects the newest record without discarding earlier acceptance.
+`Observe_lwt_unix.flush` and `shutdown` include registered filesystem workers.
+Acceptance does not promise `fsync`, crash durability, retry, retention,
+compression, or cross-process coordination.
 
 ## Logging
 
@@ -152,6 +195,12 @@ rich typed domain events in one place:
 opam exec -- dune exec examples/simple.exe
 ```
 
+Daily filesystem composition has a separate runnable example:
+
+```sh
+opam exec -- dune exec examples/filesystem.exe -- .observe/logs
+```
+
 It uses nested records, lists, options, ordinary variants, polymorphic variants,
 and constructor payloads. The same executable is exercised by
 `opam exec -- dune build @examples`.
@@ -167,6 +216,9 @@ effect, and ready-composition boundaries:
 | `observe.ppx` | Core-package sublibrary for `[@@deriving observe]`, `[%observe.value ...]`, and embedded typed values. |
 | `observe-lwt` | Lwt callback-local effects completed with caller-provided clock and console functions. |
 | `observe-lwt-unix` | Ready Lwt-Unix composition, standard-error output, and Lwt-scoped test capture. |
+| `observe-fs` | Portable daily filename, NDJSON projection, bounded worker state, barriers, and failure behavior over injected I/O. |
+| `observe-fs-lwt` | Lwt completion for application-owned or Mirage filesystem capabilities, without Unix dependencies. |
+| `observe-fs-lwt-unix` | Ready recursive-directory setup, append-only daily files, and registration with the Lwt-Unix lifecycle. |
 
 The core does not depend on Lwt or Unix. `Observe.Make (IO)` accepts one
 completed I/O implementation; `Observe_lwt_unix` is the ready path for
@@ -179,9 +231,11 @@ The platform console is the automatic formatted output. On Unix it writes to
 standard error, which may be a terminal, file, or pipe. Configured
 `Observe.Drain.t` values are additional outputs that receive completed
 `Observe.Log.t` values and may apply `Observe.Formatter.pretty`, `.json`,
-`.ndjson`, or a custom pure formatter. A future filesystem output may use the
+`.ndjson`, or a custom pure formatter. Official filesystem delivery uses the
 conventional `.jsonl` filename extension; that storage name does not change the
-format's public name.
+format's public name. Its asynchronous failure signal is finite and
+non-recursive; later offers reject while other drains and application control
+flow continue independently.
 
 Tests can capture ordinary `Observe.Logs` calls without resetting global
 production state:

@@ -84,6 +84,9 @@ end
 
 module Observer = Observe.Make (Observe_lwt.IO)
 
+let outputs =
+  Output_registry.create ~flush:Console.flush ~shutdown:Console.shutdown
+
 let owner_thread = Thread.id (Thread.self ())
 
 let io =
@@ -95,8 +98,15 @@ let io =
 let observer = Observer.create io
 let init config = Observer.init observer config
 let init_exn config = Observer.init_exn observer config
-let flush = Console.flush
-let shutdown = Console.shutdown
+let flush () = Output_registry.flush outputs
+let shutdown () = Output_registry.shutdown outputs
+
+module Lifecycle = struct
+  type error = Output_registry.error = Closed
+
+  let register ~flush ~shutdown =
+    Output_registry.register outputs ~flush ~shutdown
+end
 
 module Test = struct
   exception Capture_error of Observe.capture_error

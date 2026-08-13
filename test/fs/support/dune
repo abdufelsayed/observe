@@ -1,0 +1,5 @@
+(library
+ (name observe_fs_test_support)
+ (package observe-fs)
+ (modules fs_fixture)
+ (libraries lwt))

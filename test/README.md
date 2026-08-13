@@ -8,12 +8,18 @@ The test tree mirrors the package tree:
   and the installed `observe-lwt` surface.
 - `lwt-unix` owns the ready clock, console, initialization, capture behavior,
   and the installed `observe-lwt-unix` surface.
+- `fs`, `fs/lwt`, and `fs/lwt/unix` mirror the filesystem package family with
+  an in-memory state-machine proof, Lwt cancellation proof, real temporary
+  directories, installed dependency isolation, and cross-thread delivery.
 
 The package runners are independent:
 
 - `dune build -p observe @install @runtest`
 - `dune build -p observe-lwt @install @runtest`
 - `dune build -p observe-lwt-unix @install @runtest`
+- `dune build -p observe-fs @install @runtest`
+- `dune build -p observe-fs-lwt @install @runtest`
+- `dune build -p observe-fs-lwt-unix @install @runtest`
 
 `@correctness` composes those package-owned aliases for local whole-repository
 feedback. `@stress` adds randomized and concurrency pressure. Neither replaces

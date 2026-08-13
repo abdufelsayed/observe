@@ -1,0 +1,21 @@
+(executable
+ (name test_date_properties)
+ (modules test_date_properties)
+ (libraries
+  observe
+  observe-fs
+  observe_fs_date
+  alcotest
+  qcheck-core
+  qcheck-alcotest
+  ptime))
+
+(rule
+ (alias observe-fs-date-properties)
+ (package observe-fs)
+ (deps
+  test_date_properties.exe
+  (env_var OBSERVE_QCHECK_COUNT)
+  (env_var QCHECK_SEED))
+ (action
+  (run %{exe:test_date_properties.exe})))

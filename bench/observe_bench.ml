@@ -18,7 +18,7 @@ let options =
       "PATH Write the structured benchmark report to PATH" );
     ( "--suite",
       Arg.Set_string suite,
-      "SUITE Run all, component, core, or lwt-unix scenarios" );
+      "SUITE Run all, component, core, lwt-unix, or fs-lwt-unix scenarios" );
     ( "--quota-ms",
       Arg.Set_int quota_ms,
       "MILLISECONDS Set Bechamel's sampling quota per scenario" );
@@ -55,6 +55,7 @@ let selected_scenarios () =
     | "component" -> Scenario.suite scenario = Scenario.Component
     | "core" -> Scenario.suite scenario = Scenario.Core
     | "lwt-unix" -> Scenario.suite scenario = Scenario.Lwt_unix
+    | "fs-lwt-unix" -> Scenario.suite scenario = Scenario.Fs_lwt_unix
     | value -> fail ("unknown suite: " ^ value)
   in
   List.filter matches Scenario.all

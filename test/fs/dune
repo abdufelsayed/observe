@@ -1,0 +1,38 @@
+(executable
+ (name portable_scenario)
+ (modules portable_scenario)
+ (libraries
+  observe
+  observe-fs
+  observe-lwt
+  observe_fs_test_support
+  lwt
+  lwt.unix))
+
+(rule
+ (alias observe-fs-contracts)
+ (package observe-fs)
+ (deps portable_scenario.exe)
+ (action
+  (progn
+   (run %{exe:portable_scenario.exe} daily)
+   (run %{exe:portable_scenario.exe} append-and-partial)
+   (run %{exe:portable_scenario.exe} mutation)
+   (run %{exe:portable_scenario.exe} projection)
+   (run %{exe:portable_scenario.exe} capacity)
+   (run %{exe:portable_scenario.exe} default-capacity)
+   (run %{exe:portable_scenario.exe} flush-barriers)
+   (run %{exe:portable_scenario.exe} failure)
+   (run %{exe:portable_scenario.exe} failure-open)
+   (run %{exe:portable_scenario.exe} failure-zero-progress)
+   (run %{exe:portable_scenario.exe} failure-flush)
+   (run %{exe:portable_scenario.exe} failure-close)
+   (run %{exe:portable_scenario.exe} invalid-write-count)
+   (run %{exe:portable_scenario.exe} shutdown))))
+
+(alias
+ (name runtest)
+ (package observe-fs)
+ (deps
+  (alias date/observe-fs-date-properties)
+  (alias observe-fs-contracts)))

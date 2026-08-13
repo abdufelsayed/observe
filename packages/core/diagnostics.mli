@@ -13,6 +13,7 @@ type kind =
   | Console_raised
   | Drain_rejected
   | Drain_raised
+  | Drain_failed
   | Capture_overflow
   | Capture_closed
 

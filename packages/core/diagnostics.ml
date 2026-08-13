@@ -11,6 +11,7 @@ type kind =
   | Console_raised
   | Drain_rejected
   | Drain_raised
+  | Drain_failed
   | Capture_overflow
   | Capture_closed
 
@@ -31,6 +32,7 @@ let kinds =
     Console_raised;
     Drain_rejected;
     Drain_raised;
+    Drain_failed;
     Capture_overflow;
     Capture_closed;
   |]
@@ -48,8 +50,9 @@ let index = function
   | Console_raised -> 9
   | Drain_rejected -> 10
   | Drain_raised -> 11
-  | Capture_overflow -> 12
-  | Capture_closed -> 13
+  | Drain_failed -> 12
+  | Capture_overflow -> 13
+  | Capture_closed -> 14
 
 let create_store () = Array.init (Array.length kinds) (fun _ -> Atomic.make 0)
 

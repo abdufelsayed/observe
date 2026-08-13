@@ -21,5 +21,4 @@ _opam/
 
 .merlin
 .agents
-.plans
-.worktrees/
+.praxis

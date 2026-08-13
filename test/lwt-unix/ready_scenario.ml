@@ -230,6 +230,70 @@ let shutdown () =
   check (not (contains output "after")) "shutdown accepted a later record";
   Lwt_main.run (Observe_lwt_unix.shutdown ())
 
+let lifecycle_flush () =
+  let flushed = ref 0 in
+  let stopped = ref 0 in
+  let register () =
+    Observe_lwt_unix.Lifecycle.register
+      ~flush:(fun () ->
+        incr flushed;
+        Lwt.return_unit)
+      ~shutdown:(fun () ->
+        incr stopped;
+        Lwt.return_unit)
+    |> Result.get_ok
+  in
+  register ();
+  register ();
+  Lwt_main.run (Observe_lwt_unix.flush ());
+  check (!flushed = 2) "flush did not visit every registered output";
+  check (!stopped = 0) "flush ran shutdown hooks";
+  Lwt_main.run (Observe_lwt_unix.shutdown ());
+  check (!stopped = 2) "shutdown did not visit every registered output"
+
+let lifecycle_failure () =
+  let attempted = ref 0 in
+  let flush_attempted = ref 0 in
+  Observe_lwt_unix.Lifecycle.register
+    ~flush:(fun () ->
+      incr flush_attempted;
+      Lwt.fail (Failure "flush"))
+    ~shutdown:(fun () ->
+      incr attempted;
+      Lwt.fail (Failure "first"))
+  |> Result.get_ok;
+  Observe_lwt_unix.Lifecycle.register
+    ~flush:(fun () ->
+      incr flush_attempted;
+      Lwt.return_unit)
+    ~shutdown:(fun () ->
+      incr attempted;
+      Lwt.return_unit)
+  |> Result.get_ok;
+  let flush_outcome =
+    Lwt_main.run
+      (Lwt.catch
+         (fun () -> Lwt.map Result.ok (Observe_lwt_unix.flush ()))
+         (fun exn -> Lwt.return (Error exn)))
+  in
+  (match flush_outcome with
+  | Error (Failure message) when String.equal message "flush" -> ()
+  | Error exn -> fail "unexpected flush failure: %s" (Printexc.to_string exn)
+  | Ok () -> fail "failing lifecycle hook did not fail flush");
+  check (!flush_attempted = 2) "failure prevented another flush hook";
+  let outcome =
+    Lwt_main.run
+      (Lwt.catch
+         (fun () -> Lwt.map Result.ok (Observe_lwt_unix.shutdown ()))
+         (fun exn -> Lwt.return (Error exn)))
+  in
+  (match outcome with
+  | Error (Failure message) when String.equal message "first" -> ()
+  | Error exn ->
+      fail "unexpected lifecycle failure: %s" (Printexc.to_string exn)
+  | Ok () -> fail "failing lifecycle hook did not fail shutdown");
+  check (!attempted = 2) "failure prevented another shutdown hook"
+
 let basic_capture () =
   let capture =
     Lwt_main.run
@@ -396,6 +460,8 @@ let scenarios =
     ("bounded-console", bounded_console);
     ("serialized-console", serialized_console);
     ("shutdown", shutdown);
+    ("lifecycle-flush", lifecycle_flush);
+    ("lifecycle-failure", lifecycle_failure);
     ("basic-capture", basic_capture);
     ("capture-then-init", capture_then_init);
     ("concurrent-capture", concurrent_capture);

@@ -19,6 +19,8 @@
    (run %{exe:ready_scenario.exe} bounded-console)
    (run %{exe:ready_scenario.exe} serialized-console)
    (run %{exe:ready_scenario.exe} shutdown)
+   (run %{exe:ready_scenario.exe} lifecycle-flush)
+   (run %{exe:ready_scenario.exe} lifecycle-failure)
    (run %{exe:ready_scenario.exe} basic-capture)
    (run %{exe:ready_scenario.exe} capture-then-init)
    (run %{exe:ready_scenario.exe} concurrent-capture)

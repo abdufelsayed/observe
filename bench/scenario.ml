@@ -1,4 +1,4 @@
-type suite = Component | Core | Lwt_unix
+type suite = Component | Core | Lwt_unix | Fs_lwt_unix
 type prepared = { operation : unit -> unit; cleanup : unit -> unit }
 
 type t = {
@@ -6,6 +6,7 @@ type t = {
   suite : suite;
   boundary : string;
   payload : string;
+  logical_operations : int;
   prepare : unit -> prepared;
 }
 
@@ -15,11 +16,13 @@ let suite_name = function
   | Component -> "component"
   | Core -> "core"
   | Lwt_unix -> "lwt-unix"
+  | Fs_lwt_unix -> "fs-lwt-unix"
 
 let name scenario = scenario.name
 let suite scenario = scenario.suite
 let boundary scenario = scenario.boundary
 let payload scenario = scenario.payload
+let logical_operations scenario = scenario.logical_operations
 let consume value = ignore (Sys.opaque_identity value)
 let no_cleanup () = ()
 let prepared operation = { operation; cleanup = no_cleanup }
@@ -91,8 +94,51 @@ let lwt_unix_operation config make_message =
     restore ();
     Printexc.raise_with_backtrace exception_raised backtrace
 
-let make ~name ~suite ~boundary ~payload prepare =
-  { name; suite; boundary; payload; prepare }
+let temporary_directory () =
+  let path = Filename.temp_file "observe-bench-fs" ".dir" in
+  Sys.remove path;
+  Unix.mkdir path 0o700;
+  path
+
+let rec remove_tree path =
+  match (Unix.lstat path).st_kind with
+  | Unix.S_DIR ->
+      Sys.readdir path
+      |> Array.iter (fun child -> remove_tree (Filename.concat path child));
+      Unix.rmdir path
+  | Unix.S_REG | Unix.S_LNK | Unix.S_CHR | Unix.S_BLK | Unix.S_FIFO
+  | Unix.S_SOCK ->
+      Sys.remove path
+  | exception Unix.Unix_error (Unix.ENOENT, _, _) -> ()
+
+let fs_lwt_unix_operation ~batch_size make_message =
+  let directory = temporary_directory () in
+  try
+    let drain =
+      Lwt_main.run (Observe_fs_lwt_unix.create_exn ~path:directory ())
+    in
+    Observe_lwt_unix.init_exn
+      (config ~console:Observe.Config.Silent ~drains:[ drain ] ());
+    {
+      operation =
+        (fun () ->
+          for _ = 1 to batch_size do
+            Observe.Logs.info (make_message ())
+          done;
+          Lwt_main.run (Observe_lwt_unix.flush ()));
+      cleanup =
+        (fun () ->
+          Fun.protect
+            ~finally:(fun () -> remove_tree directory)
+            (fun () -> Lwt_main.run (Observe_lwt_unix.shutdown ())));
+    }
+  with exception_raised ->
+    let backtrace = Printexc.get_raw_backtrace () in
+    remove_tree directory;
+    Printexc.raise_with_backtrace exception_raised backtrace
+
+let make ?(logical_operations = 1) ~name ~suite ~boundary ~payload prepare =
+  { name; suite; boundary; payload; logical_operations; prepare }
 
 let text () = Observe.Logs.text ~tag:"auth" "user logged in"
 let lazy_text () = Observe.Logs.text_lazy ~tag:"auth" (fun () -> "ignored")
@@ -224,7 +270,34 @@ let lwt_unix_scenarios =
           typed_nested);
   ]
 
-let all = component_scenarios @ core_scenarios @ lwt_unix_scenarios
+let fs_lwt_unix_scenarios =
+  [
+    make ~name:"fs-lwt-unix/completed/tagged-text" ~suite:Fs_lwt_unix
+      ~boundary:"completed-write" ~payload:"tagged-text" (fun () ->
+        fs_lwt_unix_operation ~batch_size:1 text);
+    make ~name:"fs-lwt-unix/completed/typed-small" ~suite:Fs_lwt_unix
+      ~boundary:"completed-write" ~payload:"typed-small" (fun () ->
+        fs_lwt_unix_operation ~batch_size:1 typed_small);
+    make ~logical_operations:100 ~name:"fs-lwt-unix/batch-100/tagged-text"
+      ~suite:Fs_lwt_unix ~boundary:"amortized-write" ~payload:"tagged-text"
+      (fun () -> fs_lwt_unix_operation ~batch_size:100 text);
+    make ~logical_operations:100 ~name:"fs-lwt-unix/batch-100/free-small"
+      ~suite:Fs_lwt_unix ~boundary:"amortized-write" ~payload:"free-small"
+      (fun () -> fs_lwt_unix_operation ~batch_size:100 free_small);
+    make ~logical_operations:100 ~name:"fs-lwt-unix/batch-100/typed-small"
+      ~suite:Fs_lwt_unix ~boundary:"amortized-write" ~payload:"typed-small"
+      (fun () -> fs_lwt_unix_operation ~batch_size:100 typed_small);
+    make ~logical_operations:100 ~name:"fs-lwt-unix/batch-100/typed-nested"
+      ~suite:Fs_lwt_unix ~boundary:"amortized-write" ~payload:"typed-nested"
+      (fun () -> fs_lwt_unix_operation ~batch_size:100 typed_nested);
+  ]
+
+let all =
+  component_scenarios
+  @ core_scenarios
+  @ lwt_unix_scenarios
+  @ fs_lwt_unix_scenarios
+
 let find wanted = List.find_opt (fun scenario -> scenario.name = wanted) all
 
 let with_operation scenario callback =

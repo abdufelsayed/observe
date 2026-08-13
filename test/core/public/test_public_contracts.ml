@@ -254,6 +254,21 @@ let test_large_list_json_is_stack_safe () =
     "closing bracket" ']'
     encoded.[String.length encoded - 1]
 
+let test_asynchronous_drain_failure_diagnostic () =
+  let count () =
+    List.fold_left
+      (fun total (entry : Observe.Diagnostics.entry) ->
+        if entry.kind = Observe.Diagnostics.Drain_failed then
+          total + entry.count
+        else total)
+      0
+      (Observe.Diagnostics.snapshot ())
+  in
+  let before = count () in
+  Observe.Drain.Integration.report_failure ();
+  Alcotest.(check int)
+    "one bounded asynchronous failure" (before + 1) (count ())
+
 let () =
   Alcotest.run "observe-public-contracts"
     [
@@ -277,5 +292,10 @@ let () =
             test_manual_description_json;
           Alcotest.test_case "large-list JSON is stack safe" `Quick
             test_large_list_json_is_stack_safe;
+        ] );
+      ( "unit:observe:drain",
+        [
+          Alcotest.test_case "asynchronous failure signal" `Quick
+            test_asynchronous_drain_failure_diagnostic;
         ] );
     ]

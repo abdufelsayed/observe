@@ -1,0 +1,4 @@
+(library
+ (name observe_fs_lwt)
+ (public_name observe-fs-lwt)
+ (libraries observe observe-fs observe-lwt lwt))

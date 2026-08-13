@@ -30,6 +30,10 @@ overrides.
 
 Before process exit, run {!val:Observe_lwt_unix.shutdown} through the active Lwt
 scheduler. Use {!val:Observe_lwt_unix.flush} when the worker should remain open.
+Official filesystem workers register with the same lifecycle, so these calls
+cover console and daily-file records accepted before their barriers. The
+{!module:Observe_lwt_unix.Lifecycle} module is for output-integration authors;
+ordinary applications configure the drain returned by [Observe_fs_lwt_unix].
 
 {1 Capture}
 

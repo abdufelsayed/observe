@@ -1,0 +1,23 @@
+(executable
+ (name lwt_scenario)
+ (modules lwt_scenario)
+ (libraries
+  observe
+  observe-fs-lwt
+  observe-lwt
+  observe_fs_test_support
+  lwt
+  lwt.unix))
+
+(rule
+ (alias observe-fs-lwt-contracts)
+ (package observe-fs-lwt)
+ (deps lwt_scenario.exe)
+ (action
+  (run %{exe:lwt_scenario.exe} cancellation)))
+
+(alias
+ (name runtest)
+ (package observe-fs-lwt)
+ (deps
+  (alias observe-fs-lwt-contracts)))

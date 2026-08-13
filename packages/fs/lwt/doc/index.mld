@@ -1,0 +1,10 @@
+{0 Lwt filesystem execution}
+
+{!Observe_fs_lwt.Make} completes portable filesystem delivery with Lwt and an
+application-owned {!Observe_fs_lwt.Platform.S}. It adds promises, protected
+waiters, worker ownership, and cancellation behavior without adding Unix or
+[lwt.unix].
+
+This is the intended Mirage composition point. Supply filesystem capabilities
+from the target platform, apply the functor, and retain the returned worker so
+the platform lifecycle can call [flush] and [shutdown].

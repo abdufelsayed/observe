@@ -88,3 +88,70 @@
   lwt
   ptime
   (ocamlfind :with-test)))
+
+(package
+ (name observe-fs)
+ (synopsis "Portable daily filesystem delivery for Observe")
+ (description
+  "Portable bounded daily NDJSON filesystem delivery with injectable I/O capabilities.")
+ (depends
+  (ocaml
+   (>= 4.14))
+  (observe
+   (= :version))
+  (alcotest
+   (and
+    :with-test
+    (>= 1.9.1)))
+  (qcheck-core
+   (and
+    :with-test
+    (>= 0.91)))
+  (qcheck-alcotest
+   (and
+    :with-test
+    (>= 0.91)))
+  (observe-lwt
+   (and
+    :with-test
+    (= :version)))
+  (lwt :with-test)
+  (ptime :with-test)))
+
+(package
+ (name observe-fs-lwt)
+ (synopsis "Lwt execution for Observe filesystem delivery")
+ (description
+  "Lwt completion of portable Observe filesystem delivery for injected filesystems.")
+ (depends
+  (ocaml
+   (>= 4.14))
+  (observe-fs
+   (= :version))
+  (observe
+   (= :version))
+  (observe-lwt
+   (= :version))
+  lwt
+  (alcotest
+   (and
+    :with-test
+    (>= 1.9.1)))))
+
+(package
+ (name observe-fs-lwt-unix)
+ (synopsis "Ready Lwt-Unix daily filesystem delivery for Observe")
+ (description
+  "Ready bounded daily NDJSON files for Observe applications using Lwt-Unix.")
+ (depends
+  (ocaml
+   (>= 4.14))
+  (observe
+   (= :version))
+  (observe-fs-lwt
+   (= :version))
+  (observe-lwt-unix
+   (= :version))
+  lwt
+  (jsonm :with-test)
+  (ocamlfind :with-test)))

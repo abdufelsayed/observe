@@ -73,6 +73,9 @@ let run configuration scenario operation =
   let nanoseconds_per_operation, r_squared =
     analyze Instance.monotonic_clock raw
   in
+  let logical_operations = Scenario.logical_operations scenario in
+  let scale = float_of_int logical_operations in
+  let nanoseconds_per_operation = nanoseconds_per_operation /. scale in
   if nanoseconds_per_operation <= 0. then
     failwith "Bechamel produced a non-positive operation latency";
   let ( minor_bytes_per_operation,
@@ -80,7 +83,15 @@ let run configuration scenario operation =
         promoted_bytes_per_operation,
         minor_collections_per_operation,
         major_collections_per_operation ) =
-    allocations configuration.allocation_runs operation
+    let runs = max 1 (configuration.allocation_runs / logical_operations) in
+    let minor, major, promoted, minor_collections, major_collections =
+      allocations runs operation
+    in
+    ( minor /. scale,
+      major /. scale,
+      promoted /. scale,
+      minor_collections /. scale,
+      major_collections /. scale )
   in
   {
     name = Scenario.name scenario;

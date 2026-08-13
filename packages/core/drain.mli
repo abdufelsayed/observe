@@ -12,3 +12,10 @@ val create : (Log.t -> acceptance) -> t
 
 val offer : t -> Log.t -> acceptance
 (** Invoke the drain callback. Engine code owns exception containment. *)
+
+module Integration : sig
+  val report_failure : unit -> unit
+  (** Report that asynchronous work accepted by a drain later failed. This
+      increments one bounded, non-recursive process diagnostic. It performs no
+      logging, formatting, callback, or I/O. *)
+end

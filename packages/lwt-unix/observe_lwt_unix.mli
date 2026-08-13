@@ -12,13 +12,28 @@ val init_exn : Observe.Config.t -> unit
 (** Like {!init}, but raises [Observe.Init_error] on failure. *)
 
 val flush : unit -> unit Lwt.t
-(** Resolve when all console records accepted before the call have reached
-    standard error. This does not flush application-defined drains. *)
+(** Resolve when all console and registered output records accepted before the
+    call have reached their effect boundary. Ordinary application-defined drains
+    are not registered automatically. *)
 
 val shutdown : unit -> unit Lwt.t
-(** Stop console acceptance, drain accepted records, and stop the output worker.
-    Repeated calls share the same completion. Logging after shutdown diagnoses
-    console rejection while configured drains continue independently. *)
+(** Stop console and registered output acceptance, drain accepted records, and
+    stop every output worker. Repeated calls share the same completion. Logging
+    after shutdown diagnoses output rejection. *)
+
+module Lifecycle : sig
+  (** Expert registration for independently installed Lwt-Unix outputs. *)
+
+  type error = Closed
+
+  val register :
+    flush:(unit -> unit Lwt.t) ->
+    shutdown:(unit -> unit Lwt.t) ->
+    (unit, error) result
+  (** Join the process lifecycle while it is open. Registered hooks are owned
+      until process shutdown. Every hook is attempted even when another hook
+      fails. *)
+end
 
 module Test : sig
   exception Capture_error of Observe.capture_error

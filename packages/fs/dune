@@ -1,0 +1,12 @@
+(library
+ (name observe_fs_date)
+ (package observe-fs)
+ (modules date)
+ (libraries observe))
+
+(library
+ (name observe_fs)
+ (public_name observe-fs)
+ (modules observe_fs delivery io)
+ (private_modules delivery io)
+ (libraries observe observe_fs_date))

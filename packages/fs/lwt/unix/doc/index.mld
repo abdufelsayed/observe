@@ -1,0 +1,22 @@
+{0 Ready Lwt-Unix filesystem delivery}
+
+{!Observe_fs_lwt_unix.create} accepts an application directory and returns an
+{!Observe.Drain.t} directly. Missing directories are created recursively.
+Each accepted log is appended as compact NDJSON to [YYYY-MM-DD.jsonl], where
+the date comes from the log's semantic UTC timestamp.
+
+The drain joins {!Observe_lwt_unix.flush} and
+{!Observe_lwt_unix.shutdown}. Applications configure the returned drain once
+and continue logging through {!Observe.Logs}.
+
+{[let* filesystem =
+  Observe_fs_lwt_unix.create_exn ~path:".observe/logs" ()
+in
+let config =
+  Observe.Config.create_exn ~service:"orders" ~drains:[filesystem] ()
+in
+Observe_lwt_unix.init_exn config;
+run_application ()]}
+
+Acceptance means bounded ownership transfer, not a completed write, [fsync],
+or crash durability. Call the ready shutdown path before process exit.

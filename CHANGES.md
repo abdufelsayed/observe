@@ -29,3 +29,7 @@
   pressure, temporal and bounded-space laws, and reproducible stress reports.
 - Add a separate Bechamel maintainer tool for component, controlled-core, and
   real Lwt-Unix measurements with structured JSON reports.
+- Add dependency-isolated `observe-fs`, `observe-fs-lwt`, and
+  `observe-fs-lwt-unix` packages with bounded daily NDJSON delivery, typed
+  setup errors, synchronous ownership transfer, and the shared ready
+  Lwt-Unix flush and shutdown lifecycle.

@@ -5,6 +5,9 @@
   (alias observe-core-contracts)
   (alias observe-lwt-contracts)
   (alias observe-lwt-unix-contracts)
+  (alias observe-fs-contracts)
+  (alias observe-fs-lwt-contracts)
+  (alias observe-fs-lwt-unix-contracts)
   (alias package-installed-surfaces)))
 
 (alias
@@ -12,12 +15,14 @@
  (deps
   dune-project
   (alias correctness)
-  (alias_rec discovery)))
+  (alias_rec discovery)
+  (alias test/fs/lwt/unix/observe-fs-lwt-unix-stress)))
 
 (alias
  (name examples)
  (deps
-  (alias examples/observe-examples)))
+  (alias examples/observe-examples)
+  (alias examples/observe-fs-examples)))
 
 (alias
  (name observe-core-contracts)
@@ -33,6 +38,21 @@
  (name observe-lwt-unix-contracts)
  (deps
   (alias test/lwt-unix/observe-lwt-unix-contracts)))
+
+(alias
+ (name observe-fs-contracts)
+ (deps
+  (alias test/fs/observe-fs-contracts)))
+
+(alias
+ (name observe-fs-lwt-contracts)
+ (deps
+  (alias test/fs/lwt/observe-fs-lwt-contracts)))
+
+(alias
+ (name observe-fs-lwt-unix-contracts)
+ (deps
+  (alias test/fs/lwt/unix/observe-fs-lwt-unix-contracts)))
 
 (rule
  (alias observe-core-installed-surface)
@@ -117,7 +137,82 @@
  (deps
   (alias observe-core-installed-surface)
   (alias observe-lwt-installed-surface)
-  (alias observe-lwt-unix-installed-surface)))
+  (alias observe-lwt-unix-installed-surface)
+  (alias observe-fs-installed-surface)
+  (alias observe-fs-lwt-installed-surface)
+  (alias observe-fs-lwt-unix-installed-surface)))
+
+(rule
+ (alias observe-fs-installed-surface)
+ (package observe-fs)
+ (deps
+  observe-fs.install
+  %{lib:observe:observe.cmi}
+  %{lib:observe-fs:observe_fs.cmi}
+  test/fs/interfaces/check_install_surface.sh
+  test/fs/interfaces/consumer.exe
+  test/fs/interfaces/consumer.ml
+  (source_tree test/fs/interfaces/negative))
+ (action
+  (progn
+   (run
+    bash
+    %{dep:test/fs/interfaces/check_install_surface.sh}
+    %{bin:ocamlfind}
+    %{dep:observe-fs.install}
+    %{lib:observe:observe.cmi}
+    %{lib:observe-fs:observe_fs.cmi}
+    %{dep:test/fs/interfaces/consumer.ml}
+    test/fs/interfaces/negative)
+   (run %{exe:test/fs/interfaces/consumer.exe}))))
+
+(rule
+ (alias observe-fs-lwt-installed-surface)
+ (package observe-fs-lwt)
+ (deps
+  observe-fs-lwt.install
+  %{lib:observe:observe.cmi}
+  %{lib:observe-fs:observe_fs.cmi}
+  %{lib:observe-fs-lwt:observe_fs_lwt.cmi}
+  test/fs/lwt/interfaces/check_install_surface.sh
+  test/fs/lwt/interfaces/consumer.exe
+  test/fs/lwt/interfaces/consumer.ml)
+ (action
+  (progn
+   (run
+    bash
+    %{dep:test/fs/lwt/interfaces/check_install_surface.sh}
+    %{bin:ocamlfind}
+    %{dep:observe-fs-lwt.install}
+    %{lib:observe:observe.cmi}
+    %{lib:observe-fs:observe_fs.cmi}
+    %{lib:observe-fs-lwt:observe_fs_lwt.cmi}
+    %{dep:test/fs/lwt/interfaces/consumer.ml})
+   (run %{exe:test/fs/lwt/interfaces/consumer.exe}))))
+
+(rule
+ (alias observe-fs-lwt-unix-installed-surface)
+ (package observe-fs-lwt-unix)
+ (deps
+  observe-fs-lwt-unix.install
+  %{lib:observe:observe.cmi}
+  %{lib:observe-fs-lwt-unix:observe_fs_lwt_unix.cmi}
+  test/fs/lwt/unix/interfaces/check_install_surface.sh
+  test/fs/lwt/unix/interfaces/consumer.exe
+  test/fs/lwt/unix/interfaces/consumer.ml
+  (source_tree test/fs/lwt/unix/interfaces/negative))
+ (action
+  (progn
+   (run
+    bash
+    %{dep:test/fs/lwt/unix/interfaces/check_install_surface.sh}
+    %{bin:ocamlfind}
+    %{dep:observe-fs-lwt-unix.install}
+    %{lib:observe:observe.cmi}
+    %{lib:observe-fs-lwt-unix:observe_fs_lwt_unix.cmi}
+    %{dep:test/fs/lwt/unix/interfaces/consumer.ml}
+    test/fs/lwt/unix/interfaces/negative)
+   (run %{exe:test/fs/lwt/unix/interfaces/consumer.exe}))))
 
 (alias
  (name runtest)
@@ -136,3 +231,21 @@
  (package observe-lwt-unix)
  (deps
   (alias observe-lwt-unix-installed-surface)))
+
+(alias
+ (name runtest)
+ (package observe-fs)
+ (deps
+  (alias observe-fs-installed-surface)))
+
+(alias
+ (name runtest)
+ (package observe-fs-lwt)
+ (deps
+  (alias observe-fs-lwt-installed-surface)))
+
+(alias
+ (name runtest)
+ (package observe-fs-lwt-unix)
+ (deps
+  (alias observe-fs-lwt-unix-installed-surface)))

@@ -1,0 +1,37 @@
+(executable
+ (name ready_fs_scenario)
+ (modules ready_fs_scenario)
+ (libraries
+  observe
+  observe-lwt
+  observe-lwt-unix
+  observe-fs-lwt-unix
+  jsonm
+  lwt
+  lwt.unix
+  threads.posix
+  unix))
+
+(rule
+ (alias observe-fs-lwt-unix-contracts)
+ (package observe-fs-lwt-unix)
+ (deps ready_fs_scenario.exe)
+ (action
+  (progn
+   (run %{exe:ready_fs_scenario.exe} daily)
+   (run %{exe:ready_fs_scenario.exe} recursive-directory)
+   (run %{exe:ready_fs_scenario.exe} invalid-target)
+   (run %{exe:ready_fs_scenario.exe} lifecycle-closed))))
+
+(alias
+ (name runtest)
+ (package observe-fs-lwt-unix)
+ (deps
+  (alias observe-fs-lwt-unix-contracts)))
+
+(rule
+ (alias observe-fs-lwt-unix-stress)
+ (package observe-fs-lwt-unix)
+ (deps ready_fs_scenario.exe)
+ (action
+  (run %{exe:ready_fs_scenario.exe} concurrency)))

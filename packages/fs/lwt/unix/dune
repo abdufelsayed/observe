@@ -1,0 +1,12 @@
+(library
+ (name observe_fs_lwt_unix)
+ (public_name observe-fs-lwt-unix)
+ (private_modules platform)
+ (libraries
+  observe
+  observe-fs-lwt
+  observe-lwt-unix
+  lwt
+  lwt.unix
+  unix
+  threads.posix))

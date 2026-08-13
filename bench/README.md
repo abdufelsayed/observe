@@ -13,6 +13,7 @@ Select one suite or compare with an earlier report:
 
 ```sh
 opam exec -- dune exec bench/observe_bench.exe -- --suite core
+opam exec -- dune exec bench/observe_bench.exe -- --suite fs-lwt-unix
 opam exec -- dune exec bench/observe_bench.exe -- \
   --compare .logs/benchmarks/baseline.json
 ```
@@ -41,6 +42,12 @@ promoted words; promoted allocation is also reported separately.
   and completed delivery rather than a full queue's rejection path. Standard
   error is redirected to `/dev/null` before initialization, so the adapter uses
   its non-TTY plain style and does not flood the caller's terminal.
+- `fs-lwt-unix` writes to a fresh temporary directory through the ready
+  filesystem package. `completed` scenarios include one log and one shared
+  lifecycle flush. `batch-100` scenarios write 100 logs and flush once; their
+  latency, throughput, and allocation are normalized per logical record. The
+  filesystem uses ordinary append writes into the operating-system page cache;
+  these measurements do not include `fsync` and make no durability claim.
 
 Free-form and typed scenarios use the same small or nested logical payload.
 Compare measurements only when their report metadata, benchmark configuration,

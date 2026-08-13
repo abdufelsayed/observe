@@ -1,0 +1,13 @@
+{0 Portable filesystem delivery}
+
+{!Observe_fs} owns daily UTC filename selection, compact NDJSON projection,
+finite admission, FIFO delivery, flush barriers, failure, and shutdown. It
+performs no concrete filesystem or scheduler operation.
+
+Integration authors implement {!Observe_fs.IO.S} and apply
+{!Observe_fs.Make}. The drain callback synchronously converts a completed log
+into owned bytes before returning [Accepted]. The resulting worker can then
+perform effects without retaining the consumer's OCaml value.
+
+Most Lwt-Unix applications should use [Observe_fs_lwt_unix.create] from the
+ready package instead.

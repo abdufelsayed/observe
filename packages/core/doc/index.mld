@@ -9,6 +9,9 @@ typed values with Repr machine behavior and type-aware presentation, level
 filtering, automatic console formatting,
 drains, diagnostics, and finite capture. It does not currently provide
 wide-event or metric APIs.
+Drains that accept work for later effectful delivery can report a terminal
+worker failure through {!val:Observe.Drain.Integration.report_failure} without
+recursing through normal logging.
 
 {1 Installation}
 

@@ -256,6 +256,7 @@ module Diagnostics : sig
     | Console_raised
     | Drain_rejected
     | Drain_raised
+    | Drain_failed
     | Capture_overflow
     | Capture_closed
 
@@ -276,6 +277,13 @@ module Drain : sig
       work after return must first copy or project everything it needs. Ordinary
       callback exceptions are contained as [Diagnostics.Drain_raised]; runtime
       control exceptions are preserved. *)
+
+  module Integration : sig
+    val report_failure : unit -> unit
+    (** Report that asynchronous work accepted by a drain later failed. This
+        increments one bounded, non-recursive process diagnostic and performs no
+        logging, callback, or I/O. *)
+  end
 end
 
 module Formatter : sig
