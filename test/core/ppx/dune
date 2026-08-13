@@ -15,7 +15,7 @@
 (executable
  (name test_logging_semantics)
  (modules test_logging_semantics)
- (libraries observe observe_test_support alcotest)
+ (libraries observe observe_test_support alcotest fmt)
  (preprocess
   (pps observe.ppx)))
 

@@ -39,6 +39,7 @@
    (and
     :with-test
     (>= 1.9.1)))
+  (fmt :with-test)
   (qcheck-core
    (and
     :with-test
