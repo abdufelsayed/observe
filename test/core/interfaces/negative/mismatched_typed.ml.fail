@@ -1,0 +1,2 @@
+let _ = Observe.Logs.info (fun m ->
+    m.typed Observe.Type.int "not an int")

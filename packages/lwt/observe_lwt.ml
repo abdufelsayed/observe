@@ -1,14 +1,14 @@
 type state = {
   clock : unit -> (Observe.Timestamp.t, Observe.IO.clock_error) result;
   console_style : unit -> Observe.Formatter.style;
-  write_console : string -> Observe.IO.console_acceptance;
+  offer_console : string -> Observe.IO.console_acceptance;
   can_lookup_context : unit -> bool;
 }
 
 type t = state
 
-let create ~clock ~console_style ~write_console ~can_lookup_context () =
-  { clock; console_style; write_console; can_lookup_context }
+let create ~clock ~console_style ~offer_console ~can_lookup_context () =
+  { clock; console_style; offer_console; can_lookup_context }
 
 module IO = struct
   type +'a t = 'a Lwt.t
@@ -36,6 +36,6 @@ module IO = struct
 
   module Console = struct
     let style state = state.console_style ()
-    let write state output = state.write_console output
+    let offer state output = state.offer_console output
   end
 end

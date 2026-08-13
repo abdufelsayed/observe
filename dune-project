@@ -19,7 +19,7 @@
 
 (package
  (name observe)
- (synopsis "Structured logging and observability for OCaml")
+ (synopsis "Structured logging for OCaml")
  (description
  "Portable structured logging with typed values and deterministic capture.")
  (depends

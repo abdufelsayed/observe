@@ -10,7 +10,7 @@ The drain joins {!Observe_lwt_unix.flush} and
 and continue logging through {!Observe.Logs}.
 
 {[let* filesystem =
-  Observe_fs_lwt_unix.create_exn ~path:".observe/logs" ()
+  Observe_fs_lwt_unix.create_exn ~dir:".observe/logs" ()
 in
 let config =
   Observe.Config.create_exn ~service:"orders" ~drains:[filesystem] ()

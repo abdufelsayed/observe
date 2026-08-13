@@ -2,17 +2,17 @@
 
 type t
 
-type payload =
+type body =
   | Text of { tag : string; message : string }
-  | Free of Value.t
-  | Structured : 'a Type.t * 'a -> payload
+  | Untyped of Value.t
+  | Typed : 'a Type.t * 'a -> body
 
 val service : t -> string
 val environment : t -> string option
 val version : t -> string option
 val timestamp : t -> Timestamp.t
 val level : t -> Level.t
-val payload : t -> payload
+val body : t -> body
 
 module Producer : sig
   val make :
@@ -21,6 +21,6 @@ module Producer : sig
     ?version:string ->
     timestamp:Timestamp.t ->
     level:Level.t ->
-    payload ->
+    body ->
     t
 end

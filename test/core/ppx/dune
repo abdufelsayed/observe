@@ -82,7 +82,7 @@
     %{dep:check_negative.sh}
     %{exe:ppx_driver.exe}
     %{dep:value_record_update.ml}
-    "[%observe.value]: record updates are not valid free-form objects")
+    "[%observe.value]: record updates are not valid untyped objects")
    (run
     bash
     %{dep:check_negative.sh}

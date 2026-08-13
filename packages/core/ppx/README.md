@@ -1,7 +1,7 @@
 # Observe PPX
 
 `observe.ppx` provides the `[@@deriving observe]` type-description deriver and
-the namespaced `[%observe.value ...]` free-form value extension. Generated code
+the namespaced `[%observe.value ...]` untyped-value extension. Generated code
 uses `Observe.Type`, `Observe.Value`, and the documented
 `Observe.Generated_runtime` compatibility ABI; application runtime code does
 not link the PPX implementation.
@@ -43,7 +43,8 @@ let user_t =
 
 Both descriptions retain the Repr representation, support the same public
 `Observe.Type` operations, and produce the same JSON and pretty output.
-Deriving additionally generates type-specialized JSON and pretty functions.
+Deriving additionally generates type-specialized JSON writers and
+console-rendering functions.
 They match the OCaml value directly and write into the formatter's existing
 buffer or renderer. Manual combinators compose equivalent reusable writers
 from the component descriptions. `Observe.Type.of_repr` provides a generic
@@ -53,8 +54,8 @@ The three paths are therefore one API with different amounts of information:
 
 | Description source | Projection implementation | Intended use |
 | --- | --- | --- |
-| `[@@deriving observe]` | Generated type-specialized JSON and pretty functions | Normal application types |
-| `Observe.Type` combinators | Composed JSON and pretty functions | Hand-written and dynamic description modules |
+| `[@@deriving observe]` | Generated type-specialized JSON writers and console-rendering functions | Normal application types |
+| `Observe.Type` combinators | Composed JSON writers and console-rendering functions | Hand-written and dynamic description modules |
 | `Observe.Type.of_repr` | Repr compatibility projection | Existing or opaque Repr descriptions |
 
 The generated functions are not stored output and do not eagerly serialize a
@@ -102,9 +103,9 @@ type event = User_login of { user_id : int; method_ : string }
 let description : event Observe.Type.t = event_t
 
 let () =
-  Observe.Logs.info
-    (Observe.Logs.structured description
-       (User_login { user_id = 42; method_ = "oauth" }))
+  Observe.Logs.info (fun m ->
+    m.typed description
+      (User_login { user_id = 42; method_ = "oauth" }))
 ```
 
 The corresponding manual description uses a named payload type because OCaml
@@ -222,16 +223,16 @@ groups containing inline records, GADT result types, and existential
 constructor variables receive located compile errors. Ordinary declarations
 without inline records retain the broader `ppx_repr` feature set.
 
-## Free-form values
+## Untyped values
 
 `[%observe.value ...]` accepts integer, float, string, and Boolean literals;
 record syntax as an object; list literals; and `Some` or `None`. The extension
-expands to a `unit -> Observe.Value.t` thunk, so it passes directly to
-`Observe.Logs.free_lazy` and runs only after admission:
+expands to an `Observe.Value.t`. Put it inside the standard logging callback so
+construction runs only after admission:
 
 ```ocaml
-Observe.Logs.info
-  (Observe.Logs.free_lazy
+Observe.Logs.info (fun m ->
+  m.untyped
      [%observe.value
        {
          action = "user_login";
@@ -250,8 +251,8 @@ description:
 
 ```ocaml
 let user_id = 42 in
-Observe.Logs.info
-  (Observe.Logs.free_lazy
+Observe.Logs.info (fun m ->
+  m.untyped
      [%observe.value
        {
          action = "user_login";
@@ -264,23 +265,22 @@ The embedded value is retained by reference and interpreted only when a
 formatter projects it. Suffixed numeric literals such as `1L` likewise require
 `[%observe.value.embed (description, value)]` with an appropriate description.
 
-The first free-form example expands semantically to ordinary public values:
+The first untyped example expands semantically to ordinary public values:
 
 ```ocaml
-fun () ->
-  Observe.Value.object_
-    [
-      ("action", Observe.Value.string "user_login");
-      ("user_id", Observe.Value.int 42);
-      ( "methods",
-        Observe.Value.list
-          [ Observe.Value.string "oauth"; Observe.Value.string "passkey" ] );
-      ("previous_user", Observe.Value.option None);
-    ]
+Observe.Value.object_
+  [
+    ("action", Observe.Value.string "user_login");
+    ("user_id", Observe.Value.int 42);
+    ( "methods",
+      Observe.Value.list
+        [ Observe.Value.string "oauth"; Observe.Value.string "passkey" ] );
+    ("previous_user", Observe.Value.option None);
+  ]
 ```
 
 `Some value` recursively wraps the generated value with
 `Observe.Value.option`; an embedded expression becomes
-`Observe.Value.embed description value`. The outer `fun () ->` is essential:
-`Observe.Logs.free_lazy` does not build the object until the log passes
-admission. Use `Observe.Logs.free` for an already-built `Observe.Value.t`.
+`Observe.Value.embed description value`. The logging callback—not the value
+extension—is the deferred boundary shared by text, untyped, and typed
+authoring.

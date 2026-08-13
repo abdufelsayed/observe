@@ -8,7 +8,7 @@ type operation = Io.operation =
   | Close
 
 type error =
-  | Invalid_path
+  | Invalid_directory
   | Invalid_capacity of int
   | Filesystem of { operation : operation; path : string; cause : Unix.error }
   | Zero_progress
@@ -19,7 +19,7 @@ type error =
 exception Error of error
 
 let error_of_writer = function
-  | Writer.Invalid_path -> Invalid_path
+  | Writer.Invalid_directory -> Invalid_directory
   | Writer.Invalid_capacity capacity -> Invalid_capacity capacity
   | Writer.Io { operation; path; cause } ->
       Filesystem { operation; path; cause }
@@ -28,7 +28,8 @@ let error_of_writer = function
   | Writer.Unexpected exn -> Unexpected exn
 
 let pp_error formatter = function
-  | Invalid_path -> Format.pp_print_string formatter "invalid filesystem path"
+  | Invalid_directory ->
+      Format.pp_print_string formatter "invalid filesystem directory"
   | Invalid_capacity capacity ->
       Format.fprintf formatter "invalid queue capacity %d" capacity
   | Filesystem { operation; path; cause } ->
@@ -50,8 +51,8 @@ let lifecycle_hook callback () =
     | Result.Ok () -> Lwt.return_unit
     | Result.Error error -> Lwt.fail (Error (error_of_writer error)))
 
-let create ~path ?capacity () =
-  Lwt.bind (Writer.create ~path ?capacity ()) (function
+let create ~dir ?capacity () =
+  Lwt.bind (Writer.create ~dir ?capacity ()) (function
     | Result.Error error -> Lwt.return (Result.Error (error_of_writer error))
     | Result.Ok writer -> (
         match
@@ -64,7 +65,7 @@ let create ~path ?capacity () =
             Lwt.bind (Writer.shutdown writer) (fun _ ->
                 Lwt.return (Result.Error Lifecycle_closed))))
 
-let create_exn ~path ?capacity () =
-  Lwt.bind (create ~path ?capacity ()) (function
+let create_exn ~dir ?capacity () =
+  Lwt.bind (create ~dir ?capacity ()) (function
     | Result.Ok drain -> Lwt.return drain
     | Result.Error error -> Lwt.fail (Error error))

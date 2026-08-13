@@ -3,7 +3,7 @@ type event = Request of { request_id : string; attempts : int } | Idle
 
 let description : event Observe.Type.t = event_t
 
-let free =
+let value =
   [%observe.value
     {
       request_id = "req-1";
@@ -13,4 +13,4 @@ let free =
 
 let () =
   ignore description;
-  ignore free
+  ignore value

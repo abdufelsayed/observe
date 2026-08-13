@@ -1,5 +1,10 @@
 module Observer = Observe.Make (Test_io.IO)
 
+let untyped make (builder : Observe.Logs.builder) = builder.untyped (make ())
+
+let typed description make (builder : Observe.Logs.builder) =
+  builder.typed description (make ())
+
 module Raising_get_io = struct
   include Test_io.IO
 
@@ -9,8 +14,8 @@ end
 module Raising_get_observer = Observe.Make (Raising_get_io)
 module Inherited_observer = Observe.Make (Test_io.Inherited_io)
 
-let make_observer ?console_style ?now ?write_console () =
-  let host = Test_io.Host.create ?console_style ?now ?write_console () in
+let make_observer ?console_style ?now ?offer_console () =
+  let host = Test_io.Host.create ?console_style ?now ?offer_console () in
   Observer.create host
 
 let config ?enabled ?console ?min_level ?drains () =
@@ -40,7 +45,7 @@ let capture_tags capture =
     (fun log ->
       match Test_io.text_payload log with
       | Some (tag, message) -> tag ^ ":" ^ message
-      | None -> Alcotest.fail "expected a text payload")
+      | None -> Alcotest.fail "expected a text body")
     (Observe.Capture.logs capture)
 
 let check_capture_tags name expected capture =
@@ -52,10 +57,10 @@ let check_capture_tags name expected capture =
 let not_initialized () =
   let forced = ref 0 in
   Observe.Logs.info
-    (Observe.Logs.free_lazy (fun () ->
+    (untyped (fun () ->
          incr forced;
          Observe.Value.int 1));
-  Alcotest.(check int) "unrouted authoring remains lazy" 0 !forced;
+  Alcotest.(check int) "unrouted authoring is not evaluated" 0 !forced;
   Alcotest.(check int)
     "unrouted emission diagnosed" 1
     (Test_io.process_diagnostic_count Observe.Diagnostics.Not_initialized)
@@ -64,7 +69,7 @@ let inert_create () =
   ignore (make_observer ());
   let owner = make_observer () in
   init_ok owner (config ());
-  Observe.Logs.info (Observe.Logs.text ~tag:"owner" "installed")
+  Observe.Logs.info (Test_io.text ~tag:"owner" "installed")
 
 let repeated_install () =
   let observer = make_observer () in
@@ -103,26 +108,24 @@ let invalid_capacity () =
   Alcotest.(check bool) "callback not entered" false !called;
   init_ok observer (config ())
 
-let threshold_and_laziness () =
+let threshold_and_authoring () =
   let console = ref [] in
   let observer =
     make_observer
-      ~write_console:(fun output ->
+      ~offer_console:(fun output ->
         console := output :: !console;
         Observe.IO.Accepted)
       ()
   in
   init_ok observer (config ~min_level:Observe.Level.Warn ());
   let forced = ref 0 in
-  Observe.Logs.info
-    (Observe.Logs.text_lazy ~tag:"threshold" (fun () ->
-         incr forced;
-         "filtered"));
-  Observe.Logs.warn
-    (Observe.Logs.text_lazy ~tag:"threshold" (fun () ->
-         incr forced;
-         "accepted"));
-  Alcotest.(check int) "only admitted message forced" 1 !forced;
+  Observe.Logs.info (fun m ->
+      incr forced;
+      m.text ~tag:"threshold" "filtered");
+  Observe.Logs.warn (fun m ->
+      incr forced;
+      m.text ~tag:"threshold" "accepted");
+  Alcotest.(check int) "only admitted message authored" 1 !forced;
   Alcotest.(check int)
     "only admitted message delivered" 1 (List.length !console);
   Alcotest.(check char)
@@ -134,13 +137,13 @@ let clock_unavailable () =
   let observer =
     make_observer
       ~now:(fun () -> Error Observe.IO.Unavailable)
-      ~write_console:(fun _ ->
+      ~offer_console:(fun _ ->
         incr console;
         Observe.IO.Accepted)
       ()
   in
   init_ok observer (config ());
-  Observe.Logs.info (Observe.Logs.text ~tag:"clock" "missing");
+  Observe.Logs.info (Test_io.text ~tag:"clock" "missing");
   Alcotest.(check int) "no console delivery" 0 !console;
   Alcotest.(check int)
     "clock diagnosed" 1
@@ -154,23 +157,22 @@ let scope_raised () =
    with
   | Ok () -> ()
   | Error _ -> Alcotest.fail "raising I/O implementation failed to initialize");
-  Observe.Logs.info (Observe.Logs.text ~tag:"scope" "lookup");
+  Observe.Logs.info (Test_io.text ~tag:"scope" "lookup");
   Alcotest.(check int)
     "scope lookup exception diagnosed" 1
-    (Test_io.process_diagnostic_count Observe.Diagnostics.Scope_raised)
+    (Test_io.process_diagnostic_count Observe.Diagnostics.Capture_lookup_raised)
 
 let formatting_failed () =
   let console = ref 0 in
   let observer =
     make_observer
-      ~write_console:(fun _ ->
+      ~offer_console:(fun _ ->
         incr console;
         Observe.IO.Accepted)
       ()
   in
   init_ok observer (config ());
-  Observe.Logs.info
-    (Observe.Logs.text ~tag:"format" (String.make 1 (Char.chr 0xff)));
+  Observe.Logs.info (Test_io.text ~tag:"format" (String.make 1 (Char.chr 0xff)));
   Alcotest.(check int) "invalid output not delivered" 0 !console;
   Alcotest.(check int)
     "formatting failure diagnosed" 1
@@ -181,7 +183,7 @@ let formatting_failed () =
   let raising_description =
     Observe.Type.of_repr (Repr.like ~json:raising_json Repr.int)
   in
-  Observe.Logs.info (Observe.Logs.structured raising_description 1);
+  Observe.Logs.info (typed raising_description (fun () -> 1));
   Alcotest.(check int) "raised output not delivered" 0 !console;
   Alcotest.(check int)
     "Repr callback exception diagnosed" 1
@@ -201,11 +203,12 @@ let callback_containment () =
     (config ~console:Observe.Config.Silent
        ~drains:[ Observe.Drain.create (fun _ -> raise Exit) ]
        ());
-  Observe.Logs.info (Observe.Logs.free_lazy (fun () -> failwith "authoring"));
-  Observe.Logs.info (Observe.Logs.text ~tag:"drain" "raises");
+  Observe.Logs.info (untyped (fun () -> failwith "authoring"));
+  Observe.Logs.info (Test_io.text ~tag:"drain" "raises");
   Alcotest.(check int)
     "authoring diagnosed" 1
-    (Test_io.process_diagnostic_count Observe.Diagnostics.Authoring_raised);
+    (Test_io.process_diagnostic_count
+       Observe.Diagnostics.Message_evaluation_raised);
   Alcotest.(check int)
     "raising clock diagnosed" 1
     (Test_io.process_diagnostic_count Observe.Diagnostics.Clock_raised)
@@ -228,10 +231,10 @@ let console_and_drains () =
     ]
   in
   let observer =
-    make_observer ~write_console:(fun _ -> Observe.IO.Rejected) ()
+    make_observer ~offer_console:(fun _ -> Observe.IO.Rejected) ()
   in
   init_ok observer (config ~drains ());
-  Observe.Logs.info (Observe.Logs.text ~tag:"fanout" "message");
+  Observe.Logs.info (Test_io.text ~tag:"fanout" "message");
   Alcotest.(check int) "accepted drain called" 1 !accepted;
   Alcotest.(check int) "rejected drain called" 1 !rejected;
   Alcotest.(check int) "raising drain called" 1 !raised;
@@ -247,10 +250,10 @@ let console_and_drains () =
 
 let console_raised () =
   let observer =
-    make_observer ~write_console:(fun _ -> failwith "console") ()
+    make_observer ~offer_console:(fun _ -> failwith "console") ()
   in
   init_ok observer (config ());
-  Observe.Logs.info (Observe.Logs.text ~tag:"console" "raises");
+  Observe.Logs.info (Test_io.text ~tag:"console" "raises");
   Alcotest.(check int)
     "console exception diagnosed" 1
     (Test_io.process_diagnostic_count Observe.Diagnostics.Console_raised)
@@ -260,13 +263,13 @@ let ansi_console () =
   let observer =
     make_observer ~console_style:Observe.Formatter.Ansi_16
       ~now:(fun () -> Ok (Observe.Timestamp.of_unix_ns 37_425_612_000_000L))
-      ~write_console:(fun value ->
+      ~offer_console:(fun value ->
         Buffer.add_string output value;
         Observe.IO.Accepted)
       ()
   in
   init_ok observer (config ());
-  Observe.Logs.info (Observe.Logs.text ~tag:"tag" "message");
+  Observe.Logs.info (Test_io.text ~tag:"tag" "message");
   Alcotest.(check string)
     "engine selects ANSI formatter"
     "\027[90m10:23:45.612\027[0m \027[1;96mINFO\027[0m \027[1;96m[tag]\027[0m \
@@ -277,7 +280,7 @@ let disabled () =
   let console = ref 0 in
   let observer =
     make_observer
-      ~write_console:(fun _ ->
+      ~offer_console:(fun _ ->
         incr console;
         Observe.IO.Accepted)
       ()
@@ -285,27 +288,27 @@ let disabled () =
   init_ok observer (config ~enabled:false ());
   let forced = ref 0 in
   Observe.Logs.info
-    (Observe.Logs.free_lazy (fun () ->
+    (untyped (fun () ->
          incr forced;
          Observe.Value.int 1));
-  Alcotest.(check int) "disabled logging remains lazy" 0 !forced;
+  Alcotest.(check int) "disabled logging is not authored" 0 !forced;
   Alcotest.(check int) "disabled logging has no output" 0 !console;
   Alcotest.(check int)
     "disabled configuration is not diagnosed as outputless" 0
-    (Test_io.process_diagnostic_count Observe.Diagnostics.No_output)
+    (Test_io.process_diagnostic_count Observe.Diagnostics.No_delivery_target)
 
 let no_output () =
   let observer = make_observer () in
   init_ok observer (config ~console:Observe.Config.Silent ());
   Alcotest.(check int)
     "enabled installation with no output is diagnosed" 1
-    (Test_io.process_diagnostic_count Observe.Diagnostics.No_output)
+    (Test_io.process_diagnostic_count Observe.Diagnostics.No_delivery_target)
 
 let scope_overrides_production () =
   let console = ref 0 in
   let observer =
     make_observer
-      ~write_console:(fun _ ->
+      ~offer_console:(fun _ ->
         incr console;
         Observe.IO.Accepted)
       ()
@@ -314,7 +317,7 @@ let scope_overrides_production () =
   let capture =
     match
       Observer.with_capture observer (config ()) (fun capture ->
-          Observe.Logs.info (Observe.Logs.text ~tag:"scope" "captured");
+          Observe.Logs.info (Test_io.text ~tag:"scope" "captured");
           Test_io.Direct.return capture)
     with
     | Ok capture -> capture
@@ -324,14 +327,14 @@ let scope_overrides_production () =
   Alcotest.(check int)
     "scope receives message" 1
     (List.length (Observe.Capture.logs capture));
-  Observe.Logs.info (Observe.Logs.text ~tag:"production" "restored");
+  Observe.Logs.info (Test_io.text ~tag:"production" "restored");
   Alcotest.(check int) "production restored" 1 !console
 
 let nested_capture_precedence () =
   let console = ref 0 in
   let observer =
     make_observer
-      ~write_console:(fun _ ->
+      ~offer_console:(fun _ ->
         incr console;
         Observe.IO.Accepted)
       ()
@@ -340,17 +343,17 @@ let nested_capture_precedence () =
   let outer, inner =
     match
       Observer.with_capture observer (config ()) (fun outer ->
-          Observe.Logs.info (Observe.Logs.text ~tag:"outer" "before-inner");
+          Observe.Logs.info (Test_io.text ~tag:"outer" "before-inner");
           let inner =
             match
               Observer.with_capture observer (config ()) (fun inner ->
-                  Observe.Logs.info (Observe.Logs.text ~tag:"inner" "inside");
+                  Observe.Logs.info (Test_io.text ~tag:"inner" "inside");
                   Test_io.Direct.return inner)
             with
             | Ok inner -> inner
             | Error _ -> Alcotest.fail "nested capture was rejected"
           in
-          Observe.Logs.info (Observe.Logs.text ~tag:"outer" "after-inner");
+          Observe.Logs.info (Test_io.text ~tag:"outer" "after-inner");
           Test_io.Direct.return (outer, inner))
     with
     | Ok captures -> captures
@@ -361,7 +364,7 @@ let nested_capture_precedence () =
     outer;
   check_capture_tags "inner capture takes precedence" [ "inner:inside" ] inner;
   Alcotest.(check int) "nested captures suppress production" 0 !console;
-  Observe.Logs.info (Observe.Logs.text ~tag:"production" "after-captures");
+  Observe.Logs.info (Test_io.text ~tag:"production" "after-captures");
   Alcotest.(check int) "production restored after nested captures" 1 !console
 
 let cancellation_capture_close () =
@@ -372,7 +375,7 @@ let cancellation_capture_close () =
       (Test_io.Inherited_io.create ~context
          ~host:
            (Test_io.Host.create
-              ~write_console:(fun _ ->
+              ~offer_console:(fun _ ->
                 incr console;
                 Observe.IO.Accepted)
               ()))
@@ -386,7 +389,7 @@ let cancellation_capture_close () =
            (fun current_capture ->
              capture := Some current_capture;
              inherited := Some (Test_io.Inherited.inherited_context context);
-             Observe.Logs.info (Observe.Logs.text ~tag:"cancel" "before-cancel");
+             Observe.Logs.info (Test_io.text ~tag:"cancel" "before-cancel");
              raise Test_io.Inherited.Cancelled));
       false
     with Test_io.Inherited.Cancelled -> true
@@ -402,8 +405,7 @@ let cancellation_capture_close () =
   in
   check_capture_tags "cancelled capture retains admitted work"
     [ "cancel:before-cancel" ] capture;
-  Observe.Logs.info
-    (Observe.Logs.text ~tag:"restored" "before-production-install");
+  Observe.Logs.info (Test_io.text ~tag:"restored" "before-production-install");
   Alcotest.(check int)
     "binding restored before production install" 1
     (Test_io.process_diagnostic_count Observe.Diagnostics.Not_initialized);
@@ -414,8 +416,8 @@ let cancellation_capture_close () =
     | None -> Alcotest.fail "inherited context was not retained"
   in
   Test_io.Inherited.with_context context inherited (fun () ->
-      Observe.Logs.info (Observe.Logs.text ~tag:"detached" "after-cancel");
-      Observe.Logs.info (Observe.Logs.text ~tag:"detached" "after-cancel-again"));
+      Observe.Logs.info (Test_io.text ~tag:"detached" "after-cancel");
+      Observe.Logs.info (Test_io.text ~tag:"detached" "after-cancel-again"));
   Alcotest.(check int)
     "closed cancelled capture withholds detached work" 0 !console;
   Alcotest.(check int)
@@ -423,7 +425,7 @@ let cancellation_capture_close () =
     (Test_io.diagnostic_count
        (Observe.Capture.diagnostics capture)
        Observe.Diagnostics.Capture_closed);
-  Observe.Logs.info (Observe.Logs.text ~tag:"production" "restored");
+  Observe.Logs.info (Test_io.text ~tag:"production" "restored");
   Alcotest.(check int) "production restored after cancellation" 1 !console
 
 let closed_inherited_tombstone () =
@@ -434,7 +436,7 @@ let closed_inherited_tombstone () =
       (Test_io.Inherited_io.create ~context
          ~host:
            (Test_io.Host.create
-              ~write_console:(fun _ ->
+              ~offer_console:(fun _ ->
                 incr console;
                 Observe.IO.Accepted)
               ()))
@@ -445,7 +447,7 @@ let closed_inherited_tombstone () =
       Inherited_observer.with_capture observer (inherited_config ())
         (fun current_capture ->
           inherited := Some (Test_io.Inherited.inherited_context context);
-          Observe.Logs.info (Observe.Logs.text ~tag:"capture" "before-detach");
+          Observe.Logs.info (Test_io.text ~tag:"capture" "before-detach");
           Test_io.Inherited.return current_capture)
     with
     | Ok capture -> capture
@@ -458,7 +460,7 @@ let closed_inherited_tombstone () =
     | None -> Alcotest.fail "inherited context was not retained"
   in
   Test_io.Inherited.with_context context inherited (fun () ->
-      Observe.Logs.info (Observe.Logs.text ~tag:"detached" "closed-scope"));
+      Observe.Logs.info (Test_io.text ~tag:"detached" "closed-scope"));
   Alcotest.(check int)
     "closed inherited scope withholds from production" 0 !console;
   Alcotest.(check int)
@@ -466,14 +468,14 @@ let closed_inherited_tombstone () =
     (Test_io.diagnostic_count
        (Observe.Capture.diagnostics capture)
        Observe.Diagnostics.Capture_closed);
-  Observe.Logs.info (Observe.Logs.text ~tag:"production" "after-detach");
+  Observe.Logs.info (Test_io.text ~tag:"production" "after-detach");
   Alcotest.(check int) "root binding restored after detached work" 1 !console
 
 let callback_restoration () =
   let console = ref 0 in
   let observer =
     make_observer
-      ~write_console:(fun _ ->
+      ~offer_console:(fun _ ->
         incr console;
         Observe.IO.Accepted)
       ()
@@ -484,7 +486,7 @@ let callback_restoration () =
       ignore
         (Observer.with_capture observer (config ()) (fun _ ->
              raise (Failure "callback"))));
-  Observe.Logs.info (Observe.Logs.text ~tag:"after" "production");
+  Observe.Logs.info (Test_io.text ~tag:"after" "production");
   Alcotest.(check int) "binding restored after exception" 1 !console
 
 let control_exception () =
@@ -495,8 +497,7 @@ let control_exception () =
        ());
   Alcotest.check_raises "I/O control exception preserved" Test_io.Direct.Control
     (fun () ->
-      Observe.Logs.info
-        (Observe.Logs.free_lazy (fun () -> raise Test_io.Direct.Control)))
+      Observe.Logs.info (untyped (fun () -> raise Test_io.Direct.Control)))
 
 let control_backtrace () =
   Printexc.record_backtrace true;
@@ -515,7 +516,7 @@ let control_backtrace () =
         (Observer.with_capture observer
            (config ~console:Observe.Config.Silent ()) (fun _ ->
              Observe.Logs.info
-               (Observe.Logs.free_lazy (fun () ->
+               (untyped (fun () ->
                     Printexc.raise_with_backtrace Test_io.Direct.Control
                       original));
              Test_io.Direct.return ()));
@@ -539,7 +540,7 @@ let scenario = function
   | "repeated-install" -> repeated_install
   | "io-owner-conflict" -> io_owner_conflict
   | "invalid-capacity" -> invalid_capacity
-  | "threshold-and-laziness" -> threshold_and_laziness
+  | "threshold-and-authoring" -> threshold_and_authoring
   | "clock-unavailable" -> clock_unavailable
   | "scope-raised" -> scope_raised
   | "formatting-failed" -> formatting_failed

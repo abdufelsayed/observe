@@ -90,17 +90,17 @@ module Host = struct
   type t = {
     console_style : Observe.Formatter.style;
     now : unit -> (Observe.Timestamp.t, Observe.IO.clock_error) result;
-    write_console : string -> Observe.IO.console_acceptance;
+    offer_console : string -> Observe.IO.console_acceptance;
   }
 
   let create ?(console_style = Observe.Formatter.Plain)
       ?(now = fun () -> Ok (Observe.Timestamp.of_unix_ns 42L))
-      ?(write_console = fun _ -> Observe.IO.Accepted) () =
-    { console_style; now; write_console }
+      ?(offer_console = fun _ -> Observe.IO.Accepted) () =
+    { console_style; now; offer_console }
 
   let console_style t = t.console_style
   let now t = t.now ()
-  let write_console t output = t.write_console output
+  let offer_console t output = t.offer_console output
 end
 
 module IO = struct
@@ -125,7 +125,7 @@ module IO = struct
 
   module Console = struct
     let style = Host.console_style
-    let write = Host.write_console
+    let offer = Host.offer_console
   end
 end
 
@@ -155,7 +155,7 @@ module Inherited_io = struct
 
   module Console = struct
     let style state = Host.console_style state.host
-    let write state output = Host.write_console state.host output
+    let offer state output = Host.offer_console state.host output
   end
 end
 
@@ -173,6 +173,14 @@ let process_diagnostic_count kind =
   diagnostic_count (Observe.Diagnostics.snapshot ()) kind
 
 let text_payload log =
-  match Observe.Log.payload log with
+  match Observe.Log.body log with
   | Observe.Log.Text { tag; message } -> Some (tag, message)
-  | Observe.Log.Free _ | Observe.Log.Structured _ -> None
+  | Observe.Log.Untyped _ | Observe.Log.Typed _ -> None
+
+let text ~tag message (builder : Observe.Logs.builder) =
+  builder.text ~tag "%s" message
+
+let untyped value (builder : Observe.Logs.builder) = builder.untyped value
+
+let typed description value (builder : Observe.Logs.builder) =
+  builder.typed description value

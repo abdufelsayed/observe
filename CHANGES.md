@@ -4,8 +4,8 @@
 
 - Establish the pure, runtime-neutral structured logging core and sealed public
   API.
-- Add process-wide tagged text, free-form values, and Repr-backed typed
-  structured authoring with explicit eager and lazy constructors.
+- Add process-wide admission-first authoring callbacks with formatted tagged
+  text, untyped values, and Repr-backed typed structured values.
 - Add validated result-returning configuration with an explicit `_exn` form.
 - Define one completed `Observe.IO` contract for effects, dynamic context,
   clock access, and automatic console output.

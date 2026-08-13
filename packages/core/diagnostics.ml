@@ -1,17 +1,17 @@
 type kind =
   | Not_initialized
-  | No_output
-  | Scope_raised
+  | No_delivery_target
+  | Capture_lookup_raised
   | Clock_unavailable
   | Clock_raised
-  | Authoring_raised
+  | Message_evaluation_raised
   | Formatting_failed
   | Formatting_raised
   | Console_rejected
   | Console_raised
   | Drain_rejected
   | Drain_raised
-  | Drain_failed
+  | Drain_delivery_failed
   | Capture_overflow
   | Capture_closed
 
@@ -21,36 +21,36 @@ type store = int Atomic.t array
 let kinds =
   [|
     Not_initialized;
-    No_output;
-    Scope_raised;
+    No_delivery_target;
+    Capture_lookup_raised;
     Clock_unavailable;
     Clock_raised;
-    Authoring_raised;
+    Message_evaluation_raised;
     Formatting_failed;
     Formatting_raised;
     Console_rejected;
     Console_raised;
     Drain_rejected;
     Drain_raised;
-    Drain_failed;
+    Drain_delivery_failed;
     Capture_overflow;
     Capture_closed;
   |]
 
 let index = function
   | Not_initialized -> 0
-  | No_output -> 1
-  | Scope_raised -> 2
+  | No_delivery_target -> 1
+  | Capture_lookup_raised -> 2
   | Clock_unavailable -> 3
   | Clock_raised -> 4
-  | Authoring_raised -> 5
+  | Message_evaluation_raised -> 5
   | Formatting_failed -> 6
   | Formatting_raised -> 7
   | Console_rejected -> 8
   | Console_raised -> 9
   | Drain_rejected -> 10
   | Drain_raised -> 11
-  | Drain_failed -> 12
+  | Drain_delivery_failed -> 12
   | Capture_overflow -> 13
   | Capture_closed -> 14
 

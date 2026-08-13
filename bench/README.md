@@ -31,7 +31,7 @@ promoted words; promoted allocation is also reported separately.
 
 ## Suites
 
-- `component` isolates free-form value construction, typed JSON projection, and
+- `component` isolates untyped value construction, typed JSON projection, and
   JSON or pretty formatting.
 - `core` measures public logging calls with a controlled clock and no-op I/O.
   It covers filtering, routing, drain fan-out, JSON, and true-color pretty
@@ -49,7 +49,7 @@ promoted words; promoted allocation is also reported separately.
   filesystem uses ordinary append writes into the operating-system page cache;
   these measurements do not include `fsync` and make no durability claim.
 
-Free-form and typed scenarios use the same small or nested logical payload.
+Untyped and typed scenarios use the same small or nested logical body.
 Compare measurements only when their report metadata, benchmark configuration,
 runtime, and machine are compatible. GitHub Actions stores reports as workflow
 artifacts and does not enforce performance thresholds.

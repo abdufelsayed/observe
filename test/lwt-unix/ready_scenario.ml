@@ -1,5 +1,8 @@
 let fail format = Format.kasprintf failwith format
 
+let text ~tag message (builder : Observe.Logs.builder) =
+  builder.text ~tag "%s" message
+
 let check condition format =
   Format.kasprintf
     (fun message -> if not condition then failwith message)
@@ -64,9 +67,9 @@ let config ?environment ?console ?drains service =
   Observe.Config.create_exn ~service ?environment ?console ?drains ()
 
 let text_tag log =
-  match Observe.Log.payload log with
+  match Observe.Log.body log with
   | Observe.Log.Text { tag; _ } -> tag
-  | Observe.Log.Free _ | Observe.Log.Structured _ -> fail "expected text log"
+  | Observe.Log.Untyped _ | Observe.Log.Typed _ -> fail "expected text log"
 
 let capture_tags capture = List.map text_tag (Observe.Capture.logs capture)
 
@@ -94,7 +97,7 @@ let clock () =
   let before = Unix.gettimeofday () in
   Observe_lwt_unix.init_exn
     (config ~console:Observe.Config.Silent ~drains:[ drain ] "ready-clock");
-  Observe.Logs.info (Observe.Logs.text ~tag:"clock" "sample");
+  Observe.Logs.info (text ~tag:"clock" "sample");
   let after = Unix.gettimeofday () in
   let timestamp =
     match !captured with
@@ -109,7 +112,7 @@ let console () =
   let (), output =
     capture_stderr (fun () ->
         Observe_lwt_unix.init_exn (config ~environment:"development" "ready");
-        Observe.Logs.info (Observe.Logs.text ~tag:"startup" "service ready"))
+        Observe.Logs.info (text ~tag:"startup" "service ready"))
   in
   check
     (contains output " INFO [startup] service ready\n")
@@ -130,7 +133,7 @@ let json_console () =
         Observe_lwt_unix.init_exn
           (config ~environment:"development" ~console:Observe.Config.Ndjson
              "ready-json");
-        Observe.Logs.info (Observe.Logs.text ~tag:"json" "structured"))
+        Observe.Logs.info (text ~tag:"json" "structured"))
   in
   check
     (contains output "\"service\":\"ready-json\"")
@@ -142,7 +145,7 @@ let production_json_console () =
     capture_stderr (fun () ->
         Observe_lwt_unix.init_exn
           (config ~environment:"production" "ready-production");
-        Observe.Logs.info (Observe.Logs.text ~tag:"json" "structured"))
+        Observe.Logs.info (text ~tag:"json" "structured"))
   in
   check
     (contains output "\"service\":\"ready-production\"")
@@ -171,7 +174,7 @@ let silent_drain () =
     capture_stderr (fun () ->
         Observe_lwt_unix.init_exn
           (config ~console:Observe.Config.Silent ~drains:[ drain ] "silent");
-        Observe.Logs.info (Observe.Logs.text ~tag:"silent" "message"))
+        Observe.Logs.info (text ~tag:"silent" "message"))
   in
   check (output = "") "silent logging wrote to stderr: %S" output;
   check (!delivered = 1) "silent logging skipped the configured drain"
@@ -179,7 +182,7 @@ let silent_drain () =
 let no_output () =
   Observe_lwt_unix.init_exn (config ~console:Observe.Config.Silent "no-output");
   check
-    (process_diagnostic_count Observe.Diagnostics.No_output = 1)
+    (process_diagnostic_count Observe.Diagnostics.No_delivery_target = 1)
     "no-output initialization was not diagnosed once"
 
 let bounded_console () =
@@ -187,8 +190,7 @@ let bounded_console () =
       Observe_lwt_unix.init_exn
         (config ~environment:"production" "bounded-console");
       for index = 0 to 1_024 do
-        Observe.Logs.info
-          (Observe.Logs.text ~tag:"bounded" (string_of_int index))
+        Observe.Logs.info (text ~tag:"bounded" (string_of_int index))
       done;
       check
         (process_diagnostic_count Observe.Diagnostics.Console_rejected = 1)
@@ -201,8 +203,7 @@ let serialized_console () =
         Observe_lwt_unix.init_exn
           (config ~environment:"production" "serialized-console");
         for index = 0 to 99 do
-          Observe.Logs.info
-            (Observe.Logs.text ~tag:"serialized" (string_of_int index))
+          Observe.Logs.info (text ~tag:"serialized" (string_of_int index))
         done)
   in
   let lines = String.split_on_char '\n' output in
@@ -219,9 +220,9 @@ let shutdown () =
   let (), output =
     capture_stderr (fun () ->
         Observe_lwt_unix.init_exn (config "shutdown");
-        Observe.Logs.info (Observe.Logs.text ~tag:"shutdown" "before");
+        Observe.Logs.info (text ~tag:"shutdown" "before");
         Lwt_main.run (Observe_lwt_unix.shutdown ());
-        Observe.Logs.info (Observe.Logs.text ~tag:"shutdown" "after");
+        Observe.Logs.info (text ~tag:"shutdown" "after");
         check
           (process_diagnostic_count Observe.Diagnostics.Console_rejected = 1)
           "post-shutdown output was not rejected")
@@ -297,8 +298,8 @@ let lifecycle_failure () =
 let basic_capture () =
   let capture =
     Lwt_main.run
-      (Observe_lwt_unix.Test.with_capture (config "capture") (fun capture ->
-           Observe.Logs.info (Observe.Logs.text ~tag:"captured" "message");
+      (Observe_lwt_unix.Test.with_capture_exn (config "capture") (fun capture ->
+           Observe.Logs.info (text ~tag:"captured" "message");
            Lwt.return capture))
   in
   check (capture_tags capture = [ "captured" ]) "capture missed the log"
@@ -306,15 +307,16 @@ let basic_capture () =
 let capture_then_init () =
   let capture =
     Lwt_main.run
-      (Observe_lwt_unix.Test.with_capture (config "before-init") (fun capture ->
-           Observe.Logs.info (Observe.Logs.text ~tag:"capture" "message");
+      (Observe_lwt_unix.Test.with_capture_exn (config "before-init")
+         (fun capture ->
+           Observe.Logs.info (text ~tag:"capture" "message");
            Lwt.return capture))
   in
   check (capture_tags capture = [ "capture" ]) "pre-init capture failed";
   let (), output =
     capture_stderr (fun () ->
         Observe_lwt_unix.init_exn (config "after-capture");
-        Observe.Logs.info (Observe.Logs.text ~tag:"production" "message"))
+        Observe.Logs.info (text ~tag:"production" "message"))
   in
   check
     (contains output " INFO [production] message\n")
@@ -324,11 +326,11 @@ let concurrent_capture () =
   let release, wake_release = Lwt.wait () in
   let entered = ref 0 in
   let run service tag =
-    Observe_lwt_unix.Test.with_capture (config service) (fun capture ->
+    Observe_lwt_unix.Test.with_capture_exn (config service) (fun capture ->
         incr entered;
         if !entered = 2 then Lwt.wakeup wake_release ();
         Lwt.bind release (fun () ->
-            Observe.Logs.info (Observe.Logs.text ~tag "message");
+            Observe.Logs.info (text ~tag "message");
             Lwt.return capture))
   in
   let left, right =
@@ -340,15 +342,15 @@ let concurrent_capture () =
 let nested_capture () =
   let outer, inner =
     Lwt_main.run
-      (Observe_lwt_unix.Test.with_capture (config "outer") (fun outer ->
-           Observe.Logs.info (Observe.Logs.text ~tag:"outer-before" "message");
+      (Observe_lwt_unix.Test.with_capture_exn (config "outer") (fun outer ->
+           Observe.Logs.info (text ~tag:"outer-before" "message");
            Lwt.bind
-             (Observe_lwt_unix.Test.with_capture (config "inner") (fun inner ->
-                  Observe.Logs.info (Observe.Logs.text ~tag:"inner" "message");
+             (Observe_lwt_unix.Test.with_capture_exn (config "inner")
+                (fun inner ->
+                  Observe.Logs.info (text ~tag:"inner" "message");
                   Lwt.return inner))
              (fun inner ->
-               Observe.Logs.info
-                 (Observe.Logs.text ~tag:"outer-after" "message");
+               Observe.Logs.info (text ~tag:"outer-after" "message");
                Lwt.return (outer, inner))))
   in
   check
@@ -360,19 +362,18 @@ let exception_restoration () =
   let inner = ref None in
   let outer =
     Lwt_main.run
-      (Observe_lwt_unix.Test.with_capture (config "outer-error") (fun outer ->
+      (Observe_lwt_unix.Test.with_capture_exn (config "outer-error")
+         (fun outer ->
            Lwt.catch
              (fun () ->
-               Observe_lwt_unix.Test.with_capture (config "inner-error")
+               Observe_lwt_unix.Test.with_capture_exn (config "inner-error")
                  (fun capture ->
                    inner := Some capture;
-                   Observe.Logs.info
-                     (Observe.Logs.text ~tag:"inner-error" "message");
+                   Observe.Logs.info (text ~tag:"inner-error" "message");
                    Lwt.fail Exit))
              (function
                | Exit ->
-                   Observe.Logs.info
-                     (Observe.Logs.text ~tag:"outer-restored" "message");
+                   Observe.Logs.info (text ~tag:"outer-restored" "message");
                    Lwt.return outer
                | exn -> Lwt.fail exn)))
   in
@@ -392,12 +393,11 @@ let cancellation () =
   let late = ref Lwt.return_unit in
   let pending, _ = Lwt.task () in
   let promise =
-    Observe_lwt_unix.Test.with_capture (config "cancel") (fun current ->
+    Observe_lwt_unix.Test.with_capture_exn (config "cancel") (fun current ->
         capture := Some current;
         late :=
           Lwt.bind trigger (fun () ->
-              Observe.Logs.info
-                (Observe.Logs.text ~tag:"cancelled-late" "message");
+              Observe.Logs.info (text ~tag:"cancelled-late" "message");
               Lwt.return_unit);
         pending)
   in
@@ -421,10 +421,10 @@ let late_callback () =
   let late = ref Lwt.return_unit in
   let capture =
     Lwt_main.run
-      (Observe_lwt_unix.Test.with_capture (config "late") (fun capture ->
+      (Observe_lwt_unix.Test.with_capture_exn (config "late") (fun capture ->
            late :=
              Lwt.bind trigger (fun () ->
-                 Observe.Logs.info (Observe.Logs.text ~tag:"late" "message");
+                 Observe.Logs.info (text ~tag:"late" "message");
                  Lwt.return_unit);
            Lwt.return capture))
   in
@@ -437,8 +437,8 @@ let late_callback () =
 
 let invalid_capacity () =
   let promise =
-    Observe_lwt_unix.Test.with_capture (config "invalid") ~capacity:0 (fun _ ->
-        Lwt.return_unit)
+    Observe_lwt_unix.Test.with_capture_exn (config "invalid") ~capacity:0
+      (fun _ -> Lwt.return_unit)
   in
   match Lwt_main.run promise with
   | exception Observe_lwt_unix.Test.Capture_error (Observe.Invalid_capacity 0)

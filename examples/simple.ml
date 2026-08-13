@@ -54,70 +54,69 @@ let config =
 let () = Observe_lwt_unix.init_exn config
 
 let main () =
-  Observe.Logs.debug
-    (Observe.Logs.text_lazy ~tag:"router" (fun () ->
-         "matched POST /api/checkout"));
-  Observe.Logs.info (Observe.Logs.text ~tag:"auth" "user logged in");
-  Observe.Logs.warn (Observe.Logs.text ~tag:"cache" "cache miss for user:42");
-  Observe.Logs.error (Observe.Logs.text ~tag:"payment" "payment webhook failed");
-  Observe.Logs.info
-    (Observe.Logs.free_lazy
-       [%observe.value
-         {
-           action = "request_finished";
-           request_id = "req_01JQ8Y7A6M";
-           route = "/api/checkout";
-           status = 200;
-           duration_ms = 12.8;
-           cached = false;
-         }]);
-  Observe.Logs.info
-    (Observe.Logs.structured event_t
-       (User_login
+  Observe.Logs.debug (fun m ->
+      m.text ~tag:"router" "matched POST /api/checkout");
+  Observe.Logs.info (fun m -> m.text ~tag:"auth" "user logged in");
+  Observe.Logs.warn (fun m -> m.text ~tag:"cache" "cache miss for user:42");
+  Observe.Logs.error (fun m -> m.text ~tag:"payment" "payment webhook failed");
+  Observe.Logs.info (fun m ->
+      m.untyped
+        [%observe.value
           {
-            user_id = 42;
-            method_ = Oauth { provider = "github" };
-            label = "Granted";
-            access = Granted;
-            environment = `Development;
-            roles = [ "admin"; "billing" ];
-            remembered = true;
-            device_id = Some "device_7f3a";
-          }));
-  Observe.Logs.warn
-    (Observe.Logs.structured event_t
-       (Checkout_processed
-          {
-            checkout_id = "chk_01JQ8Z2C3A";
-            customer_id = None;
-            items =
-              [
-                {
-                  sku = "ocaml-hoodie";
-                  quantity = 1;
-                  unit_price = { currency = "USD"; amount_minor = 8_900 };
-                };
-                {
-                  sku = "camel-sticker";
-                  quantity = 2;
-                  unit_price = { currency = "USD"; amount_minor = 500 };
-                };
-              ];
-            total = { currency = "USD"; amount_minor = 9_900 };
-            payment =
-              Declined
-                { code = "insufficient_funds"; message = "card was declined" };
-            latency_ms = 38.7;
-          }));
-  Observe.Logs.error
-    (Observe.Logs.structured event_t
-       (Sync_failed
-          {
-            source = `Postgres;
-            target = `S3;
-            attempts = 3;
-            error = "connection timed out";
-          }));
+            action = "request_finished";
+            request_id = "req_01JQ8Y7A6M";
+            route = "/api/checkout";
+            status = 200;
+            duration_ms = 12.8;
+            cached = false;
+          }]);
+  Observe.Logs.info (fun m ->
+      m.typed event_t
+        (User_login
+           {
+             user_id = 42;
+             method_ = Oauth { provider = "github" };
+             label = "Granted";
+             access = Granted;
+             environment = `Development;
+             roles = [ "admin"; "billing" ];
+             remembered = true;
+             device_id = Some "device_7f3a";
+           }));
+  Observe.Logs.warn (fun m ->
+      m.typed event_t
+        (Checkout_processed
+           {
+             checkout_id = "chk_01JQ8Z2C3A";
+             customer_id = None;
+             items =
+               [
+                 {
+                   sku = "ocaml-hoodie";
+                   quantity = 1;
+                   unit_price = { currency = "USD"; amount_minor = 8_900 };
+                 };
+                 {
+                   sku = "camel-sticker";
+                   quantity = 2;
+                   unit_price = { currency = "USD"; amount_minor = 500 };
+                 };
+               ];
+             total = { currency = "USD"; amount_minor = 9_900 };
+             payment =
+               Declined
+                 { code = "insufficient_funds"; message = "card was declined" };
+             latency_ms = 38.7;
+           }));
+  Observe.Logs.error (fun m ->
+      m.typed event_t
+        (Sync_failed
+           {
+             source = `Postgres;
+             target = `S3;
+             attempts = 3;
+             error = "connection timed out";
+           }));
   Lwt.return_unit
 
 let () = Lwt_main.run (Lwt.finalize main Observe_lwt_unix.shutdown)

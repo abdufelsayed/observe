@@ -258,7 +258,7 @@ let test_asynchronous_drain_failure_diagnostic () =
   let count () =
     List.fold_left
       (fun total (entry : Observe.Diagnostics.entry) ->
-        if entry.kind = Observe.Diagnostics.Drain_failed then
+        if entry.kind = Observe.Diagnostics.Drain_delivery_failed then
           total + entry.count
         else total)
       0

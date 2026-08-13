@@ -8,7 +8,7 @@ let install drain =
     Observe_lwt.create
       ~clock:(fun () -> Ok (Observe.Timestamp.of_unix_ns 0L))
       ~console_style:(fun () -> Observe.Formatter.Plain)
-      ~write_console:(fun _ -> Observe.IO.Rejected)
+      ~offer_console:(fun _ -> Observe.IO.Rejected)
       ~can_lookup_context:(fun () -> true)
       ()
   in
@@ -19,10 +19,10 @@ let install drain =
 
 let cancellation () =
   Observe_fs_test_support.Fs_fixture.reset ();
-  let writer = Lwt_main.run (Writer.create ~path:"/logs" ()) |> Result.get_ok in
+  let writer = Lwt_main.run (Writer.create ~dir:"/logs" ()) |> Result.get_ok in
   install (Writer.drain writer);
   let release = Observe_fs_test_support.Fs_fixture.block_writes () in
-  Observe.Logs.info (Observe.Logs.text ~tag:"lwt" "survives cancellation");
+  Observe.Logs.info (fun m -> m.text ~tag:"lwt" "survives cancellation");
   Lwt_main.run (Lwt.pause ());
   let waiting = Writer.flush writer in
   Lwt.cancel waiting;

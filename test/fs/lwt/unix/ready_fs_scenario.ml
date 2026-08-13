@@ -1,5 +1,8 @@
 module Observer = Observe.Make (Observe_lwt.IO)
 
+let text ~tag message (builder : Observe.Logs.builder) =
+  builder.text ~tag "%s" message
+
 let fail format = Format.kasprintf failwith format
 
 let check condition format =
@@ -69,7 +72,7 @@ let install timestamps drain =
   let io =
     Observe_lwt.create ~clock
       ~console_style:(fun () -> Observe.Formatter.Plain)
-      ~write_console:(fun _ -> Observe.IO.Rejected)
+      ~offer_console:(fun _ -> Observe.IO.Rejected)
       ~can_lookup_context:(fun () -> true)
       ()
   in
@@ -86,9 +89,9 @@ let daily () =
       let output = open_out_bin existing in
       output_string output "{\"existing\":true}\n";
       close_out output;
-      let drain = Lwt_main.run (Observe_fs_lwt_unix.create_exn ~path:logs ()) in
+      let drain = Lwt_main.run (Observe_fs_lwt_unix.create_exn ~dir:logs ()) in
       install [ 0L; 86_400_000_000_000L; 1L ] drain;
-      Observe.Logs.info (Observe.Logs.text ~tag:"epoch" "first");
+      Observe.Logs.info (text ~tag:"epoch" "first");
       Lwt_main.run (Observe_lwt_unix.flush ());
       check
         (read_file existing
@@ -96,8 +99,8 @@ let daily () =
         |> List.exists (fun line -> json_string_field "tag" line = Some "epoch")
         )
         "ready flush did not include filesystem output";
-      Observe.Logs.warn (Observe.Logs.text ~tag:"tomorrow" "second");
-      Observe.Logs.error (Observe.Logs.text ~tag:"back" "third");
+      Observe.Logs.warn (text ~tag:"tomorrow" "second");
+      Observe.Logs.error (text ~tag:"back" "third");
       Lwt_main.run (Observe_lwt_unix.shutdown ());
       let first = read_file existing in
       let second = read_file (Filename.concat logs "1970-01-02.jsonl") in
@@ -119,9 +122,9 @@ let daily () =
 let recursive_directory () =
   with_directory (fun root ->
       let logs = Filename.concat root "a/b/c" in
-      let drain = Lwt_main.run (Observe_fs_lwt_unix.create_exn ~path:logs ()) in
+      let drain = Lwt_main.run (Observe_fs_lwt_unix.create_exn ~dir:logs ()) in
       install [ 0L ] drain;
-      Observe.Logs.info (Observe.Logs.text ~tag:"recursive" "created");
+      Observe.Logs.info (text ~tag:"recursive" "created");
       Lwt_main.run (Observe_lwt_unix.shutdown ());
       check (Sys.is_directory logs) "nested log directory was not created";
       check
@@ -133,7 +136,7 @@ let invalid_target () =
       let target = Filename.concat root "file" in
       let output = open_out_bin target in
       close_out output;
-      match Lwt_main.run (Observe_fs_lwt_unix.create ~path:target ()) with
+      match Lwt_main.run (Observe_fs_lwt_unix.create ~dir:target ()) with
       | Error (Observe_fs_lwt_unix.Filesystem { cause = Unix.ENOTDIR; _ }) -> ()
       | Error error ->
           fail "unexpected setup error: %a" Observe_fs_lwt_unix.pp_error error
@@ -142,7 +145,7 @@ let invalid_target () =
 let lifecycle_closed () =
   Lwt_main.run (Observe_lwt_unix.shutdown ());
   with_directory (fun root ->
-      (match Lwt_main.run (Observe_fs_lwt_unix.create ~path:root ()) with
+      (match Lwt_main.run (Observe_fs_lwt_unix.create ~dir:root ()) with
       | Error Observe_fs_lwt_unix.Lifecycle_closed -> ()
       | Error error ->
           fail "unexpected lifecycle error: %a" Observe_fs_lwt_unix.pp_error
@@ -154,7 +157,7 @@ let lifecycle_closed () =
 
 let concurrency () =
   with_directory (fun root ->
-      let drain = Lwt_main.run (Observe_fs_lwt_unix.create_exn ~path:root ()) in
+      let drain = Lwt_main.run (Observe_fs_lwt_unix.create_exn ~dir:root ()) in
       Observe_lwt_unix.init_exn
         (Observe.Config.create_exn ~service:"fs-concurrency"
            ~console:Observe.Config.Silent ~drains:[ drain ] ());
@@ -166,7 +169,7 @@ let concurrency () =
               (fun () ->
                 for record = 1 to records_per_producer do
                   Observe.Logs.info
-                    (Observe.Logs.text ~tag:"concurrency"
+                    (text ~tag:"concurrency"
                        (Format.sprintf "%d:%d" producer record))
                 done)
               ())

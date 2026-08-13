@@ -1,1 +1,1 @@
-let _ = Observe.Logs.info (Observe.Logs.text "missing required tag")
+let _ = Observe.Logs.info (fun m -> m.text "missing required tag")

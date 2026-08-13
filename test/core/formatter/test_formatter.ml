@@ -45,6 +45,11 @@ let capture_one level message =
   | Error (Observe.Invalid_capacity capacity) ->
       Alcotest.failf "unexpected invalid capacity: %d" capacity
 
+let untyped make (builder : Observe.Logs.builder) = builder.untyped (make ())
+
+let typed description value (builder : Observe.Logs.builder) =
+  builder.typed description value
+
 let format_pretty style log =
   match Observe.Formatter.format (Observe.Formatter.pretty style) log with
   | Ok output -> output
@@ -56,15 +61,15 @@ let ansi_16 log = format_pretty Observe.Formatter.Ansi_16 log
 let test_compact_information_text () =
   timestamp := Observe.Timestamp.of_unix_ns 37_425_612_000_000L;
   let log =
-    capture_one Observe.Level.Info
-      (Observe.Logs.text ~tag:"startup" "service ready")
+    capture_one Observe.Level.Info (fun m ->
+        m.text ~tag:"startup" "service %s (%d)" "ready" 2)
   in
   Alcotest.(check string)
-    "compact information text" "10:23:45.612 INFO [startup] service ready"
+    "compact information text" "10:23:45.612 INFO [startup] service ready (2)"
     (pretty log)
 
 let check_text_level level expected =
-  let log = capture_one level (Observe.Logs.text ~tag:"tag" "message") in
+  let log = capture_one level (Test_io.text ~tag:"tag" "message") in
   Alcotest.(check string) "level" expected (pretty log)
 
 let test_visible_text_levels () =
@@ -77,7 +82,7 @@ let test_visible_text_levels () =
 let check_timestamp nanoseconds expected =
   timestamp := Observe.Timestamp.of_unix_ns nanoseconds;
   let log =
-    capture_one Observe.Level.Info (Observe.Logs.text ~tag:"time" "message")
+    capture_one Observe.Level.Info (Test_io.text ~tag:"time" "message")
   in
   Alcotest.(check string)
     "timestamp"
@@ -94,18 +99,18 @@ let test_text_control_escaping () =
   timestamp := Observe.Timestamp.of_unix_ns 0L;
   let log =
     capture_one Observe.Level.Warn
-      (Observe.Logs.text ~tag:"bad\ntag" "line one\r\nline two\027[31m")
+      (Test_io.text ~tag:"bad\ntag" "line one\r\nline two\027[31m")
   in
   Alcotest.(check string)
     "controls escaped"
     "00:00:00.000 WARN [bad\\ntag] line one\\r\\nline two\\u001b[31m"
     (pretty log)
 
-let test_free_form_tree () =
+let test_untyped_tree () =
   timestamp := Observe.Timestamp.of_unix_ns 37_425_612_000_000L;
   let log =
     capture_one Observe.Level.Info
-      (Observe.Logs.free_lazy (fun () ->
+      (untyped (fun () ->
            Observe.Value.object_
              [
                ("action", Observe.Value.string "user_login");
@@ -113,7 +118,7 @@ let test_free_form_tree () =
              ]))
   in
   Alcotest.(check string)
-    "free-form tree"
+    "untyped tree"
     "10:23:45.612 INFO [example]\n  ├─ action: \"user_login\"\n  └─ user_id: 42"
     (pretty log)
 
@@ -121,8 +126,7 @@ let test_typed_variant_tree () =
   timestamp := Observe.Timestamp.of_unix_ns 37_425_612_000_000L;
   let log =
     capture_one Observe.Level.Info
-      (Observe.Logs.structured event_t
-         (User_login { user_id = 42; method_ = "oauth" }))
+      (typed event_t (User_login { user_id = 42; method_ = "oauth" }))
   in
   Alcotest.(check string)
     "typed variant tree"
@@ -136,7 +140,7 @@ let test_mixed_typed_structure () =
   timestamp := Observe.Timestamp.of_unix_ns 37_425_612_000_000L;
   let log =
     capture_one Observe.Level.Info
-      (Observe.Logs.structured rich_event_t
+      (typed rich_event_t
          (Session_started
             {
               user_id = 42;
@@ -167,8 +171,7 @@ let test_recursive_typed_structure () =
   timestamp := Observe.Timestamp.of_unix_ns 37_425_612_000_000L;
   let log =
     capture_one Observe.Level.Info
-      (Observe.Logs.structured tree_t
-         (Branch [ Leaf "one"; Branch [ Leaf "two" ] ]))
+      (typed tree_t (Branch [ Leaf "one"; Branch [ Leaf "two" ] ]))
   in
   Alcotest.(check string)
     "recursive typed structure"
@@ -187,7 +190,7 @@ let test_nested_values_and_strings () =
   let object_ fields = Observe.Value.object_ fields in
   let log =
     capture_one Observe.Level.Info
-      (Observe.Logs.free_lazy (fun () ->
+      (untyped (fun () ->
            object_
              [
                ("empty", Observe.Value.string "");
@@ -236,7 +239,7 @@ let test_unambiguous_literals () =
   timestamp := Observe.Timestamp.of_unix_ns 37_425_612_000_000L;
   let log =
     capture_one Observe.Level.Info
-      (Observe.Logs.free_lazy (fun () ->
+      (untyped (fun () ->
            Observe.Value.object_
              [
                ("ratio", Observe.Value.float 0.1);
@@ -259,9 +262,7 @@ let test_manual_variant_control_escaping () =
   let description =
     Observe.Type.enum "unsafe_variant" [ ("Bad\027[31mName", Unsafe) ]
   in
-  let log =
-    capture_one Observe.Level.Info (Observe.Logs.structured description Unsafe)
-  in
+  let log = capture_one Observe.Level.Info (typed description Unsafe) in
   Alcotest.(check string)
     "manual variant is console safe"
     "10:23:45.612 INFO [example]\n  └─ Bad\\u001b[31mName" (pretty log)
@@ -270,7 +271,7 @@ let test_empty_root_structure () =
   timestamp := Observe.Timestamp.of_unix_ns 37_425_612_000_000L;
   let log =
     capture_one Observe.Level.Info
-      (Observe.Logs.free_lazy (fun () -> Observe.Value.object_ []))
+      (untyped (fun () -> Observe.Value.object_ []))
   in
   Alcotest.(check string)
     "empty root object" "10:23:45.612 INFO [example]\n  └─ {}" (pretty log)
@@ -278,9 +279,7 @@ let test_empty_root_structure () =
 let test_direct_container_presentations () =
   timestamp := Observe.Timestamp.of_unix_ns 37_425_612_000_000L;
   let check name description value expected =
-    let log =
-      capture_one Observe.Level.Info (Observe.Logs.structured description value)
-    in
+    let log = capture_one Observe.Level.Info (typed description value) in
     Alcotest.(check string) name expected (pretty log)
   in
   check "sequence preserves polymorphic variants"
@@ -307,9 +306,7 @@ let test_direct_container_presentations () =
 let test_explicit_repr_compatibility () =
   timestamp := Observe.Timestamp.of_unix_ns 37_425_612_000_000L;
   let opaque = Observe.Type.of_repr (Observe.Type.repr deployment_t) in
-  let log =
-    capture_one Observe.Level.Info (Observe.Logs.structured opaque `Development)
-  in
+  let log = capture_one Observe.Level.Info (typed opaque `Development) in
   Alcotest.(check string)
     "opaque Repr projection exposes only its JSON meaning"
     "10:23:45.612 INFO [example]\n  └─ \"Development\"" (pretty log)
@@ -317,7 +314,7 @@ let test_explicit_repr_compatibility () =
 let test_ansi_16_text () =
   timestamp := Observe.Timestamp.of_unix_ns 37_425_612_000_000L;
   let check level tag message expected =
-    let log = capture_one level (Observe.Logs.text ~tag message) in
+    let log = capture_one level (Test_io.text ~tag message) in
     Alcotest.(check string) "ANSI 16 text level" expected (ansi_16 log)
   in
   check Observe.Level.Debug "router" "matched route"
@@ -336,8 +333,7 @@ let test_ansi_16_text () =
 let test_color_depths () =
   timestamp := Observe.Timestamp.of_unix_ns 37_425_612_000_000L;
   let log =
-    capture_one Observe.Level.Info
-      (Observe.Logs.text ~tag:"auth" "user logged in")
+    capture_one Observe.Level.Info (Test_io.text ~tag:"auth" "user logged in")
   in
   Alcotest.(check string)
     "ANSI 256"
@@ -355,7 +351,7 @@ let test_ansi_16_structure () =
   timestamp := Observe.Timestamp.of_unix_ns 37_425_612_000_000L;
   let log =
     capture_one Observe.Level.Info
-      (Observe.Logs.free_lazy (fun () ->
+      (untyped (fun () ->
            Observe.Value.object_
              [
                ("action", Observe.Value.string "user_login");
@@ -376,8 +372,7 @@ let test_ansi_16_typed_structure () =
   timestamp := Observe.Timestamp.of_unix_ns 37_425_612_000_000L;
   let log =
     capture_one Observe.Level.Info
-      (Observe.Logs.structured event_t
-         (User_login { user_id = 42; method_ = "oauth" }))
+      (typed event_t (User_login { user_id = 42; method_ = "oauth" }))
   in
   Alcotest.(check string)
     "constructor and fields"
@@ -401,12 +396,11 @@ let check_formatter_error expected log =
 let test_projection_failures () =
   timestamp := Observe.Timestamp.of_unix_ns 0L;
   let invalid_utf8 =
-    capture_one Observe.Level.Info (Observe.Logs.text ~tag:"invalid" "\255")
+    capture_one Observe.Level.Info (Test_io.text ~tag:"invalid" "\255")
   in
   check_formatter_error Observe.Formatter.Invalid_utf8 invalid_utf8;
   let invalid_typed_utf8 =
-    capture_one Observe.Level.Info
-      (Observe.Logs.structured Observe.Type.string "\255")
+    capture_one Observe.Level.Info (typed Observe.Type.string "\255")
   in
   check_formatter_error Observe.Formatter.Invalid_utf8 invalid_typed_utf8;
   Alcotest.(check bool)
@@ -417,8 +411,7 @@ let test_projection_failures () =
     | Ok encoded -> String.length encoded > 0
     | Error _ -> false);
   let non_finite =
-    capture_one Observe.Level.Info
-      (Observe.Logs.free_lazy (fun () -> Observe.Value.float nan))
+    capture_one Observe.Level.Info (untyped (fun () -> Observe.Value.float nan))
   in
   check_formatter_error Observe.Formatter.Non_finite_float non_finite;
   let unsupported_repr =
@@ -427,9 +420,7 @@ let test_projection_failures () =
       ~compare:Structural ~short_hash:Structural ~pre_hash:Structural Repr.int
   in
   let unsupported = Observe.Type.of_repr unsupported_repr in
-  let unsupported =
-    capture_one Observe.Level.Info (Observe.Logs.structured unsupported 1)
-  in
+  let unsupported = capture_one Observe.Level.Info (typed unsupported 1) in
   Alcotest.(check bool)
     "unsupported Repr JSON" true
     (Observe.Formatter.format Observe.Formatter.json unsupported
@@ -450,7 +441,7 @@ let () =
         ] );
       ( "pretty structure",
         [
-          Alcotest.test_case "free-form tree" `Quick test_free_form_tree;
+          Alcotest.test_case "untyped tree" `Quick test_untyped_tree;
           Alcotest.test_case "typed variant tree" `Quick test_typed_variant_tree;
           Alcotest.test_case "mixed typed structure" `Quick
             test_mixed_typed_structure;

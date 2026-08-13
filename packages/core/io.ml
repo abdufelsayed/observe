@@ -20,6 +20,6 @@ module type S = sig
 
   module Console : sig
     val style : state -> Formatter.style
-    val write : state -> string -> console_acceptance
+    val offer : state -> string -> console_acceptance
   end
 end

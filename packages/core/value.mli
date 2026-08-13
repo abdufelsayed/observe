@@ -1,4 +1,4 @@
-(** Immutable free-form structured values. *)
+(** Immutable untyped structured values. *)
 
 type t =
   | Null

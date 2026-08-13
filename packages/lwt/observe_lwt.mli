@@ -10,7 +10,7 @@ type t
 val create :
   clock:(unit -> (Observe.Timestamp.t, Observe.IO.clock_error) result) ->
   console_style:(unit -> Observe.Formatter.style) ->
-  write_console:(string -> Observe.IO.console_acceptance) ->
+  offer_console:(string -> Observe.IO.console_acceptance) ->
   can_lookup_context:(unit -> bool) ->
   unit ->
   t

@@ -8,8 +8,8 @@ val create : capacity:int -> t
 (** [create ~capacity] creates an open capture. [capacity] must be positive. *)
 
 val logs : t -> Log.t list
-(** Return retained entries in accepted order. Typed payload values are retained
-    by reference, not deeply copied. *)
+(** Return retained logs in accepted order. Typed values are retained by
+    reference, not deeply copied. *)
 
 val diagnostics : t -> Diagnostics.entry list
 val close : t -> unit

@@ -38,21 +38,21 @@ let pretty_with_line_feed line_feed style =
   create (fun log ->
       try
         let renderer =
-          match Log.payload log with
+          match Log.body log with
           | Text _ -> Pretty.create ~capacity:128 style
-          | Free _ | Structured _ ->
+          | Untyped _ | Typed _ ->
               Pretty.create ~capacity:(pretty_capacity style) style
         in
-        (match Log.payload log with
+        (match Log.body log with
         | Text { tag; message } ->
             add_header renderer ~scope:tag log;
             Pretty.space renderer;
             Pretty.text renderer message
-        | Free value ->
+        | Untyped value ->
             add_header renderer ~scope:(Log.service log) log;
             Pretty.newline renderer;
             Value.append_pretty renderer Pretty.Root value
-        | Structured (description, value) ->
+        | Typed (description, value) ->
             add_header renderer ~scope:(Log.service log) log;
             Pretty.newline renderer;
             Type.pretty description renderer Pretty.Root value);
@@ -72,16 +72,16 @@ let append_value buffer value =
   | Error Value.Non_finite_float -> raise (Json_failure Non_finite_float)
   | Error Value.Unsupported_value -> raise (Json_failure Unsupported_value)
 
-let append_payload_json buffer log =
-  match Log.payload log with
+let append_body_json buffer log =
+  match Log.body log with
   | Text { tag; message } ->
       Buffer.add_string buffer "{\"kind\":\"text\",\"tag\":";
       Json_writer.string buffer tag;
       Buffer.add_string buffer ",\"message\":";
       Json_writer.string buffer message;
       Buffer.add_char buffer '}'
-  | Free value -> append_value buffer value
-  | Structured (description, value) -> Type.append_json buffer description value
+  | Untyped value -> append_value buffer value
+  | Typed (description, value) -> Type.append_json buffer description value
 
 let encode_json ~line_feed log =
   try
@@ -102,8 +102,8 @@ let encode_json ~line_feed log =
     Json_writer.decimal_int64 buffer (Timestamp.to_unix_ns (Log.timestamp log));
     Buffer.add_string buffer "\",\"level\":\"";
     Buffer.add_string buffer (Level.to_string (Log.level log));
-    Buffer.add_string buffer "\",\"payload\":";
-    append_payload_json buffer log;
+    Buffer.add_string buffer "\",\"body\":";
+    append_body_json buffer log;
     Buffer.add_char buffer '}';
     if line_feed then Buffer.add_char buffer '\n';
     Ok (Buffer.contents buffer)

@@ -22,7 +22,7 @@ module IO = struct
 
   module Console = struct
     let style () = Observe.Formatter.Plain
-    let write () _ = Observe.IO.Accepted
+    let offer () _ = Observe.IO.Accepted
   end
 end
 
@@ -30,8 +30,8 @@ module Observer = Observe.Make (IO)
 
 let config = Observe.Config.create_exn ~service:"consumer" ()
 let observer = Observer.create ()
-let text = Observe.Logs.text ~tag:"consumer" "message"
-let free = Observe.Logs.free (Observe.Value.int 1)
-let structured = Observe.Logs.structured Observe.Type.int 1
+let text = fun (m : Observe.Logs.builder) -> m.text ~tag:"consumer" "message"
+let untyped = fun (m : Observe.Logs.builder) -> m.untyped (Observe.Value.int 1)
+let typed = fun (m : Observe.Logs.builder) -> m.typed Observe.Type.int 1
 let pretty = Observe.Formatter.pretty Observe.Formatter.Plain
-let _ = (config, observer, text, free, structured, pretty)
+let _ = (config, observer, text, untyped, typed, pretty)

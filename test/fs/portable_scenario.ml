@@ -52,7 +52,7 @@ let install ?(extra_drains = []) timestamps drain =
   let io =
     Observe_lwt.create ~clock
       ~console_style:(fun () -> Observe.Formatter.Plain)
-      ~write_console:(fun _ -> Observe.IO.Rejected)
+      ~offer_console:(fun _ -> Observe.IO.Rejected)
       ~can_lookup_context:(fun () -> true)
       ()
   in
@@ -65,11 +65,11 @@ let install ?(extra_drains = []) timestamps drain =
 
 let create ?capacity () =
   Observe_fs_test_support.Fs_fixture.reset ();
-  match Lwt_main.run (Writer.create ~path:"/logs" ?capacity ()) with
+  match Lwt_main.run (Writer.create ~dir:"/logs" ?capacity ()) with
   | Ok writer -> writer
   | Error error -> fail "create failed: %a" Writer.pp_error error
 
-let emit tag message = Observe.Logs.info (Observe.Logs.text ~tag message)
+let emit tag message = Observe.Logs.info (fun m -> m.text ~tag "%s" message)
 
 let daily () =
   let writer = create () in
@@ -100,7 +100,7 @@ let append_and_partial () =
   Observe_fs_test_support.Fs_fixture.seed "/logs/1970-01-01.jsonl"
     "{\"existing\":true}\n";
   Observe_fs_test_support.Fs_fixture.set_max_write 3;
-  let writer = Lwt_main.run (Writer.create ~path:"/logs" ()) |> Result.get_ok in
+  let writer = Lwt_main.run (Writer.create ~dir:"/logs" ()) |> Result.get_ok in
   install [ 0L ] (Writer.drain writer);
   emit "partial" "complete me";
   Lwt_main.run (Writer.shutdown writer) |> Result.get_ok;
@@ -125,7 +125,7 @@ let mutation () =
   let writer = create () in
   install [ 0L ] (Writer.drain writer);
   let sample = { value = "before" } in
-  Observe.Logs.info (Observe.Logs.structured sample_t sample);
+  Observe.Logs.info (fun m -> m.typed sample_t sample);
   sample.value <- "after";
   Lwt_main.run (Writer.shutdown writer) |> Result.get_ok;
   let output =
@@ -149,15 +149,14 @@ let projection () =
   in
   install ~extra_drains:[ witness ] [ 0L; 1L; 2L ] (Writer.drain writer);
   emit "text" "text payload";
-  Observe.Logs.info
-    (Observe.Logs.free
-       (Observe.Value.object_
-          [
-            ("action", Observe.Value.string "free");
-            ("count", Observe.Value.int 2);
-          ]));
-  Observe.Logs.info
-    (Observe.Logs.structured sample_t { value = "typed payload" });
+  Observe.Logs.info (fun m ->
+      m.untyped
+        (Observe.Value.object_
+           [
+             ("action", Observe.Value.string "untyped");
+             ("count", Observe.Value.int 2);
+           ]));
+  Observe.Logs.info (fun m -> m.typed sample_t { value = "typed payload" });
   Lwt_main.run (Writer.shutdown writer) |> Result.get_ok;
   let actual =
     Observe_fs_test_support.Fs_fixture.contents "/logs/1970-01-01.jsonl"
@@ -280,14 +279,17 @@ let failure () =
         Observe.Drain.Accepted)
   in
   install ~extra_drains:[ independent_drain ] [ 0L; 1L ] (Writer.drain writer);
-  let failed_before = diagnostic_count Observe.Diagnostics.Drain_failed in
+  let failed_before =
+    diagnostic_count Observe.Diagnostics.Drain_delivery_failed
+  in
   let rejected_before = diagnostic_count Observe.Diagnostics.Drain_rejected in
   Observe_fs_test_support.Fs_fixture.fail_next_write ();
   emit "failure" "fail";
   let outcome = Lwt_main.run (Writer.flush writer) in
   check (Result.is_error outcome) "write failure did not fail flush";
   check
-    (diagnostic_count Observe.Diagnostics.Drain_failed = failed_before + 1)
+    (diagnostic_count Observe.Diagnostics.Drain_delivery_failed
+    = failed_before + 1)
     "asynchronous failure was not diagnosed exactly once";
   emit "later" "reject";
   check

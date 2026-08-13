@@ -62,7 +62,7 @@ let capture_conservation work capacity =
                 (fun () ->
                   await_start ();
                   Observe.Logs.debug
-                    (Observe.Logs.text ~tag:"race" (string_of_int index)))
+                    (Test_io.text ~tag:"race" (string_of_int index)))
                 ())
         in
         Array.iter Thread.join threads;
@@ -88,7 +88,7 @@ let diagnostic_counting work =
   let console_calls = Atomic.make 0 in
   let host =
     Test_io.Host.create
-      ~write_console:(fun _ ->
+      ~offer_console:(fun _ ->
         ignore (Atomic.fetch_and_add console_calls 1 : int);
         Observe.IO.Rejected)
       ()
@@ -104,7 +104,7 @@ let diagnostic_counting work =
           (fun () ->
             await_start ();
             Observe.Logs.info
-              (Observe.Logs.text ~tag:"diagnostic" (string_of_int index)))
+              (Test_io.text ~tag:"diagnostic" (string_of_int index)))
           ())
   in
   Array.iter Thread.join threads;

@@ -2,18 +2,18 @@
 
 type kind =
   | Not_initialized
-  | No_output
-  | Scope_raised
+  | No_delivery_target
+  | Capture_lookup_raised
   | Clock_unavailable
   | Clock_raised
-  | Authoring_raised
+  | Message_evaluation_raised
   | Formatting_failed
   | Formatting_raised
   | Console_rejected
   | Console_raised
   | Drain_rejected
   | Drain_raised
-  | Drain_failed
+  | Drain_delivery_failed
   | Capture_overflow
   | Capture_closed
 

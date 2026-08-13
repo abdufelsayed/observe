@@ -14,7 +14,7 @@
    (run %{exe:observer_scenario.exe} repeated-install)
    (run %{exe:observer_scenario.exe} io-owner-conflict)
    (run %{exe:observer_scenario.exe} invalid-capacity)
-   (run %{exe:observer_scenario.exe} threshold-and-laziness)
+   (run %{exe:observer_scenario.exe} threshold-and-authoring)
    (run %{exe:observer_scenario.exe} clock-unavailable)
    (run %{exe:observer_scenario.exe} scope-raised)
    (run %{exe:observer_scenario.exe} formatting-failed)

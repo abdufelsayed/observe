@@ -10,33 +10,34 @@ let contains value fragment =
   in
   fragment_length = 0 || loop 0
 
-let test_namespaced_value_is_deferred () =
+let test_namespaced_value_respects_admission () =
   let forces = ref 0 in
-  let value =
-    [%observe.value
-      {
-        action = "user_login";
-        active = true;
-        attempts = [ 1; 2; 3 ];
-        method_ = Some "oauth";
-        previous = None;
-        nested = { source = "web"; score = 1.5 };
-        user_id =
-          [%observe.value.embed
-            Observe.Type.int,
-            (incr forces;
-             42)];
-      }]
+  let author (m : Observe.Logs.builder) =
+    m.untyped
+      [%observe.value
+        {
+          action = "user_login";
+          active = true;
+          attempts = [ 1; 2; 3 ];
+          method_ = Some "oauth";
+          previous = None;
+          nested = { source = "web"; score = 1.5 };
+          user_id =
+            [%observe.value.embed
+              Observe.Type.int,
+              (incr forces;
+               42)];
+        }]
   in
-  Alcotest.(check int) "extension constructs only a thunk" 0 !forces;
+  Alcotest.(check int) "author has not run" 0 !forces;
   let observer = Observer.create (Test_io.Host.create ()) in
   let config = Test_io.config ~min_level:Observe.Level.Info "ppx-value" in
   let capture =
     match
       Observer.with_capture observer config (fun capture ->
-          Observe.Logs.debug (Observe.Logs.free_lazy value);
+          Observe.Logs.debug author;
           Alcotest.(check int) "filtered value remains deferred" 0 !forces;
-          Observe.Logs.info (Observe.Logs.free_lazy value);
+          Observe.Logs.info author;
           Test_io.Direct.return capture)
     with
     | Ok capture -> capture
@@ -55,7 +56,7 @@ let test_namespaced_value_is_deferred () =
   in
   Alcotest.(check bool)
     "semantic object shape" true
-    (contains json "\"payload\":{\"action\":\"user_login\""
+    (contains json "\"body\":{\"action\":\"user_login\""
     && contains json "\"user_id\":42"
     && contains json "\"attempts\":[1,2,3]")
 
@@ -64,7 +65,7 @@ let () =
     [
       ( "behavior:observe:ppx-value",
         [
-          Alcotest.test_case "namespaced deferred object" `Quick
-            test_namespaced_value_is_deferred;
+          Alcotest.test_case "namespaced admitted object" `Quick
+            test_namespaced_value_respects_admission;
         ] );
     ]

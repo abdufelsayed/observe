@@ -5,8 +5,6 @@ open Generated_ast
 let econstruct ~loc name argument =
   pexp_construct ~loc (lident ~loc name) argument
 
-let punit ~loc = ppat_construct ~loc (lident ~loc "()") None
-
 let rec elist ~loc = function
   | [] -> econstruct ~loc "[]" None
   | head :: tail ->
@@ -61,7 +59,7 @@ let rec value_expression expression =
       in
       eapply ~loc "Observe.Value.object_" [ (Nolabel, elist ~loc fields) ]
   | Pexp_record (_, Some _) ->
-      value_error ~loc "record updates are not valid free-form objects"
+      value_error ~loc "record updates are not valid untyped objects"
   | Pexp_extension ({ txt = "observe.value.embed"; _ }, payload) ->
       value_embed ~loc payload
   | _ ->
@@ -103,8 +101,7 @@ and value_embed ~loc payload =
   | _ ->
       value_error ~loc "expected [%%observe.value.embed (description, value)]"
 
-let expand_value ~loc ~path:_ expression =
-  pexp_fun ~loc Nolabel None (punit ~loc) (value_expression expression)
+let expand_value ~loc:_ ~path:_ expression = value_expression expression
 
 let value_extension =
   Extension.declare "observe.value" Extension.Context.expression

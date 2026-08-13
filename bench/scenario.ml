@@ -115,7 +115,7 @@ let fs_lwt_unix_operation ~batch_size make_message =
   let directory = temporary_directory () in
   try
     let drain =
-      Lwt_main.run (Observe_fs_lwt_unix.create_exn ~path:directory ())
+      Lwt_main.run (Observe_fs_lwt_unix.create_exn ~dir:directory ())
     in
     Observe_lwt_unix.init_exn
       (config ~console:Observe.Config.Silent ~drains:[ drain ] ());
@@ -140,21 +140,29 @@ let fs_lwt_unix_operation ~batch_size make_message =
 let make ?(logical_operations = 1) ~name ~suite ~boundary ~payload prepare =
   { name; suite; boundary; payload; logical_operations; prepare }
 
-let text () = Observe.Logs.text ~tag:"auth" "user logged in"
-let lazy_text () = Observe.Logs.text_lazy ~tag:"auth" (fun () -> "ignored")
-let free_small () = Observe.Logs.free_lazy Payload.small_free
-let typed_small () = Observe.Logs.structured Payload.small_t Payload.small
-let free_nested () = Observe.Logs.free_lazy Payload.nested_free
-let typed_nested () = Observe.Logs.structured Payload.nested_t Payload.nested
+let text () (m : Observe.Logs.builder) = m.text ~tag:"auth" "user logged in"
+let filtered_text () (m : Observe.Logs.builder) = m.text ~tag:"auth" "ignored"
+
+let untyped_small () (m : Observe.Logs.builder) =
+  m.untyped (Payload.small_untyped ())
+
+let typed_small () (m : Observe.Logs.builder) =
+  m.typed Payload.small_t Payload.small
+
+let untyped_nested () (m : Observe.Logs.builder) =
+  m.untyped (Payload.nested_untyped ())
+
+let typed_nested () (m : Observe.Logs.builder) =
+  m.typed Payload.nested_t Payload.nested
 
 let component_scenarios =
   [
-    make ~name:"component/free-build/small" ~suite:Component
-      ~boundary:"free-build" ~payload:"small" (fun () ->
-        prepared (fun () -> consume (Payload.small_free ())));
-    make ~name:"component/free-build/nested" ~suite:Component
-      ~boundary:"free-build" ~payload:"nested" (fun () ->
-        prepared (fun () -> consume (Payload.nested_free ())));
+    make ~name:"component/untyped-build/small" ~suite:Component
+      ~boundary:"untyped-build" ~payload:"small" (fun () ->
+        prepared (fun () -> consume (Payload.small_untyped ())));
+    make ~name:"component/untyped-build/nested" ~suite:Component
+      ~boundary:"untyped-build" ~payload:"nested" (fun () ->
+        prepared (fun () -> consume (Payload.nested_untyped ())));
     make ~name:"component/type-json/small" ~suite:Component
       ~boundary:"type-json" ~payload:"small" (fun () ->
         prepared (fun () ->
@@ -164,23 +172,23 @@ let component_scenarios =
         prepared (fun () ->
             consume
               (Observe.Type.to_json_string Payload.nested_t Payload.nested)));
-    make ~name:"component/formatter-json/free-small" ~suite:Component
-      ~boundary:"formatter-json" ~payload:"free-small" (fun () ->
-        formatter_operation Observe.Formatter.json free_small);
+    make ~name:"component/formatter-json/untyped-small" ~suite:Component
+      ~boundary:"formatter-json" ~payload:"untyped-small" (fun () ->
+        formatter_operation Observe.Formatter.json untyped_small);
     make ~name:"component/formatter-json/typed-small" ~suite:Component
       ~boundary:"formatter-json" ~payload:"typed-small" (fun () ->
         formatter_operation Observe.Formatter.json typed_small);
-    make ~name:"component/formatter-json/free-nested" ~suite:Component
-      ~boundary:"formatter-json" ~payload:"free-nested" (fun () ->
-        formatter_operation Observe.Formatter.json free_nested);
+    make ~name:"component/formatter-json/untyped-nested" ~suite:Component
+      ~boundary:"formatter-json" ~payload:"untyped-nested" (fun () ->
+        formatter_operation Observe.Formatter.json untyped_nested);
     make ~name:"component/formatter-json/typed-nested" ~suite:Component
       ~boundary:"formatter-json" ~payload:"typed-nested" (fun () ->
         formatter_operation Observe.Formatter.json typed_nested);
-    make ~name:"component/formatter-pretty/free-nested" ~suite:Component
-      ~boundary:"formatter-pretty" ~payload:"free-nested" (fun () ->
+    make ~name:"component/formatter-pretty/untyped-nested" ~suite:Component
+      ~boundary:"formatter-pretty" ~payload:"untyped-nested" (fun () ->
         formatter_operation
           (Observe.Formatter.pretty Observe.Formatter.Truecolor)
-          free_nested);
+          untyped_nested);
     make ~name:"component/formatter-pretty/typed-nested" ~suite:Component
       ~boundary:"formatter-pretty" ~payload:"typed-nested" (fun () ->
         formatter_operation
@@ -192,7 +200,7 @@ let core_scenarios =
   [
     make ~name:"core/filtered/tagged-text" ~suite:Core ~boundary:"filtered"
       ~payload:"tagged-text" (fun () ->
-        core_operation (config ~min_level:Observe.Level.Warn ()) lazy_text);
+        core_operation (config ~min_level:Observe.Level.Warn ()) filtered_text);
     make ~name:"core/routing/one-drain" ~suite:Core ~boundary:"routing"
       ~payload:"tagged-text" (fun () ->
         core_operation
@@ -216,15 +224,15 @@ let core_scenarios =
     make ~name:"core/json/tagged-text" ~suite:Core ~boundary:"json"
       ~payload:"tagged-text" (fun () ->
         core_operation (config ~console:Observe.Config.Ndjson ()) text);
-    make ~name:"core/json/free-small" ~suite:Core ~boundary:"json"
-      ~payload:"free-small" (fun () ->
-        core_operation (config ~console:Observe.Config.Ndjson ()) free_small);
+    make ~name:"core/json/untyped-small" ~suite:Core ~boundary:"json"
+      ~payload:"untyped-small" (fun () ->
+        core_operation (config ~console:Observe.Config.Ndjson ()) untyped_small);
     make ~name:"core/json/typed-small" ~suite:Core ~boundary:"json"
       ~payload:"typed-small" (fun () ->
         core_operation (config ~console:Observe.Config.Ndjson ()) typed_small);
-    make ~name:"core/json/free-nested" ~suite:Core ~boundary:"json"
-      ~payload:"free-nested" (fun () ->
-        core_operation (config ~console:Observe.Config.Ndjson ()) free_nested);
+    make ~name:"core/json/untyped-nested" ~suite:Core ~boundary:"json"
+      ~payload:"untyped-nested" (fun () ->
+        core_operation (config ~console:Observe.Config.Ndjson ()) untyped_nested);
     make ~name:"core/json/typed-nested" ~suite:Core ~boundary:"json"
       ~payload:"typed-nested" (fun () ->
         core_operation (config ~console:Observe.Config.Ndjson ()) typed_nested);
@@ -233,11 +241,11 @@ let core_scenarios =
         core_operation ~style:Observe.Formatter.Truecolor
           (config ~environment:"development" ~console:Observe.Config.Pretty ())
           text);
-    make ~name:"core/pretty/free-nested" ~suite:Core ~boundary:"pretty"
-      ~payload:"free-nested" (fun () ->
+    make ~name:"core/pretty/untyped-nested" ~suite:Core ~boundary:"pretty"
+      ~payload:"untyped-nested" (fun () ->
         core_operation ~style:Observe.Formatter.Truecolor
           (config ~environment:"development" ~console:Observe.Config.Pretty ())
-          free_nested);
+          untyped_nested);
     make ~name:"core/pretty/typed-nested" ~suite:Core ~boundary:"pretty"
       ~payload:"typed-nested" (fun () ->
         core_operation ~style:Observe.Formatter.Truecolor
@@ -250,19 +258,21 @@ let lwt_unix_scenarios =
     make ~name:"lwt-unix/json/tagged-text" ~suite:Lwt_unix ~boundary:"json"
       ~payload:"tagged-text" (fun () ->
         lwt_unix_operation (config ~console:Observe.Config.Ndjson ()) text);
-    make ~name:"lwt-unix/json/free-small" ~suite:Lwt_unix ~boundary:"json"
-      ~payload:"free-small" (fun () ->
-        lwt_unix_operation (config ~console:Observe.Config.Ndjson ()) free_small);
+    make ~name:"lwt-unix/json/untyped-small" ~suite:Lwt_unix ~boundary:"json"
+      ~payload:"untyped-small" (fun () ->
+        lwt_unix_operation
+          (config ~console:Observe.Config.Ndjson ())
+          untyped_small);
     make ~name:"lwt-unix/json/typed-small" ~suite:Lwt_unix ~boundary:"json"
       ~payload:"typed-small" (fun () ->
         lwt_unix_operation
           (config ~console:Observe.Config.Ndjson ())
           typed_small);
-    make ~name:"lwt-unix/pretty/free-nested" ~suite:Lwt_unix ~boundary:"pretty"
-      ~payload:"free-nested" (fun () ->
+    make ~name:"lwt-unix/pretty/untyped-nested" ~suite:Lwt_unix
+      ~boundary:"pretty" ~payload:"untyped-nested" (fun () ->
         lwt_unix_operation
           (config ~environment:"development" ~console:Observe.Config.Pretty ())
-          free_nested);
+          untyped_nested);
     make ~name:"lwt-unix/pretty/typed-nested" ~suite:Lwt_unix ~boundary:"pretty"
       ~payload:"typed-nested" (fun () ->
         lwt_unix_operation
@@ -281,9 +291,9 @@ let fs_lwt_unix_scenarios =
     make ~logical_operations:100 ~name:"fs-lwt-unix/batch-100/tagged-text"
       ~suite:Fs_lwt_unix ~boundary:"amortized-write" ~payload:"tagged-text"
       (fun () -> fs_lwt_unix_operation ~batch_size:100 text);
-    make ~logical_operations:100 ~name:"fs-lwt-unix/batch-100/free-small"
-      ~suite:Fs_lwt_unix ~boundary:"amortized-write" ~payload:"free-small"
-      (fun () -> fs_lwt_unix_operation ~batch_size:100 free_small);
+    make ~logical_operations:100 ~name:"fs-lwt-unix/batch-100/untyped-small"
+      ~suite:Fs_lwt_unix ~boundary:"amortized-write" ~payload:"untyped-small"
+      (fun () -> fs_lwt_unix_operation ~batch_size:100 untyped_small);
     make ~logical_operations:100 ~name:"fs-lwt-unix/batch-100/typed-small"
       ~suite:Fs_lwt_unix ~boundary:"amortized-write" ~payload:"typed-small"
       (fun () -> fs_lwt_unix_operation ~batch_size:100 typed_small);

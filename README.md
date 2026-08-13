@@ -2,7 +2,7 @@
 
 Observe is structured logging for OCaml.
 
-It provides a portable logging core, typed and free-form structured values,
+It provides a portable logging core, typed and untyped structured values,
 additional drains, deterministic capture, and a ready Lwt-Unix composition.
 Official daily filesystem delivery is available through a separately
 installable package family.
@@ -15,10 +15,10 @@ top of this foundation but are not part of the current public API.
 ## What You Get
 
 - Process-wide tagged text and structured logging.
-- Explicit lazy messages and values that run only after admission.
+- Admission-first authoring callbacks shared by every message shape.
 - Typed structured values with Repr machine behavior and type-aware pretty
   presentation.
-- A concise PPX for free-form values and Observe type descriptions.
+- A concise PPX for untyped values and Observe type descriptions.
 - Pretty console output with automatic truecolor, 256-color, 16-color, and
   plain fallback.
 - Pure pretty, JSON, and NDJSON formatters.
@@ -67,8 +67,7 @@ let config =
     ~min_level:Observe.Level.Debug ()
 
 let main () =
-  Observe.Logs.info
-    (Observe.Logs.text ~tag:"startup" "service ready");
+  Observe.Logs.info (fun m -> m.text ~tag:"startup" "service ready");
   Lwt.return_unit
 
 let () =
@@ -96,7 +95,7 @@ application-owned drains:
 let main () =
   let open Lwt.Syntax in
   let* filesystem =
-    Observe_fs_lwt_unix.create_exn ~path:".observe/logs" ()
+    Observe_fs_lwt_unix.create_exn ~dir:".observe/logs" ()
   in
   let config =
     Observe.Config.create_exn ~service:"orders"
@@ -127,27 +126,30 @@ compression, or cross-process coordination.
 Tagged text is the smallest log shape:
 
 ```ocaml
-Observe.Logs.info
-  (Observe.Logs.text ~tag:"auth" "user logged in")
+Observe.Logs.info (fun m ->
+  m.text ~tag:"auth" "user logged in")
 ```
 
-Expensive text can be deferred until after level admission:
+The authoring callback runs only after route and level admission. The supplied
+builder supports type-safe formatted text, so rejected logs do not evaluate
+their formatting arguments:
 
 ```ocaml
-Observe.Logs.debug
-  (Observe.Logs.text_lazy ~tag:"query" (fun () -> explain_query query))
+Observe.Logs.debug (fun m ->
+  m.text ~tag:"query" "%s" (explain_query query))
 ```
 
-The PPX constructs free-form structured values lazily:
+The same admitted builder owns untyped structured values:
 
 ```ocaml
-Observe.Logs.info
-  (Observe.Logs.free_lazy
-     [%observe.value { action = "user_login"; user_id = 42 }])
+Observe.Logs.info (fun m ->
+  m.untyped
+    [%observe.value { action = "user_login"; user_id = 42 }])
 ```
 
-`free` accepts an already-built `Observe.Value.t`; `free_lazy` accepts a thunk.
-Typed authoring follows the same rule with `structured` and `structured_lazy`.
+`[%observe.value ...]` produces an `Observe.Value.t` inside the callback. No
+payload-specific deferred variant is needed because the callback is the single
+deferred authoring boundary.
 
 OCaml values can carry an Observe type description:
 
@@ -155,9 +157,9 @@ OCaml values can carry an Observe type description:
 type event = User_login of { user_id : int; method_ : string }
 [@@deriving observe]
 
-Observe.Logs.info
-  (Observe.Logs.structured event_t
-     (User_login { user_id = 42; method_ = "oauth" }))
+Observe.Logs.info (fun m ->
+  m.typed event_t
+    (User_login { user_id = 42; method_ = "oauth" }))
 ```
 
 ## Console Output
@@ -190,7 +192,7 @@ description through the compatibility path.
 
 ## Example
 
-The runnable example keeps initialization, tagged logs, free-form data, and
+The runnable example keeps initialization, tagged logs, untyped data, and
 rich typed domain events in one place:
 
 ```sh
@@ -243,7 +245,7 @@ Tests can capture ordinary `Observe.Logs` calls without resetting global
 production state:
 
 ```ocaml
-Observe_lwt_unix.Test.with_capture test_config (fun capture ->
+Observe_lwt_unix.Test.with_capture_exn test_config (fun capture ->
     let open Lwt.Syntax in
     let* () = My_library.run () in
     let logs = Observe.Capture.logs capture in

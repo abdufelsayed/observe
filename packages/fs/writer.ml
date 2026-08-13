@@ -1,6 +1,6 @@
 module Make (IO : Io.S) = struct
   type error =
-    | Invalid_path
+    | Invalid_directory
     | Invalid_capacity of int
     | Io of IO.error
     | Zero_progress
@@ -13,7 +13,7 @@ module Make (IO : Io.S) = struct
   type write_buffer = { mutable bytes : Bytes.t; mutable view : string }
 
   type t = {
-    path : string;
+    directory : string;
     capacity : int;
     lock : IO.lock;
     worker_notifier : IO.notifier;
@@ -34,7 +34,8 @@ module Make (IO : Io.S) = struct
   let ( let* ) = IO.bind
 
   let pp_error formatter = function
-    | Invalid_path -> Format.pp_print_string formatter "invalid filesystem path"
+    | Invalid_directory ->
+        Format.pp_print_string formatter "invalid filesystem directory"
     | Invalid_capacity capacity ->
         Format.fprintf formatter "invalid queue capacity %d" capacity
     | Io error -> IO.pp_error formatter error
@@ -297,7 +298,7 @@ module Make (IO : Io.S) = struct
       | Error _ -> None
       | Ok bytes ->
           let path =
-            IO.child t.path
+            IO.child t.directory
               (Observe_fs_date.Date.filename (Observe.Log.timestamp log))
           in
           Some (path, bytes)
@@ -387,18 +388,18 @@ module Make (IO : Io.S) = struct
 
   let shutdown = wait_for_shutdown
 
-  let create ~path ?(capacity = 1_024) () =
-    if String.length path = 0 || contains_nul path then
-      IO.return (Error Invalid_path)
+  let create ~dir ?(capacity = 1_024) () =
+    if String.length dir = 0 || contains_nul dir then
+      IO.return (Error Invalid_directory)
     else if capacity <= 0 then IO.return (Error (Invalid_capacity capacity))
     else
-      let* setup = attempt (fun () -> IO.ensure_directory path) in
+      let* setup = attempt (fun () -> IO.ensure_directory dir) in
       match setup with
       | Error error -> IO.return (Error error)
       | Ok () ->
           let t =
             {
-              path;
+              directory = dir;
               capacity;
               lock = IO.create_lock ();
               worker_notifier = IO.create_notifier ();

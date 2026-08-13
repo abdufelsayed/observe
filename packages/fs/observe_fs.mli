@@ -54,28 +54,27 @@ module IO : sig
   end
 end
 
-module Make (Implementation : IO.S) : sig
+module Make (IO : IO.S) : sig
   type error =
-    | Invalid_path
+    | Invalid_directory
     | Invalid_capacity of int
-    | Io of Implementation.error
+    | Io of IO.error
     | Zero_progress
     | Invalid_write_count of int
     | Unexpected of exn
 
   type t
 
-  val create :
-    path:string -> ?capacity:int -> unit -> (t, error) result Implementation.t
+  val create : dir:string -> ?capacity:int -> unit -> (t, error) result IO.t
   (** Prepare the directory and start one bounded background writer. *)
 
   val drain : t -> Observe.Drain.t
   (** The synchronous ownership-transfer boundary for application config. *)
 
-  val flush : t -> (unit, error) result Implementation.t
+  val flush : t -> (unit, error) result IO.t
   (** Flush every record accepted before the call. *)
 
-  val shutdown : t -> (unit, error) result Implementation.t
+  val shutdown : t -> (unit, error) result IO.t
   (** Stop acceptance, drain accepted records, flush, close, and stop. *)
 
   val pp_error : Format.formatter -> error -> unit

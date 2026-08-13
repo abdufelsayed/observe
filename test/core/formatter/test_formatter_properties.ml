@@ -108,8 +108,8 @@ let capture message =
   | Ok log -> log
   | Error _ -> failwith "I/O implementation unexpectedly conflicted"
 
-let capture_text tag message = capture (Observe.Logs.text ~tag message)
-let capture_value value = capture (Observe.Logs.free value)
+let capture_text tag message = capture (Test_io.text ~tag message)
+let capture_value value = capture (fun m -> m.untyped value)
 let format formatter log = Observe.Formatter.format formatter log
 let pretty style log = format (Observe.Formatter.pretty style) log
 
@@ -210,7 +210,7 @@ let is_invalid_utf8 = function
 
 let prop_invalid_utf8_is_rejected_at_every_projection_boundary =
   QCheck.Test.make ~count:(Test_profile.qcheck_count ~default:128)
-    ~name:"invalid UTF-8 is rejected in free-form keys and values" invalid_utf8
+    ~name:"invalid UTF-8 is rejected in untyped keys and values" invalid_utf8
     (fun invalid ->
       let invalid_key =
         capture_value
@@ -248,12 +248,12 @@ let test_non_finite_floats_are_rejected () =
 let test_finite_float_matches_repr_precision () =
   let value = 1.2345678901234567 in
   let expected =
-    "{\"service\":\"property\",\"timestamp\":\"42\",\"level\":\"info\",\"payload\":"
+    "{\"service\":\"property\",\"timestamp\":\"42\",\"level\":\"info\",\"body\":"
     ^ Repr.to_json_string ~minify:true Repr.float value
     ^ "}"
   in
   Alcotest.(check (result string reject))
-    "free-form float uses the Repr/Jsonm representation" (Ok expected)
+    "untyped float uses the Repr/Jsonm representation" (Ok expected)
     (format Observe.Formatter.json (capture_value (Observe.Value.float value)))
 
 let () =

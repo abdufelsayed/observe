@@ -40,6 +40,6 @@ module IO = struct
 
   module Console = struct
     let style state = state.style
-    let write state output = state.console output
+    let offer state output = state.console output
   end
 end

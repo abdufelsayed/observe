@@ -1,13 +1,15 @@
 type message = Message.t
 
-let text = Message.text
-let text_lazy = Message.text_lazy
-let free = Message.free
-let free_lazy = Message.free_lazy
-let structured = Message.structured
-let structured_lazy = Message.structured_lazy
-let emit ~level message = Observer.emit ~level message
-let debug message = emit ~level:Level.Debug message
-let info message = emit ~level:Level.Info message
-let warn message = emit ~level:Level.Warn message
-let error message = emit ~level:Level.Error message
+type builder = Message.builder = {
+  text : 'a. tag:string -> ('a, Format.formatter, unit, message) format4 -> 'a;
+  untyped : Value.t -> message;
+  typed : 'a. 'a Type.t -> 'a -> message;
+}
+
+type author = builder -> message
+
+let emit ~level author = Observer.emit ~level author
+let debug author = emit ~level:Level.Debug author
+let info author = emit ~level:Level.Info author
+let warn author = emit ~level:Level.Warn author
+let error author = emit ~level:Level.Error author

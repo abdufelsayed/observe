@@ -39,7 +39,7 @@ module Test : sig
   exception Capture_error of Observe.capture_error
   (** A capture could not start. The callback is not called. *)
 
-  val with_capture :
+  val with_capture_exn :
     Observe.Config.t ->
     ?capacity:int ->
     (Observe.Capture.t -> 'a Lwt.t) ->

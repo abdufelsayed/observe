@@ -46,7 +46,7 @@ module type S = sig
     (** Report the console's maximum supported presentation capability. Return
         [Plain] when support is unknown. This query must not raise. *)
 
-    val write : state -> string -> console_acceptance
+    val offer : state -> string -> console_acceptance
     (** Accept one completely formatted record exactly as supplied. The core
         owns record termination. [Accepted] promises immediate handoff only, not
         flushing or durability. Ordinary exceptions are diagnosed by the core.

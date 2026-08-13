@@ -4,9 +4,9 @@ Observe is a portable structured logging core for OCaml. It owns admission,
 formatting, diagnostics, additional drains, and deterministic capture without
 performing I/O.
 
-The current package provides tagged text, deferred text, free-form values,
-typed values with Repr machine behavior and type-aware presentation, level
-filtering, automatic console formatting,
+The current package provides admission-first authoring callbacks, formatted
+tagged text, untyped values, typed values with Repr machine behavior and
+type-aware presentation, level filtering, automatic console formatting,
 drains, diagnostics, and finite capture. It does not currently provide
 wide-event or metric APIs.
 Drains that accept work for later effectful delivery can report a terminal
@@ -16,7 +16,7 @@ recursing through normal logging.
 {1 Installation}
 
 Link the portable core with [(libraries observe)]. Add
-[(preprocess (pps observe.ppx))] when using the deriver or free-form extension.
+[(preprocess (pps observe.ppx))] when using the deriver or untyped-value extension.
 Configurable Lwt I/O and the ready Unix composition are distributed in the
 [observe-lwt] and [observe-lwt-unix] packages.
 
@@ -25,22 +25,21 @@ Configurable Lwt I/O and the ready Unix composition are distributed in the
 Ordinary code logs through {!module:Observe.Logs}:
 
 {[
-Observe.Logs.info
-  (Observe.Logs.text ~tag:"auth" "User logged in");
+Observe.Logs.info (fun m ->
+  m.text ~tag:"auth" "User logged in");
 
-Observe.Logs.debug
-  (Observe.Logs.text_lazy ~tag:"query" (fun () -> explain_query query));
+Observe.Logs.debug (fun m ->
+  m.text ~tag:"query" "%s" (explain_query query));
 
-Observe.Logs.info
-  (Observe.Logs.free_lazy
-     [%observe.value { action = "user_login"; user_id = 42 }]);
+Observe.Logs.info (fun m ->
+  m.untyped [%observe.value { action = "user_login"; user_id = 42 }]);
 
-Observe.Logs.info
-  (Observe.Logs.structured event_t event)
+Observe.Logs.info (fun m ->
+  m.typed event_t event)
 ]}
 
-Explicit lazy text, free-form, and typed thunks run only after level admission.
-Before production
+The callback and every text, untyped, or typed value constructed inside it run
+only after route and level admission. Before production
 initialization, logs outside an active capture are withheld and counted rather
 than raising an initialization exception.
 
@@ -58,7 +57,7 @@ pretty development output or production NDJSON from the environment.
 
 {!module-type:Observe.IO.S} owns effects, dynamic binding, cleanup, native
 control exceptions, the wall clock, console presentation capability, and
-console writes. {!module:Observe.Make} consumes that completed contract without
+console offers. {!module:Observe.Make} consumes that completed contract without
 adding a runtime or operating-system dependency to the core.
 
 {!val:Observe.Make.with_capture} installs capture as the innermost
@@ -67,7 +66,7 @@ previous binding, and closes the capture exactly once.
 
 {1 Safety boundary}
 
-Structured values and values added with {!val:Observe.Value.embed} remain by
+Typed and untyped values, including values added with {!val:Observe.Value.embed}, remain by
 reference; capture is not a deep snapshot. Drains retaining asynchronous work
 must synchronously copy or project what they need. Ordinary callback failures
 encountered by the logging engine are contained and diagnosed, while runtime

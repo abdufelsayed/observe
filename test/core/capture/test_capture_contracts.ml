@@ -11,33 +11,33 @@ let capture ?capacity config callback =
       Alcotest.failf "unexpected invalid capacity: %d" capacity
 
 let expect_text ~tag ~message log =
-  match Observe.Log.payload log with
+  match Observe.Log.body log with
   | Observe.Log.Text actual ->
       Alcotest.(check string) "tag" tag actual.tag;
       Alcotest.(check string) "message" message actual.message
-  | Observe.Log.Free _ | Observe.Log.Structured _ ->
-      Alcotest.fail "expected a text payload"
+  | Observe.Log.Untyped _ | Observe.Log.Typed _ ->
+      Alcotest.fail "expected a text body"
 
-let test_payloads_and_metadata () =
+let test_bodies_and_metadata () =
   let config =
     Test_io.config ~environment:"test" ~version:"1"
       ~min_level:Observe.Level.Debug "capture"
   in
   let capture =
     capture config (fun capture ->
-        Observe.Logs.info (Observe.Logs.text ~tag:"auth" "signed in");
-        Observe.Logs.warn
-          (Observe.Logs.free
-             (Observe.Value.object_
-                [
-                  ("attempt", Observe.Value.int 2);
-                  ("ok", Observe.Value.bool true);
-                ]));
-        Observe.Logs.error (Observe.Logs.structured Observe.Type.int 7);
+        Observe.Logs.info (Test_io.text ~tag:"auth" "signed in");
+        Observe.Logs.warn (fun m ->
+            m.untyped
+              (Observe.Value.object_
+                 [
+                   ("attempt", Observe.Value.int 2);
+                   ("ok", Observe.Value.bool true);
+                 ]));
+        Observe.Logs.error (fun m -> m.typed Observe.Type.int 7);
         capture)
   in
   match Observe.Capture.logs capture with
-  | [ text; free; structured ] -> (
+  | [ text; untyped; typed ] -> (
       Alcotest.(check string) "service" "capture" (Observe.Log.service text);
       Alcotest.(check (option string))
         "environment" (Some "test")
@@ -51,29 +51,29 @@ let test_payloads_and_metadata () =
         "level" true
         (Observe.Level.equal Observe.Level.Info (Observe.Log.level text));
       expect_text ~tag:"auth" ~message:"signed in" text;
-      (match Observe.Log.payload free with
-      | Observe.Log.Free value ->
+      (match Observe.Log.body untyped with
+      | Observe.Log.Untyped value ->
           Alcotest.(check bool)
-            "free payload pretty" true
+            "untyped body pretty" true
             (String.length (Observe.Value.to_string value) > 0)
-      | Observe.Log.Text _ | Observe.Log.Structured _ ->
-          Alcotest.fail "expected a free payload");
-      match Observe.Log.payload structured with
-      | Observe.Log.Structured (description, value) ->
+      | Observe.Log.Text _ | Observe.Log.Typed _ ->
+          Alcotest.fail "expected a untyped body");
+      match Observe.Log.body typed with
+      | Observe.Log.Typed (description, value) ->
           Alcotest.(check string)
-            "structured value" "7"
+            "typed value" "7"
             (Format.asprintf "%a"
                (Repr.pp (Observe.Type.repr description))
                value)
-      | Observe.Log.Text _ | Observe.Log.Free _ ->
-          Alcotest.fail "expected a structured payload")
+      | Observe.Log.Text _ | Observe.Log.Untyped _ ->
+          Alcotest.fail "expected a typed body")
   | logs -> Alcotest.failf "expected three logs, received %d" (List.length logs)
 
 let test_formatter_semantics () =
   let config = Test_io.config ~console:Observe.Config.Ndjson "formatter" in
   let log =
     capture config (fun capture ->
-        Observe.Logs.info (Observe.Logs.text ~tag:"json" "hello");
+        Observe.Logs.info (Test_io.text ~tag:"json" "hello");
         match Observe.Capture.logs capture with
         | [ log ] -> log
         | _ -> Alcotest.fail "expected one captured log")
@@ -85,7 +85,7 @@ let test_formatter_semantics () =
   in
   Alcotest.(check string)
     "semantic JSON envelope"
-    "{\"service\":\"formatter\",\"timestamp\":\"42\",\"level\":\"info\",\"payload\":{\"kind\":\"text\",\"tag\":\"json\",\"message\":\"hello\"}}"
+    "{\"service\":\"formatter\",\"timestamp\":\"42\",\"level\":\"info\",\"body\":{\"kind\":\"text\",\"tag\":\"json\",\"message\":\"hello\"}}"
     json;
   (match Observe.Formatter.format Observe.Formatter.ndjson log with
   | Ok line ->
@@ -110,33 +110,35 @@ let test_formatter_semantics () =
     (Failure "formatter") (fun () ->
       ignore (Observe.Formatter.format raising log))
 
-let test_admission_laziness_and_diagnostics () =
+let test_admission_and_diagnostics () =
   let config = Test_io.config ~min_level:Observe.Level.Info "admission" in
-  let lazy_calls = ref 0 in
-  let free_calls = ref 0 in
+  let text_calls = ref 0 in
+  let untyped_calls = ref 0 in
+  let typed_calls = ref 0 in
   let capture =
     capture ~capacity:1 config (fun capture ->
-        Observe.Logs.debug
-          (Observe.Logs.text_lazy ~tag:"lazy" (fun () ->
-               incr lazy_calls;
-               "rejected"));
-        Observe.Logs.debug
-          (Observe.Logs.free_lazy (fun () ->
-               incr free_calls;
-               Observe.Value.int 0));
-        Observe.Logs.info
-          (Observe.Logs.text_lazy ~tag:"lazy" (fun () ->
-               incr lazy_calls;
-               "accepted"));
-        Observe.Logs.warn (Observe.Logs.text ~tag:"overflow" "withheld");
-        Observe.Logs.error
-          (Observe.Logs.free_lazy (fun () ->
-               incr free_calls;
-               failwith "authoring"));
+        Observe.Logs.debug (fun m ->
+            incr text_calls;
+            m.text ~tag:"admission" "rejected");
+        Observe.Logs.debug (fun m ->
+            incr untyped_calls;
+            m.untyped (Observe.Value.int 0));
+        Observe.Logs.debug (fun m ->
+            incr typed_calls;
+            m.typed Observe.Type.int 0);
+        Observe.Logs.info (fun m ->
+            incr text_calls;
+            m.text ~tag:"admission" "accepted");
+        Observe.Logs.warn (Test_io.text ~tag:"overflow" "withheld");
+        Observe.Logs.error (fun m ->
+            incr untyped_calls;
+            m.untyped (failwith "authoring"));
         capture)
   in
-  Alcotest.(check int) "lazy text forced only after admission" 1 !lazy_calls;
-  Alcotest.(check int) "free thunk forced only after admission" 1 !free_calls;
+  Alcotest.(check int) "text authored only after admission" 1 !text_calls;
+  Alcotest.(check int)
+    "untyped value authored only after admission" 1 !untyped_calls;
+  Alcotest.(check int) "filtered typed value not authored" 0 !typed_calls;
   Alcotest.(check int)
     "capacity retains one" 1
     (List.length (Observe.Capture.logs capture));
@@ -146,41 +148,42 @@ let test_admission_laziness_and_diagnostics () =
     (Test_io.diagnostic_count diagnostics Observe.Diagnostics.Capture_overflow);
   Alcotest.(check int)
     "authoring failure diagnosed" 1
-    (Test_io.diagnostic_count diagnostics Observe.Diagnostics.Authoring_raised)
+    (Test_io.diagnostic_count diagnostics
+       Observe.Diagnostics.Message_evaluation_raised)
 
-let test_structured_values_are_by_reference () =
+let test_typed_values_are_by_reference () =
   let value = ref 3 in
   let log =
     capture (Test_io.config "identity") (fun capture ->
-        Observe.Logs.info
-          (Observe.Logs.structured (Observe.Type.ref Observe.Type.int) value);
+        Observe.Logs.info (fun m ->
+            m.typed (Observe.Type.ref Observe.Type.int) value);
         match Observe.Capture.logs capture with
         | [ log ] -> log
-        | _ -> Alcotest.fail "expected one structured log")
+        | _ -> Alcotest.fail "expected one typed log")
   in
   value := 9;
-  match Observe.Log.payload log with
-  | Observe.Log.Structured (description, retained) ->
+  match Observe.Log.body log with
+  | Observe.Log.Typed (description, retained) ->
       Alcotest.(check string)
         "later projection sees referenced value" "9"
         (Format.asprintf "%a"
            (Repr.pp (Observe.Type.repr description))
            retained)
-  | Observe.Log.Text _ | Observe.Log.Free _ ->
-      Alcotest.fail "expected a structured payload"
+  | Observe.Log.Text _ | Observe.Log.Untyped _ ->
+      Alcotest.fail "expected a typed body"
 
 let () =
   Alcotest.run "observe-capture-contracts"
     [
       ( "behavior:observe:capture",
         [
-          Alcotest.test_case "payloads and metadata" `Quick
-            test_payloads_and_metadata;
+          Alcotest.test_case "bodies and metadata" `Quick
+            test_bodies_and_metadata;
           Alcotest.test_case "formatter semantics" `Quick
             test_formatter_semantics;
           Alcotest.test_case "admission and diagnostics" `Quick
-            test_admission_laziness_and_diagnostics;
-          Alcotest.test_case "structured reference semantics" `Quick
-            test_structured_values_are_by_reference;
+            test_admission_and_diagnostics;
+          Alcotest.test_case "typed reference semantics" `Quick
+            test_typed_values_are_by_reference;
         ] );
     ]

@@ -65,7 +65,7 @@ expected() {
   case "$1" in
     config_formatter.ml.fail) printf '%s' 'formatter' ;;
     config_console.ml.fail) printf '%s' 'console' ;;
-    mismatched_structured.ml.fail) printf '%s' '(constant|expression) has type' ;;
+    mismatched_typed.ml.fail) printf '%s' '(constant|expression) has type' ;;
     private_engine.ml.fail) printf '%s' 'Observe__Engine' ;;
     private_observer.ml.fail) printf '%s' 'Observe__Observer' ;;
     untagged_text.ml.fail) printf '%s' 'tag' ;;

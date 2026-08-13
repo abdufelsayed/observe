@@ -196,7 +196,7 @@ module Value : sig
     | List of t list
     | Object of (string * t) list
     | Embedded : 'a Type.t * 'a -> t
-        (** A free-form structured value. The outer tree is immutable; values
+        (** An untyped structured value. The outer tree is immutable; values
             added with {!embed} are retained by reference and may themselves be
             mutable. The private constructors support stable structural
             inspection while the functions below remain the construction API. *)
@@ -224,39 +224,39 @@ end
 
 module Log : sig
   type t
-  (** A completed admitted log. Structured payloads and typed values embedded in
-      free-form payloads are retained by reference, not deeply copied. *)
+  (** A completed admitted log. Typed values and values embedded in untyped
+      bodies are retained by reference, not deeply copied. *)
 
-  type payload =
+  type body =
     | Text of { tag : string; message : string }
-    | Free of Value.t
-    | Structured : 'a Type.t * 'a -> payload
-        (** The three semantic payload forms. Pattern matching is safe because
-            this type carries no completed-log invariant. *)
+    | Untyped of Value.t
+    | Typed : 'a Type.t * 'a -> body
+        (** The three semantic body forms. Pattern matching is safe because this
+            type carries no completed-log invariant. *)
 
   val service : t -> string
   val environment : t -> string option
   val version : t -> string option
   val timestamp : t -> Timestamp.t
   val level : t -> Level.t
-  val payload : t -> payload
+  val body : t -> body
 end
 
 module Diagnostics : sig
   type kind =
     | Not_initialized
-    | No_output
-    | Scope_raised
+    | No_delivery_target
+    | Capture_lookup_raised
     | Clock_unavailable
     | Clock_raised
-    | Authoring_raised
+    | Message_evaluation_raised
     | Formatting_failed
     | Formatting_raised
     | Console_rejected
     | Console_raised
     | Drain_rejected
     | Drain_raised
-    | Drain_failed
+    | Drain_delivery_failed
     | Capture_overflow
     | Capture_closed
 
@@ -374,30 +374,40 @@ module Config : sig
 end
 
 module Logs : sig
+  (** Process-wide admission-first logging. Every level function checks the
+      active route and configured level before invoking its authoring callback:
+
+      {[
+      Observe.Logs.info (fun m ->
+          m.text ~tag:"auth" "user %d logged in" user_id)
+      ]} *)
+
   type message
-  (** A pending message. Eager forms retain completed values; [_lazy] forms run
-      their thunk only after admission. *)
+  (** A completed authoring result produced inside an admitted callback. *)
 
-  val text : tag:string -> string -> message
+  type builder = private {
+    text :
+      'a. tag:string -> ('a, Format.formatter, unit, message) format4 -> 'a;
+    untyped : Value.t -> message;
+    typed : 'a. 'a Type.t -> 'a -> message;
+  }
+  (** The admitted message builder. [text] supports type-safe format strings;
+      [untyped] accepts a dynamic value; [typed] retains an OCaml value with its
+      type description. *)
 
-  val text_lazy : tag:string -> (unit -> string) -> message
-  (** Construct text only after admission. Ordinary exceptions are withheld and
-      diagnosed as [Diagnostics.Authoring_raised]. *)
+  type author = builder -> message
+  (** Message authoring invoked only after route and level admission. *)
 
-  val free : Value.t -> message
-  val free_lazy : (unit -> Value.t) -> message
-  val structured : 'a Type.t -> 'a -> message
-  val structured_lazy : 'a Type.t -> (unit -> 'a) -> message
-
-  val emit : level:Level.t -> message -> unit
+  val emit : level:Level.t -> author -> unit
   (** Emit through the active scoped or production route. Before installation,
       messages are withheld and diagnosed. Logging does not raise merely because
-      process initialization has not happened. *)
+      process initialization has not happened. Ordinary authoring exceptions are
+      withheld and diagnosed as [Diagnostics.Message_evaluation_raised]. *)
 
-  val debug : message -> unit
-  val info : message -> unit
-  val warn : message -> unit
-  val error : message -> unit
+  val debug : author -> unit
+  val info : author -> unit
+  val warn : author -> unit
+  val error : author -> unit
 end
 
 module IO : sig
@@ -442,7 +452,7 @@ module IO : sig
       (** Report the console's maximum supported presentation capability. Return
           [Plain] when support is unknown. This query must not raise. *)
 
-      val write : state -> string -> console_acceptance
+      val offer : state -> string -> console_acceptance
       (** Write one completely formatted record exactly as supplied. The core
           owns record termination. [Accepted] promises immediate handoff only,
           not flushing or durability. Ordinary exceptions are diagnosed by the

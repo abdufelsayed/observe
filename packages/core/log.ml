@@ -1,7 +1,7 @@
-type payload =
+type body =
   | Text of { tag : string; message : string }
-  | Free of Value.t
-  | Structured : 'a Type.t * 'a -> payload
+  | Untyped of Value.t
+  | Typed : 'a Type.t * 'a -> body
 
 type t = {
   service : string;
@@ -9,7 +9,7 @@ type t = {
   version : string option;
   timestamp : Timestamp.t;
   level : Level.t;
-  payload : payload;
+  body : body;
 }
 
 let service log = log.service
@@ -17,9 +17,9 @@ let environment log = log.environment
 let version log = log.version
 let timestamp log = log.timestamp
 let level log = log.level
-let payload log = log.payload
+let body log = log.body
 
 module Producer = struct
-  let make ~service ?environment ?version ~timestamp ~level payload =
-    { service; environment; version; timestamp; level; payload }
+  let make ~service ?environment ?version ~timestamp ~level body =
+    { service; environment; version; timestamp; level; body }
 end

@@ -45,7 +45,7 @@ let nested =
     device_id = Some "device_7f3a";
   }
 
-let small_free () =
+let small_untyped () =
   Observe.Value.object_
     [
       ("action", Observe.Value.string "user_login");
@@ -55,7 +55,7 @@ let small_free () =
       ("provider", Observe.Value.string "github");
     ]
 
-let nested_free () =
+let nested_untyped () =
   Observe.Value.object_
     [
       ("action", Observe.Value.string "user_login");

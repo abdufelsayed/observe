@@ -71,47 +71,47 @@ module Console = struct
     | (Out_of_memory | Stack_overflow | Sys.Break) as exn -> raise exn
     | _ -> Observe.Formatter.Plain
 
-  let output = Output.create ~capacity:1_024 Lwt_unix.stderr
+  let writer = Writer.create ~capacity:1_024 Lwt_unix.stderr
 
-  let write value =
-    match Output.offer output value with
+  let offer value =
+    match Writer.offer writer value with
     | Accepted -> Observe.IO.Accepted
     | Full | Closed -> Observe.IO.Rejected
 
-  let flush () = Output.flush output
-  let shutdown () = Output.shutdown output
+  let flush () = Writer.flush writer
+  let shutdown () = Writer.shutdown writer
 end
 
 module Observer = Observe.Make (Observe_lwt.IO)
 
-let outputs =
-  Output_registry.create ~flush:Console.flush ~shutdown:Console.shutdown
+let writers =
+  Writer_registry.create ~flush:Console.flush ~shutdown:Console.shutdown
 
 let owner_thread = Thread.id (Thread.self ())
 
 let io =
   Observe_lwt.create ~clock:Clock.now ~console_style:Console.style
-    ~write_console:Console.write
+    ~offer_console:Console.offer
     ~can_lookup_context:(fun () -> Thread.id (Thread.self ()) = owner_thread)
     ()
 
 let observer = Observer.create io
 let init config = Observer.init observer config
 let init_exn config = Observer.init_exn observer config
-let flush () = Output_registry.flush outputs
-let shutdown () = Output_registry.shutdown outputs
+let flush () = Writer_registry.flush writers
+let shutdown () = Writer_registry.shutdown writers
 
 module Lifecycle = struct
-  type error = Output_registry.error = Closed
+  type error = Writer_registry.error = Closed
 
   let register ~flush ~shutdown =
-    Output_registry.register outputs ~flush ~shutdown
+    Writer_registry.register writers ~flush ~shutdown
 end
 
 module Test = struct
   exception Capture_error of Observe.capture_error
 
-  let with_capture config ?capacity callback =
+  let with_capture_exn config ?capacity callback =
     Lwt.bind (Observer.with_capture observer config ?capacity callback)
       (function
       | Ok result -> Lwt.return result

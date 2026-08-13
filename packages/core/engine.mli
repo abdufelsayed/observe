@@ -10,7 +10,7 @@ val contain : is_control_exception:(exn -> bool) -> (unit -> 'a) -> 'a contained
 
 type t
 
-val create_production :
+val create_outputs :
   Config.t ->
   console_style:Formatter.style ->
   clock:(unit -> (Timestamp.t, Io.clock_error) result) ->
@@ -25,7 +25,7 @@ val create_capture :
   Capture.t ->
   t
 
-val after_production_install : t -> unit
+val after_install : t -> unit
 (** Record installation-only diagnostics after this engine wins publication. *)
 
-val emit : t -> Level.t -> Message.t -> unit
+val emit : t -> Level.t -> Message.author -> unit

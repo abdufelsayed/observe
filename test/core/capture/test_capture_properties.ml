@@ -60,10 +60,9 @@ let nested_case =
     generator
 
 let captured_text log =
-  match Observe.Log.payload log with
+  match Observe.Log.body log with
   | Observe.Log.Text { message; _ } -> int_of_string message
-  | Observe.Log.Free _ | Observe.Log.Structured _ ->
-      failwith "unexpected payload"
+  | Observe.Log.Untyped _ | Observe.Log.Typed _ -> failwith "unexpected body"
 
 let prop_capture_retains_prefix_and_conserves_offers =
   QCheck.Test.make ~count:(Test_profile.qcheck_count ~default:250)
@@ -75,7 +74,7 @@ let prop_capture_retains_prefix_and_conserves_offers =
             List.iter
               (fun value ->
                 Observe.Logs.debug
-                  (Observe.Logs.text ~tag:"generated" (string_of_int value)))
+                  (Test_io.text ~tag:"generated" (string_of_int value)))
               values;
             capture)
       with
@@ -96,7 +95,7 @@ let prop_capture_retains_prefix_and_conserves_offers =
           && List.length retained + overflow = List.length values)
 
 let emit value =
-  Observe.Logs.debug (Observe.Logs.text ~tag:"generated" (string_of_int value))
+  Observe.Logs.debug (Test_io.text ~tag:"generated" (string_of_int value))
 
 let retained_values capture =
   List.map captured_text (Observe.Capture.logs capture)

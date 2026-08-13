@@ -1,6 +1,6 @@
 module Make (IO : Io.S) : sig
   type error =
-    | Invalid_path
+    | Invalid_directory
     | Invalid_capacity of int
     | Io of IO.error
     | Zero_progress
@@ -9,7 +9,7 @@ module Make (IO : Io.S) : sig
 
   type t
 
-  val create : path:string -> ?capacity:int -> unit -> (t, error) result IO.t
+  val create : dir:string -> ?capacity:int -> unit -> (t, error) result IO.t
   val drain : t -> Observe.Drain.t
   val flush : t -> (unit, error) result IO.t
   val shutdown : t -> (unit, error) result IO.t

@@ -2,7 +2,8 @@
 
 module IO : sig
   (** Filesystem I/O and scheduler-crossing mechanisms supplied to the Lwt
-      maker. Implementations may be Unix-free, including Mirage filesystems. *)
+      functor. Implementations may be Unix-free, including Mirage filesystems.
+  *)
 
   module type S = sig
     type file
@@ -19,8 +20,8 @@ module IO : sig
     val create_notifier : unit -> notifier
 
     val await : notifier -> unit Lwt.t
-    (** Create a waiter for the next notification. The maker protects the
-        returned promise from caller cancellation. *)
+    (** Create a waiter for the next notification. The implementation protects
+        the returned promise from caller cancellation. *)
 
     val notify : notifier -> unit
     val dispose : notifier -> unit
@@ -42,7 +43,7 @@ end
 
 module Make (IO : IO.S) : sig
   type error =
-    | Invalid_path
+    | Invalid_directory
     | Invalid_capacity of int
     | Io of IO.error
     | Zero_progress
@@ -51,7 +52,7 @@ module Make (IO : IO.S) : sig
 
   type t
 
-  val create : path:string -> ?capacity:int -> unit -> (t, error) result Lwt.t
+  val create : dir:string -> ?capacity:int -> unit -> (t, error) result Lwt.t
   val drain : t -> Observe.Drain.t
   val flush : t -> (unit, error) result Lwt.t
   val shutdown : t -> (unit, error) result Lwt.t
