@@ -62,7 +62,7 @@ let nested_case =
 let captured_text log =
   match Observe.Log.body log with
   | Observe.Log.Text { message; _ } -> int_of_string message
-  | Observe.Log.Untyped _ | Observe.Log.Typed _ -> failwith "unexpected body"
+  | Observe.Log.Structured _ -> failwith "unexpected body"
 
 let prop_capture_retains_prefix_and_conserves_offers =
   QCheck.Test.make ~count:(Test_profile.qcheck_count ~default:250)

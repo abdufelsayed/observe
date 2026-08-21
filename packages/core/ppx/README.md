@@ -26,10 +26,10 @@ a second logging model:
 [%observe.info text ~tag:"auth" "user %d logged in" user_id]
 
 [%observe.warn
-  untyped [%observe.value { action = "retry"; attempt = 2 }]]
+  untyped { action = "retry"; attempt = 2 }]
 
 [%observe.error
-  typed event_t (Sync_failed { source = "postgres"; attempts = 3 })]
+  typed sync_failed_schema { source = "postgres"; attempts = 3 }]
 ```
 
 They expand semantically to the ordinary public API:
@@ -39,11 +39,15 @@ Observe.Logs.info (fun m ->
   m.text ~tag:"auth" "user %d logged in" user_id)
 
 Observe.Logs.warn (fun m ->
-  m.untyped
-    [%observe.value { action = "retry"; attempt = 2 }])
+  m.value
+    (Observe.Value.object_
+       [
+         ("action", Observe.Value.string "retry");
+         ("attempt", Observe.Value.int 2);
+       ]))
 
 Observe.Logs.error (fun m ->
-  m.typed event_t (Sync_failed { source = "postgres"; attempts = 3 }))
+  m.typed sync_failed_schema { source = "postgres"; attempts = 3 })
 ```
 
 The callback remains the only deferred authoring boundary. The active route and
@@ -53,27 +57,61 @@ behavior. Ordinary callback exception containment is unchanged.
 
 The fixed-level forms are `[%observe.debug ...]`, `[%observe.info ...]`,
 `[%observe.warn ...]`, and `[%observe.error ...]`. Each accepts exactly one of
-`text`, `untyped`, or `typed`. A dynamic level uses a pair:
+`text`, `untyped`, or `typed`. Anonymous record syntax preserves E1's
+annotation-free primitive literals, nested objects, lists, and options without
+nesting `[%observe.value]`. An arbitrary expression uses an explicit
+description such as `string value` or `list string values`. A dynamic level
+uses a pair:
 
 ```ocaml
-[%observe.emit (level, typed event_t event)]
+[%observe.emit (level, typed event_schema event)]
 ```
 
 which expands to:
 
 ```ocaml
-Observe.Logs.emit ~level (fun m -> m.typed event_t event)
+Observe.Logs.log ~level (fun m -> m.typed event_schema event)
 ```
 
 The restricted body vocabulary is deliberate: misspelled or unsupported forms
 receive a located PPX error instead of expanding into an unrelated expression.
 The manual `Observe.Logs` API remains available and requires no PPX.
 
+### Wide contributions
+
+`[%observe.set]` keeps open and schema-locked wide authoring at one PPX layer:
+
+```ocaml
+let open_log = Observe.Logs.create ~name:"checkout" () in
+[%observe.set open_log
+  untyped
+    {
+      cart_id = string cart_id;
+      phase = "started";
+      customer = { id = string customer_id; plan = string plan };
+    }];
+
+let typed_log =
+  Observe.Logs.create_typed ~name:"checkout" checkout_event_schema
+in
+[%observe.set typed_log
+  { phase = Authorized authorization_id; attempts = attempts + 1 }];
+[%observe.set typed_log error Observe.Error.exn exn]
+```
+
+Self-describing anonymous syntax expands through the same package-owned value
+conversion as E1 and becomes an open patch through the PPX runtime contract.
+Explicitly described arbitrary expressions retain their supplied description.
+Typed sparse records expand through the generated builder attached to the
+handle, so OCaml checks field names, nested patch shapes, and value types
+without PPX-inserted annotations. The extension does not infer a schema from
+syntax.
+
 ## Typed descriptions
 
-The deriver emits an Observe description named after the declared type. It is
-the concise, optimized form of code that can also be written with the public
-`Observe.Type` combinators.
+The deriver emits an Observe description named after every declared type. For
+a record it additionally emits a schema witness, an abstract sparse patch, a
+patch constructor, and the builder used by one-layer wide-log PPX authoring.
 
 For example, deriving this record:
 
@@ -82,7 +120,8 @@ type user = { id : int; name : string; roles : string list }
 [@@deriving observe]
 ```
 
-defines `user_t : user Observe.Type.t`. Its manual semantic equivalent is:
+defines `user_t : user Observe.Type.t`, `user_schema`, and
+`user_patch ?id ?name ?roles ()`. Its complete-description equivalent is:
 
 ```ocaml
 let user_t =
@@ -94,29 +133,26 @@ let user_t =
   |> sealr
 ```
 
-Both descriptions retain the Repr representation, support the same public
-`Observe.Type` operations, and produce the same JSON and pretty output.
-Deriving additionally generates type-specialized JSON writers and
-console-rendering functions.
-They match the OCaml value directly and write into the formatter's existing
-buffer or renderer. Manual combinators compose equivalent reusable writers
-from the component descriptions. `Observe.Type.of_repr` provides a generic
-compatibility fallback for an arbitrary existing Repr description.
+Both descriptions retain the Repr representation and support the same public
+`Observe.Type` operations. Deriving additionally generates type-specialized
+JSON and pretty functions plus a bounded direct freezer. Logging uses the
+freezer to create one immutable format-neutral snapshot; capture and official
+formatters never retain or revisit the complete OCaml value. Manual combinators
+compose equivalent bounded freezer behavior from their component descriptions.
 
 The three paths are therefore one API with different amounts of information:
 
 | Description source | Projection implementation | Intended use |
 | --- | --- | --- |
-| `[@@deriving observe]` | Generated type-specialized JSON writers and console-rendering functions | Normal application types |
-| `Observe.Type` combinators | Composed JSON writers and console-rendering functions | Hand-written and dynamic description modules |
-| `Observe.Type.of_repr` | Repr compatibility projection | Existing or opaque Repr descriptions |
+| `[@@deriving observe]` | Generated bounded freezer plus specialized direct projections | Normal types and record schemas |
+| `Observe.Type` combinators | Composed bounded freezer and direct projections | Hand-written descriptions |
+| `Observe.Type.of_repr` | Repr compatibility only; no implicit bounded freezer | Opaque Repr operations outside completed logs |
 
-The generated functions are not stored output and do not eagerly serialize a
-value. They are immutable functions attached to the description and called
-only when an admitted log is projected. The JSON formatter writes the envelope
-and typed payload into one buffer. The pretty formatter writes the same value
-directly into its styled renderer. Neither path constructs an intermediate
-JSON or display tree.
+The generated functions do not eagerly serialize a value. For an admitted
+point or active wide contribution, the bounded freezer projects directly into
+package-owned immutable nodes. Completion rechecks the universal aggregate
+budget before publication. JSON and pretty formatters then consume only that
+snapshot.
 
 ### Variants
 
@@ -156,9 +192,9 @@ type event = User_login of { user_id : int; method_ : string }
 let description : event Observe.Type.t = event_t
 
 let () =
-  [%observe.info
-    typed description
-      (User_login { user_id = 42; method_ = "oauth" })]
+  (* Variants remain valid nested descriptions. Structured point and
+     schema-locked wide roots themselves are records. *)
+  ignore description
 ```
 
 The corresponding manual description uses a named payload type because OCaml
@@ -237,19 +273,19 @@ compatibility with existing Repr-style description code, which then uses the
 generic compatibility path.
 
 Recursive declarations use Repr's recursive machine description and generated
-recursive JSON and pretty writers. Mutually recursive declarations use
-mutually recursive generated JSON writers and composed direct pretty writers.
-They remain subject to ordinary OCaml termination: a cyclic or non-terminating
-value is not made safe merely by deriving a description.
+recursive direct projections. Logging checks depth before descending into each
+described value, so cyclic values terminate at the canonical limit and the
+whole observation is withheld. This does not make arbitrary direct Repr
+operations cycle-safe.
 
 ### Repr interoperability
 
 `Observe.Type.repr description` exposes the underlying Repr description for
 decoding, equality, comparison, binary operations, schemas or another Repr
-consumer. `Observe.Type.of_repr repr` lifts an existing description. Because
-Repr is abstract, a lifted description uses Repr's generic JSON implementation
-and pretty presentation; it cannot recover distinctions already erased by
-that representation.
+consumer. `Observe.Type.of_repr repr` lifts an existing description for direct
+interoperability. Because Repr is abstract, that lift cannot supply Observe's
+bounded freezer. Such a value is withheld from completed logs rather than
+falling back to unbounded traversal or retaining a live value.
 
 If an integration already has a direct compact JSON writer, it can retain the
 opaque Repr description without paying for the generic encoder:
@@ -259,11 +295,12 @@ let description = Observe.Type.of_repr ~json:append_json existing_repr
 ```
 
 The writer appends exactly one compact value to the supplied buffer and must
-use the same representation accepted by `existing_repr`'s decoder.
+use the same representation accepted by `existing_repr`'s decoder. It improves
+direct JSON compatibility; it does not establish canonical logging safety.
 
-`Observe.Type.to_json_string description value` is the allocating convenience
-API. The logger uses the same attached JSON function with its existing envelope
-buffer, avoiding a temporary payload string.
+`Observe.Type.to_json_string description value` is the allocating direct
+convenience API. Logging instead invokes the bounded freezer once and every
+formatter consumes the resulting immutable snapshot.
 
 The deriver targets `Observe.Type` as its default description library. It uses
 the Repr PPX engine for machine descriptions and package-owned generation for
@@ -280,19 +317,20 @@ without inline records retain the broader `ppx_repr` feature set.
 
 `[%observe.value ...]` accepts integer, float, string, and Boolean literals;
 record syntax as an object; list literals; and `Some` or `None`. The extension
-expands to an `Observe.Value.t`. Put it inside the standard logging callback so
-construction runs only after admission:
+expands to an `Observe.Value.t`. It is the explicit compatibility and standalone
+value-construction surface; it is not nested inside a logging extension. To log
+one lazily, use the manual callback's explicit `m.value` path:
 
 ```ocaml
-[%observe.info
-  untyped
+Observe.Logs.info (fun m ->
+  m.value
     [%observe.value
       {
         action = "user_login";
         user_id = 42;
         methods = [ "oauth"; "passkey" ];
         previous_user = None;
-      }]]
+      }])
 ```
 
 Record field names become object keys and must be unqualified identifiers.
@@ -304,18 +342,19 @@ description:
 
 ```ocaml
 let user_id = 42 in
-[%observe.info
-  untyped
+Observe.Logs.info (fun m ->
+  m.value
     [%observe.value
       {
         action = "user_login";
         user_id =
           [%observe.value.embed (Observe.Type.int, user_id)];
-      }]]
+      }])
 ```
 
-The embedded value is retained by reference and interpreted only when a
-formatter projects it. Suffixed numeric literals such as `1L` likewise require
+The authoring `Observe.Value.t` temporarily retains the embedded value. An
+admitted log freezes it before publication, and no formatter or drain receives
+the reference. Suffixed numeric literals such as `1L` likewise require
 `[%observe.value.embed (description, value)]` with an appropriate description.
 
 The first untyped example expands semantically to ordinary public values:

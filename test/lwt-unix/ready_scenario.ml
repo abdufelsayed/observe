@@ -69,7 +69,7 @@ let config ?environment ?console ?drains service =
 let text_tag log =
   match Observe.Log.body log with
   | Observe.Log.Text { tag; _ } -> tag
-  | Observe.Log.Untyped _ | Observe.Log.Typed _ -> fail "expected text log"
+  | Observe.Log.Structured _ -> fail "expected text log"
 
 let capture_tags capture = List.map text_tag (Observe.Capture.logs capture)
 

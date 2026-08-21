@@ -96,20 +96,23 @@ let sample =
     ~print:(fun sample -> Observe.Value.to_string (value_of_sample sample))
     (sample_gen 3)
 
-let capture message =
+let capture_outcome message =
   let config = Test_io.config "property" in
   match
     Observer.with_capture observer config (fun capture ->
         Observe.Logs.info message;
-        match Observe.Capture.logs capture with
-        | [ log ] -> log
-        | _ -> failwith "expected one captured log")
+        (Observe.Capture.logs capture, Observe.Capture.diagnostics capture))
   with
-  | Ok log -> log
+  | Ok outcome -> outcome
   | Error _ -> failwith "I/O implementation unexpectedly conflicted"
 
+let capture message =
+  match capture_outcome message with
+  | [ log ], _ -> log
+  | _ -> failwith "expected one captured log"
+
 let capture_text tag message = capture (Test_io.text ~tag message)
-let capture_value value = capture (fun m -> m.untyped value)
+let capture_value value = capture (fun m -> m.value value)
 let format formatter log = Observe.Formatter.format formatter log
 let pretty style log = format (Observe.Formatter.pretty style) log
 
@@ -204,45 +207,33 @@ let invalid_utf8 =
        (fun byte -> String.make 1 (Char.chr byte))
        (QCheck.Gen.int_range 0x80 0xff))
 
-let is_invalid_utf8 = function
-  | Error Observe.Formatter.Invalid_utf8 -> true
+let canonical_failure diagnostics =
+  List.exists
+    (fun (entry : Observe.Diagnostics.entry) ->
+      entry.kind = Observe.Diagnostics.Canonical_freeze_failed
+      && entry.count = 1)
+    diagnostics
+
+let withheld value =
+  match capture_outcome (fun m -> m.value value) with
+  | [], diagnostics -> canonical_failure diagnostics
   | _ -> false
 
-let prop_invalid_utf8_is_rejected_at_every_projection_boundary =
+let prop_invalid_utf8_is_withheld_at_the_canonical_boundary =
   QCheck.Test.make ~count:(Test_profile.qcheck_count ~default:128)
     ~name:"invalid UTF-8 is rejected in untyped keys and values" invalid_utf8
     (fun invalid ->
-      let invalid_key =
-        capture_value
-          (Observe.Value.object_ [ (invalid, Observe.Value.string "value") ])
-      in
-      let invalid_value =
-        capture_value
-          (Observe.Value.object_ [ ("key", Observe.Value.string invalid) ])
-      in
-      List.for_all
-        (fun log ->
-          is_invalid_utf8 (pretty Observe.Formatter.Plain log)
-          && is_invalid_utf8 (format Observe.Formatter.json log)
-          && is_invalid_utf8 (format Observe.Formatter.ndjson log))
-        [ invalid_key; invalid_value ])
+      withheld
+        (Observe.Value.object_ [ (invalid, Observe.Value.string "value") ])
+      && withheld
+           (Observe.Value.object_ [ ("key", Observe.Value.string invalid) ]))
 
-let test_non_finite_floats_are_rejected () =
+let test_non_finite_floats_are_withheld () =
   List.iter
     (fun value ->
-      let log = capture_value (Observe.Value.float value) in
-      let check name result =
-        Alcotest.(check bool)
-          name true
-          (match result with
-          | Error Observe.Formatter.Non_finite_float -> true
-          | Ok _ | Error _ -> false)
-      in
-      check "pretty rejects non-finite float"
-        (pretty Observe.Formatter.Plain log);
-      check "JSON rejects non-finite float" (format Observe.Formatter.json log);
-      check "NDJSON rejects non-finite float"
-        (format Observe.Formatter.ndjson log))
+      Alcotest.(check bool)
+        "canonical freezing rejects non-finite float" true
+        (withheld (Observe.Value.float value)))
     [ Float.nan; Float.infinity; Float.neg_infinity ]
 
 let test_finite_float_matches_repr_precision () =
@@ -266,12 +257,12 @@ let () =
           QCheck_alcotest.to_alcotest ~speed_level:`Quick
             prop_rich_values_have_equivalent_pretty_and_valid_json_projections;
           QCheck_alcotest.to_alcotest ~speed_level:`Quick
-            prop_invalid_utf8_is_rejected_at_every_projection_boundary;
+            prop_invalid_utf8_is_withheld_at_the_canonical_boundary;
         ] );
       ( "unit:observe:formatter-boundaries",
         [
-          Alcotest.test_case "non-finite floats are rejected" `Quick
-            test_non_finite_floats_are_rejected;
+          Alcotest.test_case "non-finite floats are withheld" `Quick
+            test_non_finite_floats_are_withheld;
           Alcotest.test_case "finite float precision" `Quick
             test_finite_float_matches_repr_precision;
         ] );

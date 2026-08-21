@@ -10,6 +10,7 @@ type t = {
   minor_bytes_per_operation : float;
   major_bytes_per_operation : float;
   promoted_bytes_per_operation : float;
+  retained_bytes : float option;
   minor_collections_per_operation : float;
   major_collections_per_operation : float;
   r_squared : float option;
@@ -17,4 +18,5 @@ type t = {
   measured_nanoseconds : int64;
 }
 
-val run : configuration -> Scenario.t -> (unit -> unit) -> t
+val run :
+  configuration -> Scenario.t -> (unit -> unit) -> (unit -> float option) -> t

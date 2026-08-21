@@ -13,7 +13,7 @@ let contains value fragment =
 let test_namespaced_value_respects_admission () =
   let forces = ref 0 in
   let author (m : Observe.Logs.builder) =
-    m.untyped
+    m.value
       [%observe.value
         {
           action = "user_login";

@@ -1,9 +1,6 @@
 module Observer = Observe.Make (Test_io.IO)
 
-let untyped make (builder : Observe.Logs.builder) = builder.untyped (make ())
-
-let typed description make (builder : Observe.Logs.builder) =
-  builder.typed description (make ())
+let untyped make (builder : Observe.Logs.builder) = builder.value (make ())
 
 module Raising_get_io = struct
   include Test_io.IO
@@ -53,6 +50,641 @@ let check_capture_tags name expected capture =
     name
     (String.concat "," expected)
     (String.concat "," (capture_tags capture))
+
+let structured_json log =
+  match Observe.Log.body log with
+  | Observe.Log.Text _ -> Alcotest.fail "expected a structured body"
+  | Observe.Log.Structured { value; _ } ->
+      Observe.Value.frozen_to_json_string value
+
+let contains value fragment =
+  let value_length = String.length value in
+  let fragment_length = String.length fragment in
+  let rec search offset =
+    offset + fragment_length <= value_length
+    && (String.equal (String.sub value offset fragment_length) fragment
+       || search (offset + 1))
+  in
+  fragment_length = 0 || search 0
+
+type mapped_value = { mutable text : string }
+
+let mapped_value_t =
+  Observe.Type.map Observe.Type.string
+    (fun text -> { text })
+    (fun value -> value.text)
+
+type mutable_event = {
+  payload : bytes;
+  numbers : int array;
+  reference : string ref;
+  deferred : string Lazy.t;
+  mapped : mapped_value;
+}
+
+let mutable_event_t =
+  let open Observe.Type in
+  record "mutable_event" (fun payload numbers reference deferred mapped ->
+      { payload; numbers; reference; deferred; mapped })
+  |+ field "payload" bytes (fun event -> event.payload)
+  |+ field "numbers" (array int) (fun event -> event.numbers)
+  |+ field "reference" (ref string) (fun event -> event.reference)
+  |+ field "deferred" (lazy_t string) (fun event -> event.deferred)
+  |+ field "mapped" mapped_value_t (fun event -> event.mapped)
+  |> sealr
+
+type mutable_event_builder = {
+  typed :
+    mutable_event Observe.Schema.patch -> mutable_event Observe.Schema.patch;
+}
+
+let mutable_event_schema =
+  Observe.Generated_runtime.record_schema mutable_event_t ~builder:(fun _ ->
+      { typed = Fun.id })
+
+let wide_lifecycle () =
+  let observer = make_observer () in
+  let captured = ref None in
+  ignore
+    (Observer.with_capture observer (config ()) (fun capture ->
+         let wide = Observe.Logs.create ~name:"checkout" () in
+         Observe.Logs.set wide (fun m ->
+             let open Observe.Logs in
+             m.untyped
+             |+ m.field "cart_id" Observe.Type.string "cart-1"
+             |+ m.field "attempt" Observe.Type.int 2
+             |> m.seal);
+         Observe.Logs.set_level wide Observe.Level.Warn;
+         Observe.Logs.emit wide;
+         captured := Some capture));
+  let capture = Option.get !captured in
+  match Observe.Capture.logs capture with
+  | [ log ] -> (
+      Alcotest.(check bool)
+        "wide kind" true
+        (Observe.Log.kind log = Observe.Log.Wide);
+      Alcotest.(check bool)
+        "final level" true
+        (Observe.Level.equal Observe.Level.Warn (Observe.Log.level log));
+      match Observe.Log.operation log with
+      | None -> Alcotest.fail "wide observation has no operation envelope"
+      | Some operation ->
+          Alcotest.(check string)
+            "operation name" "checkout"
+            (Observe.Log.operation_name operation);
+          Alcotest.(check string)
+            "deterministic identifier" "operation-1"
+            (Observe.Log.operation_id operation);
+          Alcotest.(check int64)
+            "monotonic duration" 25L
+            (Observe.Log.operation_duration_ns operation))
+  | _ -> Alcotest.fail "expected one completed wide observation"
+
+let wide_inert_laziness () =
+  let identifiers = ref 0 in
+  let monotonic = ref 0 in
+  let authored = ref 0 in
+  ignore
+    (Observer.create
+       (Test_io.Host.create
+          ~next_id:(fun () ->
+            incr identifiers;
+            Ok "unexpected")
+          ~monotonic_now:(fun () ->
+            incr monotonic;
+            Ok 0L)
+          ()));
+  let wide = Observe.Logs.create ~name:"inert" () in
+  Observe.Logs.set wide (fun m ->
+      incr authored;
+      m.seal m.untyped);
+  Observe.Logs.set_level wide Observe.Level.Error;
+  Observe.Logs.emit wide;
+  Alcotest.(check int) "inert creation requests no identifier" 0 !identifiers;
+  Alcotest.(check int) "inert creation reads no clock" 0 !monotonic;
+  Alcotest.(check int) "inert set is not authored" 0 !authored
+
+let wide_merge_and_seal () =
+  let observer = make_observer () in
+  let captured = ref None in
+  ignore
+    (Observer.with_capture observer (config ()) (fun capture ->
+         let wide = Observe.Logs.create ~name:"merge" () in
+         Observe.Logs.set wide (fun m ->
+             let open Observe.Logs in
+             m.untyped
+             |+ m.field "phase" Observe.Type.string "started"
+             |+ m.field "customer"
+                  Observe.Type.(
+                    record "customer" (fun id plan -> (id, plan))
+                    |+ field "id" string fst
+                    |+ field "plan" string snd
+                    |> sealr)
+                  ("customer-1", "free")
+             |> m.seal);
+         Observe.Logs.set wide (fun m ->
+             let open Observe.Logs in
+             m.untyped
+             |+ m.field "phase" Observe.Type.string "authorized"
+             |+ m.field "attempts" Observe.Type.int 2
+             |> m.seal);
+         Observe.Logs.emit wide;
+         let authored_after_seal = ref 0 in
+         Observe.Logs.set wide (fun m ->
+             incr authored_after_seal;
+             m.seal m.untyped);
+         Observe.Logs.set_level wide Observe.Level.Error;
+         Observe.Logs.emit wide;
+         Alcotest.(check int)
+           "sealed set is not authored" 0 !authored_after_seal;
+         captured := Some capture));
+  let capture = Option.get !captured in
+  match Observe.Capture.logs capture with
+  | [ log ] ->
+      Alcotest.(check string)
+        "successive fields merge and later scalar replaces"
+        "{\"phase\":\"authorized\",\"customer\":{\"id\":\"customer-1\",\"plan\":\"free\"},\"attempts\":2}"
+        (structured_json log);
+      Alcotest.(check int)
+        "post-seal set diagnosed" 1
+        (Test_io.diagnostic_count
+           (Observe.Capture.diagnostics capture)
+           Observe.Diagnostics.Post_seal_set);
+      Alcotest.(check int)
+        "post-seal level diagnosed" 1
+        (Test_io.diagnostic_count
+           (Observe.Capture.diagnostics capture)
+           Observe.Diagnostics.Post_seal_set_level);
+      Alcotest.(check int)
+        "repeated emission diagnosed" 1
+        (Test_io.diagnostic_count
+           (Observe.Capture.diagnostics capture)
+           Observe.Diagnostics.Post_seal_emit)
+  | _ -> Alcotest.fail "expected exactly one sealed wide observation"
+
+let wide_final_admission () =
+  let observer = make_observer () in
+  let captured = ref None in
+  ignore
+    (Observer.with_capture observer (config ~min_level:Observe.Level.Error ())
+       (fun capture ->
+         let rejected = Observe.Logs.create ~name:"threshold" () in
+         Observe.Logs.emit rejected;
+         let admitted = Observe.Logs.create ~name:"threshold" () in
+         Observe.Logs.set_level admitted Observe.Level.Error;
+         Observe.Logs.emit admitted;
+         captured := Some capture));
+  match Observe.Capture.logs (Option.get !captured) with
+  | [ log ] ->
+      Alcotest.(check bool)
+        "final error level is admitted" true
+        (Observe.Level.equal Observe.Level.Error (Observe.Log.level log));
+      Alcotest.(check string)
+        "empty body remains valid" "{}" (structured_json log)
+  | _ -> Alcotest.fail "expected only the final-level admitted observation"
+
+let wide_error_level () =
+  Printexc.record_backtrace true;
+  let traced_error, traced_backtrace =
+    try failwith "traced" with error -> (error, Printexc.get_raw_backtrace ())
+  in
+  let observer = make_observer () in
+  let captured = ref None in
+  ignore
+    (Observer.with_capture observer (config ~min_level:Observe.Level.Error ())
+       (fun capture ->
+         let derived = Observe.Logs.create ~name:"derived-error" () in
+         Observe.Logs.set derived (fun m ->
+             m.error Observe.Error.exn (Failure "boom"));
+         Observe.Logs.emit derived;
+         let explicit_before = Observe.Logs.create ~name:"explicit-before" () in
+         Observe.Logs.set_level explicit_before Observe.Level.Warn;
+         Observe.Logs.set explicit_before (fun m ->
+             m.error Observe.Error.exn (Failure "before"));
+         Observe.Logs.emit explicit_before;
+         let explicit_after = Observe.Logs.create ~name:"explicit-after" () in
+         Observe.Logs.set explicit_after (fun m ->
+             m.error Observe.Error.exn (Failure "after"));
+         Observe.Logs.set_level explicit_after Observe.Level.Warn;
+         Observe.Logs.emit explicit_after;
+         let nested = Observe.Logs.create ~name:"nested-error" () in
+         Observe.Logs.set nested (fun m ->
+             let open Observe.Logs in
+             m.untyped
+             |+ m.object_ "failure" (fun n ->
+                 n.error Observe.Error.exn (Failure "nested"))
+             |> m.seal);
+         Observe.Logs.emit nested;
+         let traced = Observe.Logs.create ~name:"traced-error" () in
+         Observe.Logs.set traced (fun m ->
+             m.error Observe.Error.exn ~backtrace:traced_backtrace traced_error);
+         Observe.Logs.emit traced;
+         captured := Some capture));
+  match Observe.Capture.logs (Option.get !captured) with
+  | [ direct; nested; traced ] ->
+      Alcotest.(check bool)
+        "an error derives Error without an explicit level" true
+        (Observe.Level.equal Observe.Level.Error (Observe.Log.level direct));
+      Alcotest.(check bool)
+        "explicit error meaning is structured" true
+        (String.starts_with ~prefix:"{\"error\":" (structured_json direct));
+      Alcotest.(check bool)
+        "nested explicit error also derives Error" true
+        (Observe.Level.equal Observe.Level.Error (Observe.Log.level nested));
+      Alcotest.(check bool)
+        "nested explicit error remains nested data" true
+        (String.starts_with ~prefix:"{\"failure\":{\"error\":"
+           (structured_json nested));
+      Alcotest.(check bool)
+        "an explicitly supplied raw backtrace is retained as structured data"
+        true
+        (contains (structured_json traced) "\"backtrace\":")
+  | _ ->
+      Alcotest.fail
+        "explicit Warn must override derived Error in both call orders, and \
+         direct and nested errors must be admitted"
+
+let wide_creation_capability_failures () =
+  let identifier_calls = ref 0 in
+  let monotonic_calls = ref 0 in
+  let authored = ref 0 in
+  let host =
+    Test_io.Host.create
+      ~next_id:(fun () ->
+        incr identifier_calls;
+        match !identifier_calls with
+        | 1 -> Error Observe.IO.Unavailable
+        | 2 -> failwith "identity"
+        | 3 -> Ok ""
+        | _ -> Ok "operation-valid")
+      ~monotonic_now:(fun () ->
+        incr monotonic_calls;
+        Ok (Int64.of_int !monotonic_calls))
+      ()
+  in
+  let observer = Observer.create host in
+  let captured = ref None in
+  ignore
+    (Observer.with_capture observer (config ()) (fun capture ->
+         let create_and_touch name =
+           let wide = Observe.Logs.create ~name () in
+           Observe.Logs.set wide (fun m ->
+               incr authored;
+               m.seal m.untyped);
+           Observe.Logs.emit wide
+         in
+         create_and_touch "unavailable-identity";
+         create_and_touch "raising-identity";
+         create_and_touch "empty-identity";
+         create_and_touch "valid";
+         let invalid_name = Observe.Logs.create ~name:"   " () in
+         Observe.Logs.set invalid_name (fun m ->
+             incr authored;
+             m.seal m.untyped);
+         Observe.Logs.emit invalid_name;
+         captured := Some capture));
+  let capture = Option.get !captured in
+  Alcotest.(check int)
+    "identity requested only for valid operation names" 4 !identifier_calls;
+  Alcotest.(check int)
+    "only one successfully created lifecycle is authored" 1 !authored;
+  Alcotest.(check int)
+    "only active lifecycles read monotonic time" 2 !monotonic_calls;
+  Alcotest.(check int)
+    "identity unavailability includes empty identifiers" 2
+    (Test_io.diagnostic_count
+       (Observe.Capture.diagnostics capture)
+       Observe.Diagnostics.Identity_unavailable);
+  Alcotest.(check int)
+    "raising identity provider is contained" 1
+    (Test_io.diagnostic_count
+       (Observe.Capture.diagnostics capture)
+       Observe.Diagnostics.Identity_raised);
+  Alcotest.(check int)
+    "invalid operation names are withheld" 1
+    (Test_io.diagnostic_count
+       (Observe.Capture.diagnostics capture)
+       Observe.Diagnostics.Canonical_freeze_failed);
+  Alcotest.(check int)
+    "only the valid operation is published" 1
+    (List.length (Observe.Capture.logs capture))
+
+let wide_completion_capability_failures () =
+  let monotonic_calls = ref 0 in
+  let clock_calls = ref 0 in
+  let authored_after_seal = ref 0 in
+  let host =
+    Test_io.Host.create
+      ~monotonic_now:(fun () ->
+        incr monotonic_calls;
+        match !monotonic_calls with
+        | 1 -> Error Observe.IO.Unavailable
+        | 2 -> failwith "monotonic start"
+        | 3 -> Ok 30L
+        | 4 -> Error Observe.IO.Unavailable
+        | 5 -> Ok 50L
+        | 6 -> failwith "monotonic end"
+        | 7 -> Ok 70L
+        | _ -> Ok 80L)
+      ~now:(fun () ->
+        incr clock_calls;
+        match !clock_calls with
+        | 1 -> Error Observe.IO.Unavailable
+        | 2 -> failwith "wall clock"
+        | _ -> Ok (Observe.Timestamp.of_unix_ns 90L))
+      ()
+  in
+  let observer = Observer.create host in
+  let captured = ref None in
+  ignore
+    (Observer.with_capture observer (config ()) (fun capture ->
+         let create_emit_and_touch name =
+           let wide = Observe.Logs.create ~name () in
+           Observe.Logs.emit wide;
+           Observe.Logs.set wide (fun m ->
+               incr authored_after_seal;
+               m.seal m.untyped)
+         in
+         create_emit_and_touch "unavailable-start";
+         create_emit_and_touch "raising-start";
+         create_emit_and_touch "unavailable-end";
+         create_emit_and_touch "raising-end";
+         create_emit_and_touch "unavailable-wall";
+         create_emit_and_touch "raising-wall";
+         create_emit_and_touch "complete";
+         captured := Some capture));
+  let capture = Option.get !captured in
+  Alcotest.(check int)
+    "sealed and inert handles do not author later contributions" 0
+    !authored_after_seal;
+  Alcotest.(check int)
+    "monotonic unavailability is diagnosed at start and completion" 2
+    (Test_io.diagnostic_count
+       (Observe.Capture.diagnostics capture)
+       Observe.Diagnostics.Monotonic_clock_unavailable);
+  Alcotest.(check int)
+    "raising monotonic providers are contained at start and completion" 2
+    (Test_io.diagnostic_count
+       (Observe.Capture.diagnostics capture)
+       Observe.Diagnostics.Monotonic_clock_raised);
+  Alcotest.(check int)
+    "wide wall-clock unavailability is diagnosed" 1
+    (Test_io.diagnostic_count
+       (Observe.Capture.diagnostics capture)
+       Observe.Diagnostics.Clock_unavailable);
+  Alcotest.(check int)
+    "raising wide wall clock is contained" 1
+    (Test_io.diagnostic_count
+       (Observe.Capture.diagnostics capture)
+       Observe.Diagnostics.Clock_raised);
+  Alcotest.(check int)
+    "every lifecycle that reaches completion remains sealed" 5
+    (Test_io.diagnostic_count
+       (Observe.Capture.diagnostics capture)
+       Observe.Diagnostics.Post_seal_set);
+  Alcotest.(check int)
+    "only a fully completed lifecycle is published" 1
+    (List.length (Observe.Capture.logs capture))
+
+let canonical_snapshot () =
+  let observer = make_observer () in
+  let captured = ref None in
+  ignore
+    (Observer.with_capture observer (config ()) (fun capture ->
+         let payload = Bytes.of_string "before" in
+         let numbers = [| 1; 2 |] in
+         let reference = ref "reference-before" in
+         let deferred_source = ref "deferred-before" in
+         let deferred = lazy !deferred_source in
+         let mapped = { text = "mapped-before" } in
+         Observe.Logs.info (fun m ->
+             m.typed mutable_event_schema
+               { payload; numbers; reference; deferred; mapped });
+         Bytes.set payload 0 'X';
+         numbers.(0) <- 99;
+         reference := "reference-after";
+         deferred_source := "deferred-after";
+         mapped.text <- "mapped-after";
+         let wide = Observe.Logs.create ~name:"snapshot" () in
+         let field = Bytes.of_string "wide-before" in
+         Observe.Logs.set wide (fun m ->
+             let open Observe.Logs in
+             m.untyped |+ m.field "payload" Observe.Type.bytes field |> m.seal);
+         Bytes.set field 0 'X';
+         Observe.Logs.emit wide;
+         captured := Some capture));
+  match Observe.Capture.logs (Option.get !captured) with
+  | [ point; wide ] ->
+      Alcotest.(check string)
+        "typed point freezes mutable fields"
+        "{\"payload\":\"before\",\"numbers\":[1,2],\"reference\":\"reference-before\",\"deferred\":\"deferred-before\",\"mapped\":\"mapped-before\"}"
+        (structured_json point);
+      Alcotest.(check string)
+        "wide contribution freezes at set" "{\"payload\":\"wide-before\"}"
+        (structured_json wide)
+  | _ -> Alcotest.fail "expected one point and one wide snapshot"
+
+type 'a boxed_event = { value : 'a }
+
+type 'a boxed_builder = {
+  typed :
+    'a boxed_event Observe.Schema.patch -> 'a boxed_event Observe.Schema.patch;
+}
+
+let typed_box description value (builder : Observe.Logs.builder) =
+  let event_t =
+    let open Observe.Type in
+    record "boxed_event" (fun value -> { value })
+    |+ field "value" description (fun event -> event.value)
+    |> sealr
+  in
+  let schema =
+    Observe.Generated_runtime.record_schema event_t ~builder:(fun _ ->
+        { typed = Fun.id })
+  in
+  builder.typed schema { value }
+
+type cycle = Next of cycle Lazy.t
+
+let cycle_t =
+  Observe.Type.mu (fun self ->
+      let open Observe.Type in
+      variant "cycle" (fun next -> function Next value -> next value)
+      |~ case1
+           ~project:(function Next value -> Some value)
+           "Next" (lazy_t self)
+           (fun value -> Next value)
+      |> sealv)
+
+let canonical_bounds_and_failures () =
+  let observer = make_observer () in
+  let captured = ref None in
+  ignore
+    (Observer.with_capture observer (config ()) (fun capture ->
+         Observe.Logs.info
+           (untyped (fun () ->
+                Observe.Value.object_
+                  [
+                    ( "oversized",
+                      Observe.Value.string (String.make 1_048_577 'x') );
+                  ]));
+         Observe.Logs.info
+           (untyped (fun () ->
+                Observe.Value.object_
+                  [
+                    ( "oversized-bytes",
+                      Observe.Value.embed Observe.Type.bytes
+                        (Bytes.make 1_048_577 'x') );
+                  ]));
+         Observe.Logs.info
+           (untyped (fun () ->
+                Observe.Value.object_
+                  (List.init 1_025 (fun index ->
+                       (string_of_int index, Observe.Value.int index)))));
+         let rec nested depth value =
+           if depth = 0 then value
+           else nested (depth - 1) (Observe.Value.object_ [ ("nested", value) ])
+         in
+         Observe.Logs.info (untyped (fun () -> nested 66 Observe.Value.null));
+         Observe.Logs.info
+           (untyped (fun () ->
+                Observe.Value.list
+                  (List.init 1_000 (fun _ ->
+                       Observe.Value.list
+                         (List.init 100 (fun _ -> Observe.Value.null))))));
+         Observe.Logs.info
+           (untyped (fun () ->
+                let dense_objects =
+                  List.init 1_000 (fun _ ->
+                      Observe.Value.object_
+                        (List.init 95 (fun index ->
+                             ( string_of_int index,
+                               Observe.Value.float (float_of_int index) ))))
+                in
+                Observe.Value.object_
+                  [
+                    ( "bytes",
+                      Observe.Value.embed Observe.Type.bytes
+                        (Bytes.make 1_000_000 'b') );
+                    ("text", Observe.Value.string (String.make 800_000 's'));
+                    ("nested", Observe.Value.list dense_objects);
+                  ]));
+         let rec cyclic = Next (lazy cyclic) in
+         Observe.Logs.info (typed_box cycle_t cyclic);
+         let rec infinite () = Seq.Cons (1, infinite) in
+         Observe.Logs.info
+           (typed_box (Observe.Type.seq Observe.Type.int) infinite);
+         let raising_record =
+           let open Observe.Type in
+           record "raising" (fun value -> value)
+           |+ field "value" int (fun _ -> failwith "getter")
+           |> sealr
+         in
+         Observe.Logs.info (typed_box raising_record 1);
+         Observe.Logs.info
+           (typed_box
+              (Observe.Type.lazy_t Observe.Type.string)
+              (lazy (failwith "lazy")));
+         let raising_map =
+           Observe.Type.map Observe.Type.string
+             (fun _ -> ())
+             (fun () -> failwith "map")
+         in
+         Observe.Logs.info (typed_box raising_map ());
+         captured := Some capture));
+  let capture = Option.get !captured in
+  Alcotest.(check int)
+    "unsafe observations are withheld" 0
+    (List.length (Observe.Capture.logs capture));
+  Alcotest.(check int)
+    "each independent canonical bound is diagnosed" 8
+    (Test_io.diagnostic_count
+       (Observe.Capture.diagnostics capture)
+       Observe.Diagnostics.Canonical_freeze_failed);
+  Alcotest.(check int)
+    "raising projections are contained" 3
+    (Test_io.diagnostic_count
+       (Observe.Capture.diagnostics capture)
+       Observe.Diagnostics.Message_evaluation_raised)
+
+let failed_wide_contribution_seals () =
+  let observer = make_observer () in
+  let authored_after_failure = ref 0 in
+  let captured = ref None in
+  ignore
+    (Observer.with_capture observer (config ()) (fun capture ->
+         let wide = Observe.Logs.create ~name:"failed-contribution" () in
+         let opaque = Observe.Type.of_repr Repr.int in
+         Observe.Logs.set wide (fun m ->
+             let open Observe.Logs in
+             m.untyped |+ m.field "opaque" opaque 1 |> m.seal);
+         Observe.Logs.set wide (fun m ->
+             incr authored_after_failure;
+             m.seal m.untyped);
+         Observe.Logs.emit wide;
+         captured := Some capture));
+  let capture = Option.get !captured in
+  Alcotest.(check int)
+    "failed contribution publishes nothing" 0
+    (List.length (Observe.Capture.logs capture));
+  Alcotest.(check int)
+    "failed contribution seals immediately" 0 !authored_after_failure;
+  Alcotest.(check int)
+    "failed contribution diagnosed once" 1
+    (Test_io.diagnostic_count
+       (Observe.Capture.diagnostics capture)
+       Observe.Diagnostics.Canonical_freeze_failed);
+  Alcotest.(check int)
+    "later set is post-seal" 1
+    (Test_io.diagnostic_count
+       (Observe.Capture.diagnostics capture)
+       Observe.Diagnostics.Post_seal_set);
+  Alcotest.(check int)
+    "later emit is post-seal" 1
+    (Test_io.diagnostic_count
+       (Observe.Capture.diagnostics capture)
+       Observe.Diagnostics.Post_seal_emit)
+
+let aggregate_wide_bound () =
+  let observer = make_observer () in
+  let authored_after_failure = ref 0 in
+  let captured = ref None in
+  ignore
+    (Observer.with_capture observer (config ()) (fun capture ->
+         let wide = Observe.Logs.create ~name:"aggregate-bound" () in
+         Observe.Logs.set wide (fun m ->
+             let open Observe.Logs in
+             List.init 1_024 Fun.id
+             |> List.fold_left
+                  (fun fields index ->
+                    fields
+                    |+ m.field (string_of_int index) Observe.Type.int index)
+                  m.untyped
+             |> m.seal);
+         Observe.Logs.set wide (fun m ->
+             let open Observe.Logs in
+             m.untyped |+ m.field "overflow" Observe.Type.int 1 |> m.seal);
+         Observe.Logs.set wide (fun m ->
+             incr authored_after_failure;
+             m.seal m.untyped);
+         Observe.Logs.emit wide;
+         captured := Some capture));
+  let capture = Option.get !captured in
+  Alcotest.(check int)
+    "aggregate width failure publishes nothing" 0
+    (List.length (Observe.Capture.logs capture));
+  Alcotest.(check int)
+    "aggregate width is checked after every merge" 1
+    (Test_io.diagnostic_count
+       (Observe.Capture.diagnostics capture)
+       Observe.Diagnostics.Canonical_freeze_failed);
+  Alcotest.(check int)
+    "aggregate failure seals before later authoring" 0 !authored_after_failure;
+  Alcotest.(check int)
+    "post-failure set is diagnosed" 1
+    (Test_io.diagnostic_count
+       (Observe.Capture.diagnostics capture)
+       Observe.Diagnostics.Post_seal_set)
 
 let not_initialized () =
   let forced = ref 0 in
@@ -175,19 +807,24 @@ let formatting_failed () =
   Observe.Logs.info (Test_io.text ~tag:"format" (String.make 1 (Char.chr 0xff)));
   Alcotest.(check int) "invalid output not delivered" 0 !console;
   Alcotest.(check int)
-    "formatting failure diagnosed" 1
-    (Test_io.process_diagnostic_count Observe.Diagnostics.Formatting_failed);
+    "invalid authoring withheld before formatting" 1
+    (Test_io.process_diagnostic_count
+       Observe.Diagnostics.Canonical_freeze_failed);
   let raising_json =
     ((fun _ _ -> raise Exit), fun _ -> Error (`Msg "unused decoder"))
   in
   let raising_description =
     Observe.Type.of_repr (Repr.like ~json:raising_json Repr.int)
   in
-  Observe.Logs.info (typed raising_description (fun () -> 1));
+  Observe.Logs.info
+    (untyped (fun () ->
+         Observe.Value.object_
+           [ ("opaque", Observe.Value.embed raising_description 1) ]));
   Alcotest.(check int) "raised output not delivered" 0 !console;
   Alcotest.(check int)
-    "Repr callback exception diagnosed" 1
-    (Test_io.process_diagnostic_count Observe.Diagnostics.Formatting_raised)
+    "opaque Repr description has no unsafe fallback" 2
+    (Test_io.process_diagnostic_count
+       Observe.Diagnostics.Canonical_freeze_failed)
 
 let callback_containment () =
   let clock_calls = ref 0 in
@@ -536,6 +1173,17 @@ let control_backtrace () =
 
 let scenario = function
   | "not-initialized" -> not_initialized
+  | "wide-lifecycle" -> wide_lifecycle
+  | "wide-inert-laziness" -> wide_inert_laziness
+  | "wide-merge-and-seal" -> wide_merge_and_seal
+  | "wide-final-admission" -> wide_final_admission
+  | "wide-error-level" -> wide_error_level
+  | "wide-creation-capabilities" -> wide_creation_capability_failures
+  | "wide-completion-capabilities" -> wide_completion_capability_failures
+  | "canonical-snapshot" -> canonical_snapshot
+  | "canonical-bounds" -> canonical_bounds_and_failures
+  | "failed-wide-contribution" -> failed_wide_contribution_seals
+  | "aggregate-wide-bound" -> aggregate_wide_bound
   | "inert-create" -> inert_create
   | "repeated-install" -> repeated_install
   | "io-owner-conflict" -> io_owner_conflict

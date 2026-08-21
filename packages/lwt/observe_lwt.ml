@@ -1,5 +1,7 @@
 type state = {
   clock : unit -> (Observe.Timestamp.t, Observe.IO.clock_error) result;
+  monotonic_now : unit -> (int64, Observe.IO.clock_error) result;
+  next_id : unit -> (string, Observe.IO.clock_error) result;
   console_style : unit -> Observe.Formatter.style;
   offer_console : string -> Observe.IO.console_acceptance;
   can_lookup_context : unit -> bool;
@@ -7,8 +9,16 @@ type state = {
 
 type t = state
 
-let create ~clock ~console_style ~offer_console ~can_lookup_context () =
-  { clock; console_style; offer_console; can_lookup_context }
+let create ~clock ~monotonic_now ~next_id ~console_style ~offer_console
+    ~can_lookup_context () =
+  {
+    clock;
+    monotonic_now;
+    next_id;
+    console_style;
+    offer_console;
+    can_lookup_context;
+  }
 
 module IO = struct
   type +'a t = 'a Lwt.t
@@ -32,6 +42,11 @@ module IO = struct
 
   module Clock = struct
     let now state = state.clock ()
+    let monotonic_now state = state.monotonic_now ()
+  end
+
+  module Identity = struct
+    let next state = state.next_id ()
   end
 
   module Console = struct

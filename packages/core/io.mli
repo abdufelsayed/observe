@@ -39,6 +39,15 @@ module type S = sig
     val now : state -> (Timestamp.t, clock_error) result
     (** Return wall-clock epoch time. [Unavailable] means that no timestamp can
         be supplied. Ordinary exceptions are diagnosed by the core. *)
+
+    val monotonic_now : state -> (int64, clock_error) result
+    (** Return a process-relative monotonic nanosecond value. The value is used
+        only to compute elapsed time and is never presented as wall time. *)
+  end
+
+  module Identity : sig
+    val next : state -> (string, clock_error) result
+    (** Return a non-empty identifier for one active wide-log occurrence. *)
   end
 
   module Console : sig

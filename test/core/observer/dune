@@ -10,6 +10,17 @@
  (action
   (progn
    (run %{exe:observer_scenario.exe} not-initialized)
+   (run %{exe:observer_scenario.exe} wide-lifecycle)
+   (run %{exe:observer_scenario.exe} wide-inert-laziness)
+   (run %{exe:observer_scenario.exe} wide-merge-and-seal)
+   (run %{exe:observer_scenario.exe} wide-final-admission)
+   (run %{exe:observer_scenario.exe} wide-error-level)
+   (run %{exe:observer_scenario.exe} wide-creation-capabilities)
+   (run %{exe:observer_scenario.exe} wide-completion-capabilities)
+   (run %{exe:observer_scenario.exe} canonical-snapshot)
+   (run %{exe:observer_scenario.exe} canonical-bounds)
+   (run %{exe:observer_scenario.exe} failed-wide-contribution)
+   (run %{exe:observer_scenario.exe} aggregate-wide-bound)
    (run %{exe:observer_scenario.exe} inert-create)
    (run %{exe:observer_scenario.exe} repeated-install)
    (run %{exe:observer_scenario.exe} io-owner-conflict)

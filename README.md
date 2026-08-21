@@ -9,12 +9,15 @@ installable package family.
 The core owns logging behavior without performing I/O or depending on a
 specific runtime.
 
-Observe currently ships logging only. Wide events and metrics are planned on
-top of this foundation but are not part of the current public API.
+Observe supports auto-emitting point logs and manually completed wide logs
+through one logging surface. Runtime-managed current operations and child
+operations remain later work; the portable wide lifecycle is available now.
 
 ## What You Get
 
 - Process-wide tagged text and structured logging.
+- Open and schema-locked wide logs with incremental contributions and
+  at-most-once completion.
 - Admission-first authoring callbacks shared by every message shape.
 - Typed structured values with Repr machine behavior and type-aware pretty
   presentation.
@@ -22,8 +25,10 @@ top of this foundation but are not part of the current public API.
 - Pretty console output with automatic truecolor, 256-color, 16-color, and
   plain fallback.
 - Pure pretty, JSON, and NDJSON formatters.
-- Additional application-owned drains and finite diagnostics.
+- Additional composition-root drains and finite diagnostics.
 - Deterministic scoped capture for tests.
+- One bounded immutable completed observation shared by capture and every
+  output branch.
 - A portable completed-I/O contract, plus a ready Lwt-Unix initializer.
 - Bounded daily NDJSON files through portable, Lwt, and ready Lwt-Unix
   filesystem packages.
@@ -50,7 +55,7 @@ An Lwt-Unix executable links the ready composition:
 Use only `(libraries observe)` for the portable core or for a custom I/O
 composition. The PPX is optional.
 
-Add `observe-fs-lwt-unix` when the application writes daily local files:
+Add `observe-fs-lwt-unix` when the program writes daily local files:
 
 ```lisp
 (libraries observe observe-lwt-unix observe-fs-lwt-unix lwt.unix)
@@ -58,7 +63,7 @@ Add `observe-fs-lwt-unix` when the application writes daily local files:
 
 ## Quick Start
 
-Initialize Observe once at the application composition root:
+Initialize Observe once at the process composition root:
 
 ```ocaml
 let config =
@@ -78,7 +83,7 @@ let () =
 The initializer installs Lwt callback-local context, the Unix wall clock, and
 automatic output on standard error. It is synchronous, starts no scheduler,
 and returns no logger handle. A bounded Lwt worker serializes accepted console
-records once a scheduler runs. Application code emits through the same
+records once a scheduler runs. All caller code emits through the same
 process-wide `Observe.Logs` module.
 
 `Observe.Config.Auto` uses pretty output for an absent, `dev`, or `development`
@@ -89,7 +94,7 @@ override that selection.
 ## Daily Files
 
 Create the filesystem drain before configuration and pass it with the other
-application-owned drains:
+composition-root drains:
 
 ```ocaml
 let main () =
@@ -143,46 +148,132 @@ type-safe, and rejected logs do not evaluate their formatting arguments:
 [%observe.debug text ~tag:"query" "%s" (explain_query query)]
 ```
 
-The same admitted builder owns untyped structured values:
+The same admitted builder owns anonymous structured fields:
 
 ```ocaml
 [%observe.info
-  untyped [%observe.value { action = "user_login"; user_id = 42 }]]
+  untyped { action = "user_login"; user_id = 42 }]
 ```
 
-This expands to:
+The PPX recognizes self-describing literals, lists, options, and nested
+anonymous objects. It does not require a nested value extension or field
+descriptions for that syntax. The equivalent manual builder remains explicit:
 
 ```ocaml
 Observe.Logs.info (fun m ->
+  let open Observe.Logs in
   m.untyped
-    [%observe.value { action = "user_login"; user_id = 42 }])
+  |+ m.field "action" Observe.Type.string "user_login"
+  |+ m.field "user_id" Observe.Type.int 42
+  |> m.seal)
 ```
 
-`[%observe.value ...]` produces an `Observe.Value.t`; the outer logging
-extension places it inside the admitted callback. No payload-specific deferred
-variant is needed because that callback is the single deferred boundary.
-
-OCaml values can carry an Observe type description:
+Every manual field carries its normal `Observe.Type.t` description. An
+arbitrary expression in an open PPX object also supplies its description
+because PPX expansion occurs before OCaml type checking:
 
 ```ocaml
-type event = User_login of { user_id : int; method_ : string }
+let user_id = current_user_id () in
+[%observe.info untyped { action = "user_login"; user_id = int user_id }]
+```
+
+Declared typed schemas are the annotation-free path for variable-rich data.
+`Observe.Value` remains available as an explicit compatibility and inspection
+surface through `m.value`.
+
+Declared point logs have record roots. Deriving a record produces its complete
+description, schema witness, and sparse patch authoring support:
+
+```ocaml
+type phase = Started | Authorized of string [@@deriving observe]
+
+type checkout_event = {
+  cart_id : string;
+  phase : phase;
+}
 [@@deriving observe]
 
 [%observe.info
-  typed event_t (User_login { user_id = 42; method_ = "oauth" })]
+  typed checkout_event_schema { cart_id = "cart-1"; phase = Started }]
 ```
 
 Its manual expansion is:
 
 ```ocaml
 Observe.Logs.info (fun m ->
-  m.typed event_t (User_login { user_id = 42; method_ = "oauth" }))
+  m.typed checkout_event_schema { cart_id = "cart-1"; phase = Started })
 ```
 
 `[%observe.debug ...]`, `[%observe.info ...]`, `[%observe.warn ...]`, and
 `[%observe.error ...]` accept the same three body forms. For a dynamic level,
-use `[%observe.emit (level, typed event_t event)]`; it lowers to
-`Observe.Logs.emit ~level (fun m -> m.typed event_t event)`.
+use `[%observe.emit (level, typed checkout_event_schema event)]`; it lowers to
+`Observe.Logs.log ~level (fun m -> m.typed checkout_event_schema event)`.
+
+For code written against E1, fixed-level calls and `[%observe.emit]` keep their
+meaning. The two manual migrations are mechanical: use `Logs.log ~level`
+instead of the former computed-level `Logs.emit ~level`, and use `m.value value`
+for an already constructed `Observe.Value.t` instead of the former
+`m.untyped value`. The name `m.untyped` now starts the shared anonymous-field
+builder shown above.
+
+An explicitly supplied error can also be the complete point event:
+
+```ocaml
+[%observe.error error Observe.Error.exn ~backtrace exn]
+```
+
+This interprets only the value supplied by the caller; it does not install an
+exception hook or catch ambient failures.
+
+## Wide Logs
+
+A point log is one automatically emitted event. A wide log is the same
+structured logging meaning accumulated across several manual contributions and
+emitted once:
+
+```ocaml
+let checkout = Observe.Logs.create ~name:"checkout" () in
+
+[%observe.set checkout
+  untyped { cart_id = string cart_id; phase = "started" }];
+
+[%observe.set checkout
+  untyped { payment = { status = "authorized" } }];
+
+Observe.Logs.set_level checkout Observe.Level.Info;
+Observe.Logs.emit checkout
+```
+
+Schema-locked wide logs accept sparse typed record patches:
+
+```ocaml
+let checkout =
+  Observe.Logs.create_typed ~name:"checkout" checkout_event_schema
+in
+
+Observe.Logs.set checkout (fun m ->
+  m.typed (checkout_event_patch ~cart_id ~phase:Started ()));
+
+[%observe.set checkout { phase = Authorized authorization_id }];
+Observe.Logs.emit checkout
+```
+
+Successive object contributions merge recursively; a later scalar or variant
+replaces the earlier value at that field. The first `emit` seals the lifecycle
+and publishes at most once. Contributions and completion are lazy for inert or
+already sealed handles.
+
+Errors are explicit contributions, not automatic exception tracking:
+
+```ocaml
+try charge () with exn ->
+  Observe.Logs.set checkout (fun m -> m.error Observe.Error.exn exn);
+  raise exn
+```
+
+An explicit error derives `Error` when no level was selected. An explicit
+`set_level` always wins. Observe records only errors supplied by the caller in
+this portable API; managed runtime catching belongs to later integrations.
 
 ## Console Output
 
@@ -194,28 +285,31 @@ The ready Unix composition produces compact text and ordered structured trees:
   ├─ action: "user_login"
   └─ user_id: 42
 10:23:45.614 INFO [orders]
-  └─ User_login
-     ├─ user_id: 42
-     └─ method_: "oauth"
+  ├─ cart_id: "cart-1"
+  └─ phase: Started
 ```
 
 The Unix adapter passively detects terminal color capability. Redirected
 output, `NO_COLOR`, an absent or empty `TERM`, `TERM=dumb`, and failed probes
 select plain output. Observe does not query or consume terminal input.
 
-Derived descriptions preserve distinctions that JSON cannot: strings remain
+Derived descriptions and the immutable snapshot preserve distinctions that
+JSON cannot: strings remain
 quoted, ordinary constructors render as `Granted`, and polymorphic constructors
-render as `` `Development``. Observe's production JSON path writes directly
-from the attached type description into the formatter's existing buffer. Repr
-continues to own decoding, equality, comparison, binary operations, and other
-machine interoperability. Use `Observe.Type.repr` to pass an Observe
-description to Repr APIs, or `Observe.Type.of_repr` to lift an existing Repr
-description through the compatibility path.
+render as `` `Development``. The attached type description freezes admitted
+authoring directly into that format-neutral snapshot; JSON, pretty output,
+capture, and drains then consume the same completed value. Repr continues to
+own decoding, equality, comparison, binary operations, and other machine
+interoperability. Use `Observe.Type.repr` to pass an Observe description to Repr
+APIs. `Observe.Type.of_repr` remains useful for direct Repr interoperability,
+but an opaque lifted description cannot enter a completed log unless Observe
+has a bounded package-owned freezer for it; there is no live or unbounded
+fallback.
 
 ## Example
 
-The runnable example keeps initialization, tagged logs, untyped data, and
-rich typed domain events in one place:
+The runnable example follows one checkout scenario through text and structured
+point logs, then open and schema-locked wide logs:
 
 ```sh
 opam exec -- dune exec examples/simple.exe
@@ -227,9 +321,9 @@ Daily filesystem composition has a separate runnable example:
 opam exec -- dune exec examples/filesystem.exe -- .observe/logs
 ```
 
-It uses nested records, lists, options, ordinary variants, polymorphic variants,
-and constructor payloads. The same executable is exercised by
-`opam exec -- dune build @examples`.
+It shows annotation-free anonymous literals, nested objects, lists, options,
+ordinary variants, and constructor payloads. The same executable is exercised
+by `opam exec -- dune build @examples`.
 
 ## Packages
 
@@ -243,7 +337,7 @@ effect, and ready-composition boundaries:
 | `observe-lwt` | Lwt callback-local effects completed with caller-provided clock and console functions. |
 | `observe-lwt-unix` | Ready Lwt-Unix composition, standard-error output, and Lwt-scoped test capture. |
 | `observe-fs` | Portable daily filename, NDJSON projection, bounded worker state, barriers, and failure behavior over injected I/O. |
-| `observe-fs-lwt` | Lwt completion for application-owned or Mirage filesystem capabilities, without Unix dependencies. |
+| `observe-fs-lwt` | Lwt completion for caller-provided filesystem capabilities, including Mirage capabilities, without Unix dependencies. |
 | `observe-fs-lwt-unix` | Ready recursive-directory setup, append-only daily files, and registration with the Lwt-Unix lifecycle. |
 
 The core does not depend on Lwt or Unix. `Observe.Make (IO)` accepts one
@@ -274,8 +368,9 @@ Observe_lwt_unix.Test.with_capture_exn test_config (fun capture ->
     Lwt.return logs)
 ```
 
-Capture is finite and deterministic. Typed OCaml values remain retained by
-reference rather than becoming deep snapshots.
+Capture is finite and deterministic. Every retained `Log.t` is the same
+bounded immutable completed observation offered to console and drains; caller
+mutation after emission cannot change later capture or output.
 
 ## Development
 

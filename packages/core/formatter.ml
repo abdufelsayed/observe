@@ -40,7 +40,7 @@ let pretty_with_line_feed line_feed style =
         let renderer =
           match Log.body log with
           | Text _ -> Pretty.create ~capacity:128 style
-          | Untyped _ | Typed _ ->
+          | Structured _ ->
               Pretty.create ~capacity:(pretty_capacity style) style
         in
         (match Log.body log with
@@ -48,29 +48,16 @@ let pretty_with_line_feed line_feed style =
             add_header renderer ~scope:tag log;
             Pretty.space renderer;
             Pretty.text renderer message
-        | Untyped value ->
+        | Structured { value; _ } ->
             add_header renderer ~scope:(Log.service log) log;
             Pretty.newline renderer;
-            Value.append_pretty renderer Pretty.Root value
-        | Typed (description, value) ->
-            add_header renderer ~scope:(Log.service log) log;
-            Pretty.newline renderer;
-            Type.pretty description renderer Pretty.Root value);
+            Value.append_frozen_pretty renderer Pretty.Root value);
         if line_feed then Pretty.newline renderer;
         Ok (Pretty.contents renderer)
       with Pretty.Error error -> Error (pretty_error error))
 
 let pretty = pretty_with_line_feed false
 let pretty_line = pretty_with_line_feed true
-
-exception Json_failure of error
-
-let append_value buffer value =
-  match Value.append_json buffer value with
-  | Ok () -> ()
-  | Error Value.Invalid_utf8 -> raise (Json_failure Invalid_utf8)
-  | Error Value.Non_finite_float -> raise (Json_failure Non_finite_float)
-  | Error Value.Unsupported_value -> raise (Json_failure Unsupported_value)
 
 let append_body_json buffer log =
   match Log.body log with
@@ -80,8 +67,7 @@ let append_body_json buffer log =
       Buffer.add_string buffer ",\"message\":";
       Json_writer.string buffer message;
       Buffer.add_char buffer '}'
-  | Untyped value -> append_value buffer value
-  | Typed (description, value) -> Type.append_json buffer description value
+  | Structured { value; _ } -> Value.append_frozen_json buffer value
 
 let encode_json ~line_feed log =
   try
@@ -109,7 +95,6 @@ let encode_json ~line_feed log =
     Ok (Buffer.contents buffer)
   with
   | Json_writer.Invalid_utf8 -> Error Invalid_utf8
-  | Json_failure error -> Error error
   | Repr.Unsupported_operation _ -> Error Unsupported_value
 
 let json = create (encode_json ~line_feed:false)

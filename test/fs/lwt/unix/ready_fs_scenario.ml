@@ -71,6 +71,8 @@ let install timestamps drain =
   in
   let io =
     Observe_lwt.create ~clock
+      ~monotonic_now:(fun () -> Ok 0L)
+      ~next_id:(fun () -> Ok "filesystem-operation")
       ~console_style:(fun () -> Observe.Formatter.Plain)
       ~offer_console:(fun _ -> Observe.IO.Rejected)
       ~can_lookup_context:(fun () -> true)

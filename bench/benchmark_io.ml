@@ -3,6 +3,8 @@ type 'a binding_key = { mutable value : 'a option }
 type t = {
   style : Observe.Formatter.style;
   clock : unit -> (Observe.Timestamp.t, Observe.IO.clock_error) result;
+  monotonic_now : unit -> (int64, Observe.IO.clock_error) result;
+  next_id : unit -> (string, Observe.IO.clock_error) result;
   console : string -> Observe.IO.console_acceptance;
 }
 
@@ -10,11 +12,13 @@ type host = t
 
 let create ?(style = Observe.Formatter.Plain)
     ?(clock = fun () -> Ok (Observe.Timestamp.of_unix_ns 42L))
+    ?(monotonic_now = fun () -> Ok 0L)
+    ?(next_id = fun () -> Ok "benchmark-operation")
     ?(console =
       fun output ->
         ignore (Sys.opaque_identity output : string);
         Observe.IO.Accepted) () =
-  { style; clock; console }
+  { style; clock; monotonic_now; next_id; console }
 
 module IO = struct
   type +'a t = 'a
@@ -36,6 +40,11 @@ module IO = struct
 
   module Clock = struct
     let now state = state.clock ()
+    let monotonic_now state = state.monotonic_now ()
+  end
+
+  module Identity = struct
+    let next state = state.next_id ()
   end
 
   module Console = struct

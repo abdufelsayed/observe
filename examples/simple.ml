@@ -1,121 +1,75 @@
-type access = Granted | Denied of { reason : string; retryable : bool }
-[@@deriving observe]
-
-type environment = [ `Development | `Staging | `Production ]
-[@@deriving observe]
-
-type auth_method = Password | Passkey | Oauth of { provider : string }
-[@@deriving observe]
-
-type money = { currency : string; amount_minor : int } [@@deriving observe]
-
-type line_item = { sku : string; quantity : int; unit_price : money }
-[@@deriving observe]
+type phase = Started | Inventory_reserved | Completed [@@deriving observe]
 
 type payment =
+  | Pending
   | Authorized of { authorization_id : string }
-  | Declined of { code : string; message : string }
+  | Declined of { code : string }
 [@@deriving observe]
 
-type sync_source = [ `Postgres | `Mysql ] [@@deriving observe]
-type sync_target = [ `S3 | `Filesystem ] [@@deriving observe]
-
-type event =
-  | User_login of {
-      user_id : int;
-      method_ : auth_method;
-      label : string;
-      access : access;
-      environment : environment;
-      roles : string list;
-      remembered : bool;
-      device_id : string option;
-    }
-  | Checkout_processed of {
-      checkout_id : string;
-      customer_id : string option;
-      items : line_item list;
-      total : money;
-      payment : payment;
-      latency_ms : float;
-    }
-  | Sync_failed of {
-      source : sync_source;
-      target : sync_target;
-      attempts : int;
-      error : string;
-    }
+type checkout = {
+  cart_id : string;
+  item_count : int;
+  phase : phase;
+  payment : payment;
+}
 [@@deriving observe]
 
 let config =
-  Observe.Config.create_exn ~service:"example" ~environment:"development"
-    ~min_level:Observe.Level.Debug ()
+  Observe.Config.create_exn ~service:"checkout-example"
+    ~environment:"development" ~min_level:Observe.Level.Debug ()
 
 let () = Observe_lwt_unix.init_exn config
 
 let main () =
-  [%observe.debug text ~tag:"router" "matched POST /api/checkout"];
-  [%observe.info text ~tag:"auth" "user logged in"];
-  [%observe.warn text ~tag:"cache" "cache miss for user:42"];
-  [%observe.error text ~tag:"payment" "payment webhook failed"];
+  (* Text point log. *)
+  [%observe.debug text ~tag:"checkout" "checkout route matched"];
+
+  (* Anonymous point log. Self-describing values need no annotations. *)
   [%observe.info
     untyped
-      [%observe.value
-        {
-          action = "request_finished";
-          request_id = "req_01JQ8Y7A6M";
-          route = "/api/checkout";
-          status = 200;
-          duration_ms = 12.8;
-          cached = false;
-        }]];
+      {
+        action = "cart_validated";
+        cart_id = "cart-42";
+        item_count = 2;
+        customer = { plan = "team"; returning = true };
+        applied_coupons = [ "WELCOME"; "TEAM" ];
+        referral = None;
+      }];
+
+  (* Declared point log. The schema supplies every field description. *)
   [%observe.info
-    typed event_t
-      (User_login
-         {
-           user_id = 42;
-           method_ = Oauth { provider = "github" };
-           label = "Granted";
-           access = Granted;
-           environment = `Development;
-           roles = [ "admin"; "billing" ];
-           remembered = true;
-           device_id = Some "device_7f3a";
-         })];
-  [%observe.warn
-    typed event_t
-      (Checkout_processed
-         {
-           checkout_id = "chk_01JQ8Z2C3A";
-           customer_id = None;
-           items =
-             [
-               {
-                 sku = "ocaml-hoodie";
-                 quantity = 1;
-                 unit_price = { currency = "USD"; amount_minor = 8_900 };
-               };
-               {
-                 sku = "camel-sticker";
-                 quantity = 2;
-                 unit_price = { currency = "USD"; amount_minor = 500 };
-               };
-             ];
-           total = { currency = "USD"; amount_minor = 9_900 };
-           payment =
-             Declined
-               { code = "insufficient_funds"; message = "card was declined" };
-           latency_ms = 38.7;
-         })];
-  [%observe.error
-    typed event_t
-      (Sync_failed
-         {
-           source = `Postgres;
-           target = `S3;
-           attempts = 3;
-           error = "connection timed out";
-         })];
+    typed checkout_schema
+      {
+        cart_id = "cart-42";
+        item_count = 2;
+        phase = Completed;
+        payment = Authorized { authorization_id = "auth-7" };
+      }];
+
+  (* Open wide log. Each contribution uses the same anonymous value syntax. *)
+  let open_checkout = Observe.Logs.create ~name:"open-checkout" () in
+  [%observe.set
+    open_checkout untyped
+      {
+        cart_id = "cart-42";
+        phase = "started";
+        cart = { item_count = 2; currency = "USD" };
+      }];
+  [%observe.set
+    open_checkout untyped
+      { phase = "authorized"; payment = { authorization_id = "auth-7" } }];
+  Observe.Logs.emit open_checkout;
+
+  (* Schema-locked wide log. Sparse patches remain ordinary typed OCaml. *)
+  let typed_checkout =
+    Observe.Logs.create_typed ~name:"typed-checkout" checkout_schema
+  in
+  [%observe.set
+    typed_checkout { cart_id = "cart-42"; item_count = 2; phase = Started }];
+  [%observe.set typed_checkout { phase = Inventory_reserved }];
+  [%observe.set
+    typed_checkout { payment = Authorized { authorization_id = "auth-7" } }];
+  Observe.Logs.emit typed_checkout;
   Lwt.return_unit
 
 let () = Lwt_main.run (Lwt.finalize main Observe_lwt_unix.shutdown)

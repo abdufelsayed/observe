@@ -14,6 +14,8 @@ val create_outputs :
   Config.t ->
   console_style:Formatter.style ->
   clock:(unit -> (Timestamp.t, Io.clock_error) result) ->
+  monotonic_now:(unit -> (int64, Io.clock_error) result) ->
+  next_id:(unit -> (string, Io.clock_error) result) ->
   console:(string -> Io.console_acceptance) ->
   is_control_exception:(exn -> bool) ->
   t
@@ -21,6 +23,8 @@ val create_outputs :
 val create_capture :
   Config.t ->
   clock:(unit -> (Timestamp.t, Io.clock_error) result) ->
+  monotonic_now:(unit -> (int64, Io.clock_error) result) ->
+  next_id:(unit -> (string, Io.clock_error) result) ->
   is_control_exception:(exn -> bool) ->
   Capture.t ->
   t
@@ -28,4 +32,16 @@ val create_capture :
 val after_install : t -> unit
 (** Record installation-only diagnostics after this engine wins publication. *)
 
-val emit : t -> Level.t -> Message.author -> unit
+val emit_point : t -> Level.t -> Message.author -> unit
+
+type wide
+type contribution = { body : Snapshot.t; has_error : bool }
+
+val inert_wide : unit -> wide
+val create_wide : t -> name:string -> origin:Log.structured_origin -> wide
+
+val contribute_wide :
+  wide -> (unit -> (contribution, Snapshot.error) result) -> unit
+
+val set_wide_level : wide -> Level.t -> unit
+val emit_wide : wide -> unit

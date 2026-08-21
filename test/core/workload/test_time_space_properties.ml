@@ -148,9 +148,9 @@ let prop_temporal_pipeline_obeys_stage_boundaries =
             List.iter
               (fun event ->
                 current_clock := event.clock;
-                Observe.Logs.emit ~level:event.level (fun m ->
+                Observe.Logs.log ~level:event.level (fun m ->
                     incr forced;
-                    m.untyped (Observe.Value.int event.value)))
+                    m.value (Observe.Value.int event.value)))
               case.events;
             capture)
       with

@@ -8,6 +8,8 @@ type t =
   | Object of (string * t) list
   | Embedded : 'a Type.t * 'a -> t
 
+type frozen = Snapshot.t
+
 let null = Null
 let bool value = Bool value
 let int value = Int value
@@ -177,3 +179,58 @@ let to_json_string value =
   match append_json buffer value with
   | Ok () -> Ok (Buffer.contents buffer)
   | Error _ as error -> error
+
+let freeze value =
+  let context = Snapshot.create_context () in
+  let rec freeze_at ~depth value =
+    match Snapshot.check_depth ~depth with
+    | Error _ as error -> error
+    | Ok () -> (
+        match value with
+        | Null -> Snapshot.null context ~depth
+        | Bool value -> Snapshot.bool context ~depth value
+        | Int value ->
+            let buffer = Buffer.create 24 in
+            Json_writer.int buffer value;
+            Snapshot.integer context ~depth (Buffer.contents buffer)
+        | Float value -> (
+            match classify_float value with
+            | FP_nan | FP_infinite -> Error Snapshot.Conversion_failed
+            | FP_normal | FP_subnormal | FP_zero ->
+                Snapshot.float context ~depth value)
+        | String value -> Snapshot.string context ~depth value
+        | List values ->
+            let rec collect count frozen = function
+              | [] -> Snapshot.list context ~depth (List.rev frozen)
+              | _ when count >= Snapshot.width_limit ->
+                  Error Snapshot.Limit_exceeded
+              | value :: rest -> (
+                  match freeze_at ~depth:(depth + 1) value with
+                  | Error _ as error -> error
+                  | Ok value -> collect (count + 1) (value :: frozen) rest)
+            in
+            collect 0 [] values
+        | Object fields ->
+            let rec collect count frozen = function
+              | [] -> Snapshot.object_ context ~depth (List.rev frozen)
+              | _ when count >= Snapshot.width_limit ->
+                  Error Snapshot.Limit_exceeded
+              | (name, value) :: rest -> (
+                  match freeze_at ~depth:(depth + 1) value with
+                  | Error _ as error -> error
+                  | Ok value ->
+                      collect (count + 1) ((name, value) :: frozen) rest)
+            in
+            collect 0 [] fields
+        | Embedded (description, value) ->
+            Type.freeze_into description context ~depth value)
+  in
+  freeze_at ~depth:0 value
+
+let append_frozen_json = Snapshot.append_json
+let append_frozen_pretty = Snapshot.append_pretty
+
+let frozen_to_json_string value =
+  let buffer = Buffer.create 128 in
+  Snapshot.append_json buffer value;
+  Buffer.contents buffer

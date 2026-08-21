@@ -90,16 +90,39 @@ module Host = struct
   type t = {
     console_style : Observe.Formatter.style;
     now : unit -> (Observe.Timestamp.t, Observe.IO.clock_error) result;
+    monotonic_now : unit -> (int64, Observe.IO.clock_error) result;
+    next_id : unit -> (string, Observe.IO.clock_error) result;
     offer_console : string -> Observe.IO.console_acceptance;
   }
 
   let create ?(console_style = Observe.Formatter.Plain)
-      ?(now = fun () -> Ok (Observe.Timestamp.of_unix_ns 42L))
-      ?(offer_console = fun _ -> Observe.IO.Accepted) () =
-    { console_style; now; offer_console }
+      ?(now = fun () -> Ok (Observe.Timestamp.of_unix_ns 42L)) ?monotonic_now
+      ?next_id ?(offer_console = fun _ -> Observe.IO.Accepted) () =
+    let monotonic_now =
+      match monotonic_now with
+      | Some monotonic_now -> monotonic_now
+      | None ->
+          let next = ref 100L in
+          fun () ->
+            let value = !next in
+            next := Int64.add value 25L;
+            Ok value
+    in
+    let next_id =
+      match next_id with
+      | Some next_id -> next_id
+      | None ->
+          let next = ref 0 in
+          fun () ->
+            incr next;
+            Ok ("operation-" ^ string_of_int !next)
+    in
+    { console_style; now; monotonic_now; next_id; offer_console }
 
   let console_style t = t.console_style
   let now t = t.now ()
+  let monotonic_now t = t.monotonic_now ()
+  let next_id t = t.next_id ()
   let offer_console t output = t.offer_console output
 end
 
@@ -121,6 +144,11 @@ module IO = struct
 
   module Clock = struct
     let now = Host.now
+    let monotonic_now = Host.monotonic_now
+  end
+
+  module Identity = struct
+    let next = Host.next_id
   end
 
   module Console = struct
@@ -151,6 +179,11 @@ module Inherited_io = struct
 
   module Clock = struct
     let now state = Host.now state.host
+    let monotonic_now state = Host.monotonic_now state.host
+  end
+
+  module Identity = struct
+    let next state = Host.next_id state.host
   end
 
   module Console = struct
@@ -175,12 +208,12 @@ let process_diagnostic_count kind =
 let text_payload log =
   match Observe.Log.body log with
   | Observe.Log.Text { tag; message } -> Some (tag, message)
-  | Observe.Log.Untyped _ | Observe.Log.Typed _ -> None
+  | Observe.Log.Structured _ -> None
 
 let text ~tag message (builder : Observe.Logs.builder) =
   builder.text ~tag "%s" message
 
-let untyped value (builder : Observe.Logs.builder) = builder.untyped value
+let untyped value (builder : Observe.Logs.builder) = builder.value value
 
 let typed description value (builder : Observe.Logs.builder) =
   builder.typed description value

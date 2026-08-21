@@ -72,11 +72,11 @@ let () =
       require calls "Observe.Type.|~" 2;
       require calls "Observe.Type.variant event" 1;
       require calls "Observe.Type.case1 User_login" 1;
-      require calls "Observe.Type.sealr" 1;
-      require calls "Observe.Type.|+" 2;
-      require calls "Observe.Type.record User_login" 1;
-      require calls "Observe.Type.field user_id" 1;
-      require calls "Observe.Type.field method_" 1;
+      require calls "Observe.Type.sealr" 2;
+      require calls "Observe.Type.|+" 4;
+      require calls "Observe.Type.record User_login" 2;
+      require calls "Observe.Type.field user_id" 2;
+      require calls "Observe.Type.field method_" 2;
       require calls "Observe.Type.case0 Idle" 1
   | Some "recursive" ->
       require bindings "node_t" 1;
@@ -88,8 +88,11 @@ let () =
       require calls "Observe.Logs.info" 1;
       require calls "Observe.Logs.warn" 1;
       require calls "Observe.Logs.error" 1;
-      require calls "Observe.Logs.emit" 1;
+      require calls "Observe.Logs.log" 1;
       require fields "text" 2;
-      require fields "untyped" 1;
+      require fields "value" 1;
+      require fields "untyped" 0;
+      require fields "field" 0;
+      require fields "seal" 0;
       require fields "typed" 2
   | Some mode -> fail "unknown expansion mode %S" mode

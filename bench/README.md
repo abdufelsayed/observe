@@ -29,13 +29,22 @@ rates because those monotonic counters are more reliable as direct differences
 than as independent regression responders. Reported major allocation includes
 promoted words; promoted allocation is also reported separately.
 
+Canonical point and wide scenarios also retain the latest completed `Log.t`
+through their benchmark drain and report its reachable heap size. This is a
+structural retained-size estimate for the immutable completed observation, not
+an operating-system resident-memory measurement. Other scenarios report
+retained size as unavailable.
+
 ## Suites
 
 - `component` isolates untyped value construction, typed JSON projection, and
   JSON or pretty formatting.
 - `core` measures public logging calls with a controlled clock and no-op I/O.
-  It covers filtering, routing, drain fan-out, JSON, and true-color pretty
-  formatting.
+  It covers filtering, routing, drain fan-out, JSON, true-color pretty
+  formatting, complete typed canonical points, anonymous point fields, opaque
+  compatibility failure, open wide fragments, typed sparse patches, and nested
+  typed patches. These boundaries are named separately in the report; no
+  latency number is treated as proof of semantic correctness or lock-freedom.
 - `lwt-unix` initializes `Observe_lwt_unix` and performs its real clock and Unix
   standard-error write. Each measured operation includes a `flush` sequence
   barrier, so it measures formatting, bounded submission, scheduler wakeup,

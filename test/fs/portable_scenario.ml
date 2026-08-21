@@ -51,6 +51,8 @@ let install ?(extra_drains = []) timestamps drain =
   in
   let io =
     Observe_lwt.create ~clock
+      ~monotonic_now:(fun () -> Ok 0L)
+      ~next_id:(fun () -> Ok "filesystem-operation")
       ~console_style:(fun () -> Observe.Formatter.Plain)
       ~offer_console:(fun _ -> Observe.IO.Rejected)
       ~can_lookup_context:(fun () -> true)
@@ -121,11 +123,19 @@ let sample_t =
   |+ field "value" string (fun sample -> sample.value)
   |> sealr
 
+type sample_builder = {
+  typed : sample Observe.Schema.patch -> sample Observe.Schema.patch;
+}
+
+let sample_schema =
+  Observe.Generated_runtime.record_schema sample_t ~builder:(fun _ ->
+      { typed = Fun.id })
+
 let mutation () =
   let writer = create () in
   install [ 0L ] (Writer.drain writer);
   let sample = { value = "before" } in
-  Observe.Logs.info (fun m -> m.typed sample_t sample);
+  Observe.Logs.info (fun m -> m.typed sample_schema sample);
   sample.value <- "after";
   Lwt_main.run (Writer.shutdown writer) |> Result.get_ok;
   let output =
@@ -150,13 +160,13 @@ let projection () =
   install ~extra_drains:[ witness ] [ 0L; 1L; 2L ] (Writer.drain writer);
   emit "text" "text payload";
   Observe.Logs.info (fun m ->
-      m.untyped
+      m.value
         (Observe.Value.object_
            [
              ("action", Observe.Value.string "untyped");
              ("count", Observe.Value.int 2);
            ]));
-  Observe.Logs.info (fun m -> m.typed sample_t { value = "typed payload" });
+  Observe.Logs.info (fun m -> m.typed sample_schema { value = "typed payload" });
   Lwt_main.run (Writer.shutdown writer) |> Result.get_ok;
   let actual =
     Observe_fs_test_support.Fs_fixture.contents "/logs/1970-01-01.jsonl"

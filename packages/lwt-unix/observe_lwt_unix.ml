@@ -25,6 +25,15 @@ module Clock = struct
              (Int64.add day_nanoseconds subday_nanoseconds))
 
   let now () = timestamp_of_day_and_picoseconds (Ptime_clock.now_d_ps ())
+  let monotonic_now () = Ok (Mtime_clock.elapsed_ns ())
+end
+
+module Identity = struct
+  let next_value = Atomic.make 0
+
+  let next () =
+    let value = Atomic.fetch_and_add next_value 1 + 1 in
+    Ok ("operation-" ^ string_of_int value)
 end
 
 module Console = struct
@@ -90,7 +99,8 @@ let writers =
 let owner_thread = Thread.id (Thread.self ())
 
 let io =
-  Observe_lwt.create ~clock:Clock.now ~console_style:Console.style
+  Observe_lwt.create ~clock:Clock.now ~monotonic_now:Clock.monotonic_now
+    ~next_id:Identity.next ~console_style:Console.style
     ~offer_console:Console.offer
     ~can_lookup_context:(fun () -> Thread.id (Thread.self ()) = owner_thread)
     ()

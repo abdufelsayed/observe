@@ -6,7 +6,15 @@ type kind =
   | Capture_lookup_raised
   | Clock_unavailable
   | Clock_raised
+  | Identity_unavailable
+  | Identity_raised
+  | Monotonic_clock_unavailable
+  | Monotonic_clock_raised
   | Message_evaluation_raised
+  | Canonical_freeze_failed
+  | Post_seal_set
+  | Post_seal_set_level
+  | Post_seal_emit
   | Formatting_failed
   | Formatting_raised
   | Console_rejected

@@ -4,7 +4,15 @@ type kind =
   | Capture_lookup_raised
   | Clock_unavailable
   | Clock_raised
+  | Identity_unavailable
+  | Identity_raised
+  | Monotonic_clock_unavailable
+  | Monotonic_clock_raised
   | Message_evaluation_raised
+  | Canonical_freeze_failed
+  | Post_seal_set
+  | Post_seal_set_level
+  | Post_seal_emit
   | Formatting_failed
   | Formatting_raised
   | Console_rejected
@@ -25,7 +33,15 @@ let kinds =
     Capture_lookup_raised;
     Clock_unavailable;
     Clock_raised;
+    Identity_unavailable;
+    Identity_raised;
+    Monotonic_clock_unavailable;
+    Monotonic_clock_raised;
     Message_evaluation_raised;
+    Canonical_freeze_failed;
+    Post_seal_set;
+    Post_seal_set_level;
+    Post_seal_emit;
     Formatting_failed;
     Formatting_raised;
     Console_rejected;
@@ -43,16 +59,24 @@ let index = function
   | Capture_lookup_raised -> 2
   | Clock_unavailable -> 3
   | Clock_raised -> 4
-  | Message_evaluation_raised -> 5
-  | Formatting_failed -> 6
-  | Formatting_raised -> 7
-  | Console_rejected -> 8
-  | Console_raised -> 9
-  | Drain_rejected -> 10
-  | Drain_raised -> 11
-  | Drain_delivery_failed -> 12
-  | Capture_overflow -> 13
-  | Capture_closed -> 14
+  | Identity_unavailable -> 5
+  | Identity_raised -> 6
+  | Monotonic_clock_unavailable -> 7
+  | Monotonic_clock_raised -> 8
+  | Message_evaluation_raised -> 9
+  | Canonical_freeze_failed -> 10
+  | Post_seal_set -> 11
+  | Post_seal_set_level -> 12
+  | Post_seal_emit -> 13
+  | Formatting_failed -> 14
+  | Formatting_raised -> 15
+  | Console_rejected -> 16
+  | Console_raised -> 17
+  | Drain_rejected -> 18
+  | Drain_raised -> 19
+  | Drain_delivery_failed -> 20
+  | Capture_overflow -> 21
+  | Capture_closed -> 22
 
 let create_store () = Array.init (Array.length kinds) (fun _ -> Atomic.make 0)
 

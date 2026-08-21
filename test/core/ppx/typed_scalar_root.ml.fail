@@ -1,0 +1,1 @@
+let _ = Observe.Logs.info (fun m -> m.typed Observe.Type.int 1)

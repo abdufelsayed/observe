@@ -1,5 +1,10 @@
 type suite = Component | Core | Lwt_unix | Fs_lwt_unix
-type prepared = { operation : unit -> unit; cleanup : unit -> unit }
+
+type prepared = {
+  operation : unit -> unit;
+  retained_bytes : unit -> float option;
+  cleanup : unit -> unit;
+}
 
 type t = {
   name : string;
@@ -25,7 +30,10 @@ let payload scenario = scenario.payload
 let logical_operations scenario = scenario.logical_operations
 let consume value = ignore (Sys.opaque_identity value)
 let no_cleanup () = ()
-let prepared operation = { operation; cleanup = no_cleanup }
+let no_retained_size () = None
+
+let prepared ?(retained_bytes = no_retained_size) operation =
+  { operation; retained_bytes; cleanup = no_cleanup }
 
 let config ?(environment = "production") ?(console = Observe.Config.Auto)
     ?(min_level = Observe.Level.Debug) ?(drains = []) () =
@@ -37,11 +45,34 @@ let accepted_drain () =
       consume log;
       Observe.Drain.Accepted)
 
+let retained_log_probe () =
+  let retained = ref None in
+  let drain =
+    Observe.Drain.create (fun log ->
+        retained := Some log;
+        Observe.Drain.Accepted)
+  in
+  let retained_bytes () =
+    Option.map
+      (fun log ->
+        float_of_int (Obj.reachable_words (Obj.repr log) * (Sys.word_size / 8)))
+      !retained
+  in
+  (drain, retained_bytes)
+
 let core_operation ?(style = Observe.Formatter.Plain) config make_message =
   let state = Benchmark_io.create ~style () in
   let observer = Observer.create state in
   Observer.init_exn observer config;
   prepared (fun () -> Observe.Logs.info (make_message ()))
+
+let retained_core_operation operation =
+  let drain, retained_bytes = retained_log_probe () in
+  let state = Benchmark_io.create () in
+  let observer = Observer.create state in
+  Observer.init_exn observer
+    (config ~console:Observe.Config.Silent ~drains:[ drain ] ());
+  prepared ~retained_bytes operation
 
 let captured_log make_message =
   let observer = Observer.create (Benchmark_io.create ()) in
@@ -84,6 +115,7 @@ let lwt_unix_operation config make_message =
         (fun () ->
           Observe.Logs.info (make_message ());
           Lwt_main.run (Observe_lwt_unix.flush ()));
+      retained_bytes = no_retained_size;
       cleanup =
         (fun () ->
           Fun.protect ~finally:restore (fun () ->
@@ -126,6 +158,7 @@ let fs_lwt_unix_operation ~batch_size make_message =
             Observe.Logs.info (make_message ())
           done;
           Lwt_main.run (Observe_lwt_unix.flush ()));
+      retained_bytes = no_retained_size;
       cleanup =
         (fun () ->
           Fun.protect
@@ -144,16 +177,62 @@ let text () (m : Observe.Logs.builder) = m.text ~tag:"auth" "user logged in"
 let filtered_text () (m : Observe.Logs.builder) = m.text ~tag:"auth" "ignored"
 
 let untyped_small () (m : Observe.Logs.builder) =
-  m.untyped (Payload.small_untyped ())
+  m.value (Payload.small_untyped ())
 
 let typed_small () (m : Observe.Logs.builder) =
-  m.typed Payload.small_t Payload.small
+  m.typed Payload.small_schema Payload.small
 
 let untyped_nested () (m : Observe.Logs.builder) =
-  m.untyped (Payload.nested_untyped ())
+  m.value (Payload.nested_untyped ())
 
 let typed_nested () (m : Observe.Logs.builder) =
-  m.typed Payload.nested_t Payload.nested
+  m.typed Payload.nested_schema Payload.nested
+
+let open_small () (m : Observe.Logs.builder) =
+  let open Observe.Logs in
+  m.untyped
+  |+ m.field "action" Observe.Type.string "user_login"
+  |+ m.field "user_id" Observe.Type.int 42
+  |+ m.field "remembered" Observe.Type.bool true
+  |> m.seal
+
+let opaque () (m : Observe.Logs.builder) =
+  m.value (Observe.Value.embed (Observe.Type.of_repr Repr.int) 42)
+
+let retained_wide_operation operation = retained_core_operation operation
+
+let open_wide () =
+  let wide = Observe.Logs.create ~name:"open-wide" () in
+  Observe.Logs.set wide (fun m ->
+      let open Observe.Logs in
+      m.untyped
+      |+ m.field "action" Observe.Type.string "user_login"
+      |+ m.field "user_id" Observe.Type.int 42
+      |> m.seal);
+  Observe.Logs.emit wide
+
+let typed_wide () =
+  let wide =
+    Observe.Logs.create_typed ~name:"typed-wide" Payload.small_schema
+  in
+  Observe.Logs.set wide (fun m ->
+      m.typed
+        (Payload.small_patch ~action:"user_login" ~user_id:42 ~remembered:true
+           ()));
+  Observe.Logs.emit wide
+
+let nested_typed_wide () =
+  let wide =
+    Observe.Logs.create_typed ~name:"nested-wide" Payload.nested_schema
+  in
+  Observe.Logs.set wide (fun m ->
+      m.typed
+        (Payload.nested_patch ~action:"user_login"
+           ~user:
+             (Payload.user_patch ~id:42 ~plan:(Some "pro")
+                ~roles:[ "admin"; "billing" ] ())
+           ~remembered:true ()));
+  Observe.Logs.emit wide
 
 let component_scenarios =
   [
@@ -221,6 +300,23 @@ let core_scenarios =
                ]
              ())
           text);
+    make ~name:"core/canonical/typed-point" ~suite:Core
+      ~boundary:"canonical-freeze" ~payload:"typed-small" (fun () ->
+        retained_core_operation (fun () -> Observe.Logs.info (typed_small ())));
+    make ~name:"core/canonical/open-point" ~suite:Core ~boundary:"open-fragment"
+      ~payload:"open-small" (fun () ->
+        retained_core_operation (fun () -> Observe.Logs.info (open_small ())));
+    make ~name:"core/canonical/opaque-compatibility" ~suite:Core
+      ~boundary:"opaque-compatibility" ~payload:"unsupported-int" (fun () ->
+        retained_core_operation (fun () -> Observe.Logs.info (opaque ())));
+    make ~name:"core/wide/open-fragment" ~suite:Core
+      ~boundary:"open-wide-fragment" ~payload:"open-small" (fun () ->
+        retained_wide_operation open_wide);
+    make ~name:"core/wide/typed-patch" ~suite:Core ~boundary:"typed-wide-patch"
+      ~payload:"typed-small" (fun () -> retained_wide_operation typed_wide);
+    make ~name:"core/wide/nested-patch" ~suite:Core
+      ~boundary:"nested-wide-patch" ~payload:"typed-nested" (fun () ->
+        retained_wide_operation nested_typed_wide);
     make ~name:"core/json/tagged-text" ~suite:Core ~boundary:"json"
       ~payload:"tagged-text" (fun () ->
         core_operation (config ~console:Observe.Config.Ndjson ()) text);
@@ -312,4 +408,5 @@ let find wanted = List.find_opt (fun scenario -> scenario.name = wanted) all
 
 let with_operation scenario callback =
   let prepared = scenario.prepare () in
-  Fun.protect ~finally:prepared.cleanup (fun () -> callback prepared.operation)
+  Fun.protect ~finally:prepared.cleanup (fun () ->
+      callback prepared.operation prepared.retained_bytes)

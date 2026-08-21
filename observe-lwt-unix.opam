@@ -2,7 +2,7 @@
 opam-version: "2.0"
 synopsis: "Ready Lwt-Unix composition for Observe"
 description:
-  "Ready Observe initialization and scoped capture for Lwt applications on Unix."
+  "Ready Observe initialization and scoped capture for Lwt programs on Unix."
 maintainer: ["Abdullah Elsayed <hey@abdufelsayed.dev>"]
 authors: ["Abdullah Elsayed <hey@abdufelsayed.dev>"]
 license: "MIT"
@@ -16,6 +16,7 @@ depends: [
   "observe-lwt" {= version}
   "lwt"
   "ptime"
+  "mtime"
   "ocamlfind" {with-test}
   "odoc" {with-doc}
 ]

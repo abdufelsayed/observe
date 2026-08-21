@@ -68,11 +68,16 @@ let active_engine () =
   | Io_registered io -> resolve io Missing
   | Outputs (io, engine) -> resolve io (Engine engine)
 
-let emit ~level author =
+let emit_point ~level author =
   match active_engine () with
-  | Engine engine -> Engine.emit engine level author
+  | Engine engine -> Engine.emit_point engine level author
   | Withhold -> ()
   | Missing -> Diagnostics.record Diagnostics.Not_initialized
+
+let create_wide ~name ~origin =
+  match active_engine () with
+  | Engine engine -> Engine.create_wide engine ~name ~origin
+  | Withhold | Missing -> Engine.inert_wide ()
 
 module Make (IO : Io.S) = struct
   type +'a io = 'a IO.t
@@ -91,6 +96,8 @@ module Make (IO : Io.S) = struct
     { state; io }
 
   let clock t () = IO.Clock.now t.state
+  let monotonic_now t () = IO.Clock.monotonic_now t.state
+  let next_id t () = IO.Identity.next t.state
   let offer_console t output = IO.Console.offer t.state output
 
   let engine t config output =
@@ -98,10 +105,12 @@ module Make (IO : Io.S) = struct
     match output with
     | `Outputs ->
         Engine.create_outputs config ~console_style:(IO.Console.style t.state)
-          ~clock:(clock t) ~console:(offer_console t) ~is_control_exception
+          ~clock:(clock t) ~monotonic_now:(monotonic_now t) ~next_id:(next_id t)
+          ~console:(offer_console t) ~is_control_exception
     | `Capture capture ->
-        Engine.create_capture config ~clock:(clock t) ~is_control_exception
-          capture
+        Engine.create_capture config ~clock:(clock t)
+          ~monotonic_now:(monotonic_now t) ~next_id:(next_id t)
+          ~is_control_exception capture
 
   let init t config = publish t.io (engine t config `Outputs)
 

@@ -20,6 +20,16 @@ let barrier participants =
 let config ?console ?drains () =
   Test_io.config ?console ?drains ~min_level:Observe.Level.Debug "concurrency"
 
+let contains text fragment =
+  let text_length = String.length text in
+  let fragment_length = String.length fragment in
+  let rec search offset =
+    offset + fragment_length <= text_length
+    && (String.equal (String.sub text offset fragment_length) fragment
+       || search (offset + 1))
+  in
+  fragment_length = 0 || search 0
+
 let init_race participants =
   let participants = max 2 participants in
   let observer = Observer.create (Test_io.Host.create ()) in
@@ -114,6 +124,165 @@ let diagnostic_counting work =
     "every rejection counted" work
     (Test_io.process_diagnostic_count Observe.Diagnostics.Console_rejected)
 
+let wide_contribution_and_seal work =
+  let work = max 2 work in
+  let observer = Observer.create (Test_io.Host.create ()) in
+  let result =
+    Observer.with_capture observer (config ()) (fun capture ->
+        let wide = Observe.Logs.create ~name:"concurrent-wide" () in
+        let await_set = barrier work in
+        let setters =
+          Array.init work (fun index ->
+              Thread.create
+                (fun () ->
+                  await_set ();
+                  Observe.Logs.set wide (fun m ->
+                      let open Observe.Logs in
+                      m.untyped
+                      |+ m.field
+                           ("field_" ^ string_of_int index)
+                           Observe.Type.int index
+                      |> m.seal))
+                ())
+        in
+        Array.iter Thread.join setters;
+        let await_emit = barrier work in
+        let emitters =
+          Array.init work (fun _ ->
+              Thread.create
+                (fun () ->
+                  await_emit ();
+                  Observe.Logs.emit wide)
+                ())
+        in
+        Array.iter Thread.join emitters;
+        Test_io.Direct.return capture)
+  in
+  let capture =
+    match result with
+    | Ok capture -> capture
+    | Error _ -> Alcotest.fail "wide capture was rejected"
+  in
+  match Observe.Capture.logs capture with
+  | [ log ] ->
+      let json =
+        match Observe.Log.body log with
+        | Observe.Log.Text _ -> Alcotest.fail "wide body was text"
+        | Observe.Log.Structured { value; _ } ->
+            Observe.Value.frozen_to_json_string value
+      in
+      let separators =
+        String.fold_left
+          (fun count character -> if character = ':' then count + 1 else count)
+          0 json
+      in
+      Alcotest.(check int)
+        "every ordered pre-seal contribution is present" work separators;
+      Alcotest.(check int)
+        "every losing emitter is diagnosed" (work - 1)
+        (Test_io.diagnostic_count
+           (Observe.Capture.diagnostics capture)
+           Observe.Diagnostics.Post_seal_emit)
+  | _ -> Alcotest.fail "concurrent emit published more than once"
+
+let wide_set_level_emit_race work =
+  let work = max 2 work in
+  let observer = Observer.create (Test_io.Host.create ()) in
+  let result =
+    Observer.with_capture observer (config ()) (fun capture ->
+        let wide = Observe.Logs.create ~name:"full-race" () in
+        let await_start = barrier (work * 3) in
+        let setters =
+          Array.init work (fun index ->
+              Thread.create
+                (fun () ->
+                  await_start ();
+                  if index = 0 then
+                    Observe.Logs.set wide (fun m ->
+                        m.error Observe.Error.exn (Failure "raced"))
+                  else
+                    Observe.Logs.set wide (fun m ->
+                        let open Observe.Logs in
+                        m.untyped
+                        |+ m.field
+                             ("contribution_" ^ string_of_int index)
+                             Observe.Type.int index
+                        |> m.seal))
+                ())
+        in
+        let levelers =
+          Array.init work (fun _ ->
+              Thread.create
+                (fun () ->
+                  await_start ();
+                  Observe.Logs.set_level wide Observe.Level.Warn)
+                ())
+        in
+        let emitters =
+          Array.init work (fun _ ->
+              Thread.create
+                (fun () ->
+                  await_start ();
+                  Observe.Logs.emit wide)
+                ())
+        in
+        Array.iter Thread.join setters;
+        Array.iter Thread.join levelers;
+        Array.iter Thread.join emitters;
+        Test_io.Direct.return capture)
+  in
+  let capture =
+    match result with
+    | Ok capture -> capture
+    | Error _ -> Alcotest.fail "full wide race capture was rejected"
+  in
+  match Observe.Capture.logs capture with
+  | [ log ] ->
+      let json =
+        match Observe.Log.body log with
+        | Observe.Log.Text _ -> Alcotest.fail "full wide race body was text"
+        | Observe.Log.Structured { value; _ } ->
+            Observe.Value.frozen_to_json_string value
+      in
+      let error_committed = contains json "\"error\":" in
+      let ordinary_committed =
+        let count = ref 0 in
+        for index = 1 to work - 1 do
+          if
+            contains json
+              ("\"contribution_"
+              ^ string_of_int index
+              ^ "\":"
+              ^ string_of_int index)
+          then incr count
+        done;
+        !count
+      in
+      let diagnostics = Observe.Capture.diagnostics capture in
+      let rejected_sets =
+        Test_io.diagnostic_count diagnostics Observe.Diagnostics.Post_seal_set
+      in
+      let rejected_levels =
+        Test_io.diagnostic_count diagnostics
+          Observe.Diagnostics.Post_seal_set_level
+      in
+      Alcotest.(check int)
+        "every raced contribution is committed or rejected" work
+        (ordinary_committed + (if error_committed then 1 else 0) + rejected_sets);
+      Alcotest.(check int)
+        "exactly one raced emission wins" (work - 1)
+        (Test_io.diagnostic_count diagnostics Observe.Diagnostics.Post_seal_emit);
+      if rejected_levels < work then
+        Alcotest.(check bool)
+          "a committed explicit level wins the raced snapshot" true
+          (Observe.Level.equal Observe.Level.Warn (Observe.Log.level log))
+      else
+        Alcotest.(check bool)
+          "without a committed explicit level, error meaning and level agree"
+          error_committed
+          (Observe.Level.equal Observe.Level.Error (Observe.Log.level log))
+  | _ -> Alcotest.fail "full wide race did not publish exactly once"
+
 let () =
   let mode = if Array.length Sys.argv > 1 then Sys.argv.(1) else "missing" in
   let argument index ~default =
@@ -127,4 +296,6 @@ let () =
   | "capture-conservation" ->
       capture_conservation work (argument 3 ~default:(max 1 (work / 2)))
   | "diagnostic-counting" -> diagnostic_counting work
+  | "wide-contribution-and-seal" -> wide_contribution_and_seal work
+  | "wide-set-level-emit-race" -> wide_set_level_emit_race work
   | _ -> Alcotest.failf "unknown concurrency scenario: %s" mode

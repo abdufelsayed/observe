@@ -13,9 +13,7 @@ let main () =
   Observe_lwt_unix.init_exn config;
   [%observe.info text ~tag:"startup" "filesystem delivery is ready"];
   [%observe.info
-    untyped
-      [%observe.value
-        { action = "order_created"; order_id = "ord_01JQ9"; items = 3 }]];
+    untyped { action = "order_created"; order_id = "ord_01JQ9"; items = 3 }];
   let* () = Observe_lwt_unix.shutdown () in
   Format.printf "daily NDJSON appended under %s@." directory;
   Lwt.return_unit

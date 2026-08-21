@@ -4,6 +4,9 @@ type 'a t = {
   repr : 'a Repr.t;
   json : Buffer.t -> 'a -> unit;
   plan : 'a -> Pretty.rendered;
+  freeze :
+    Snapshot.context -> depth:int -> 'a -> (Snapshot.t, Snapshot.error) result;
+  record_name : string option;
   field_policy : 'a field_policy;
 }
 (** A description keeps the Repr machine for interoperability together with
@@ -21,11 +24,19 @@ let add_field_name buffer ~first name =
   if not first then Buffer.add_char buffer ',';
   Json_writer.name buffer name
 
-let make ?omit_field ~plan repr json =
+let unsupported_freeze _ ~depth:_ _ = Result.Error Snapshot.Unsupported
+
+let guard_freeze freeze context ~depth value =
+  match Snapshot.check_depth ~depth with
+  | Error _ as error -> error
+  | Ok () -> freeze context ~depth value
+
+let make ?omit_field ?(freeze = unsupported_freeze) ?record_name ~plan repr json
+    =
   let field_policy =
     match omit_field with None -> Required | Some omit -> Omit_if omit
   in
-  { repr; json; plan; field_policy }
+  { repr; json; plan; freeze = guard_freeze freeze; record_name; field_policy }
 
 let compatibility ?omit_field repr json =
   make ?omit_field
@@ -43,7 +54,20 @@ let write_field description buffer first name value =
 
 let with_json description json = { description with json }
 let with_plan description plan = { description with plan }
+
+let with_freeze description freeze =
+  { description with freeze = guard_freeze freeze }
+
 let with_repr description repr = { description with repr }
+
+let freeze_into description context ~depth value =
+  description.freeze context ~depth value
+
+let freeze description value =
+  let context = Snapshot.create_context () in
+  description.freeze context ~depth:0 value
+
+let record_name description = description.record_name
 
 let repr_json repr buffer value =
   Buffer.add_string buffer (Repr.to_json_string ~minify:true repr value)
@@ -56,35 +80,75 @@ type 'a description = 'a t
 
 open Pretty
 
-let scalar_description ?omit_field repr json append =
-  make ?omit_field
+let scalar_description ?omit_field ~freeze repr json append =
+  make ?omit_field ~freeze
     ~plan:(fun value -> Scalar (fun renderer -> append renderer value))
     repr json
 
 let unit =
-  scalar_description Repr.unit Json_writer.unit (fun renderer () ->
-      empty_record renderer)
+  scalar_description
+    ~freeze:(fun context ~depth () -> Snapshot.object_ context ~depth [])
+    Repr.unit Json_writer.unit
+    (fun renderer () -> empty_record renderer)
 
-let bool = scalar_description Repr.bool Json_writer.bool bool
+let bool =
+  scalar_description
+    ~freeze:(fun context ~depth value -> Snapshot.bool context ~depth value)
+    Repr.bool Json_writer.bool bool
 
 let char =
-  scalar_description Repr.char Json_writer.char (fun renderer value ->
-      string renderer (String.make 1 value))
+  scalar_description
+    ~freeze:(fun context ~depth value ->
+      Snapshot.string context ~depth (String.make 1 value))
+    Repr.char Json_writer.char
+    (fun renderer value -> string renderer (String.make 1 value))
 
-let int = scalar_description Repr.int Json_writer.int int
-let int32 = scalar_description Repr.int32 Json_writer.int32 int32
+let int =
+  scalar_description
+    ~freeze:(fun context ~depth value ->
+      let buffer = Buffer.create 24 in
+      Json_writer.int buffer value;
+      Snapshot.integer context ~depth (Buffer.contents buffer))
+    Repr.int Json_writer.int int
+
+let int32 =
+  scalar_description
+    ~freeze:(fun context ~depth value ->
+      Snapshot.integer context ~depth (Int32.to_string value))
+    Repr.int32 Json_writer.int32 int32
 
 let int63 =
-  scalar_description Repr.int63
+  scalar_description
+    ~freeze:(fun context ~depth value ->
+      Snapshot.integer context ~depth
+        (Int64.to_string (Optint.Int63.to_int64 value)))
+    Repr.int63
     (fun buffer value -> Json_writer.int64 buffer (Optint.Int63.to_int64 value))
     (fun renderer value -> number renderer (Repr.to_string Repr.int63 value))
 
-let int64 = scalar_description Repr.int64 Json_writer.int64 int64
-let float = scalar_description Repr.float Json_writer.float float
-let string = scalar_description Repr.string Json_writer.string string
+let int64 =
+  scalar_description
+    ~freeze:(fun context ~depth value ->
+      let buffer = Buffer.create 24 in
+      Json_writer.int64 buffer value;
+      Snapshot.integer context ~depth (Buffer.contents buffer))
+    Repr.int64 Json_writer.int64 int64
+
+let float =
+  scalar_description
+    ~freeze:(fun context ~depth value -> Snapshot.float context ~depth value)
+    Repr.float Json_writer.float float
+
+let string =
+  scalar_description
+    ~freeze:(fun context ~depth value -> Snapshot.string context ~depth value)
+    Repr.string Json_writer.string string
 
 let bytes =
-  scalar_description Repr.bytes Json_writer.bytes (fun renderer value ->
+  scalar_description
+    ~freeze:(fun context ~depth value -> Snapshot.bytes context ~depth value)
+    Repr.bytes Json_writer.bytes
+    (fun renderer value ->
       Pretty.string renderer (Bytes.unsafe_to_string value))
 
 type len = Repr.len
@@ -131,10 +195,37 @@ let plan_list description values =
           append_tree_plans renderer plans;
           finish renderer nested)
 
+let freeze_list_values description context ~depth values =
+  let rec collect count frozen = function
+    | [] -> Snapshot.list context ~depth (List.rev frozen)
+    | _ when count >= Snapshot.width_limit ->
+        Result.Error Snapshot.Limit_exceeded
+    | value :: rest -> (
+        match description.freeze context ~depth:(depth + 1) value with
+        | Result.Error _ as error -> error
+        | Ok value -> collect (count + 1) (value :: frozen) rest)
+  in
+  collect 0 [] values
+
+let freeze_sequence_values description context ~depth values =
+  let rec collect count frozen values =
+    match values () with
+    | Seq.Nil -> Snapshot.list context ~depth (List.rev frozen)
+    | Seq.Cons _ when count >= Snapshot.width_limit ->
+        Result.Error Snapshot.Limit_exceeded
+    | Seq.Cons (value, rest) -> (
+        match description.freeze context ~depth:(depth + 1) value with
+        | Result.Error _ as error -> error
+        | Ok value -> collect (count + 1) (value :: frozen) rest)
+  in
+  collect 0 [] values
+
 let list ?len description =
   make
     ~omit_field:(function [] -> true | _ :: _ -> false)
     ~plan:(plan_list description)
+    ~freeze:(fun context ~depth values ->
+      freeze_list_values description context ~depth values)
     (Repr.list ?len description.repr)
     (Json_writer.list description.json)
 
@@ -151,7 +242,22 @@ let array ?len description =
             append_tree_plans renderer plans;
             finish renderer nested)
   in
-  make ~plan
+  let freeze context ~depth values =
+    let length = Array.length values in
+    if length > Snapshot.width_limit then Result.Error Snapshot.Limit_exceeded
+    else
+      let rec collect index frozen =
+        if index = length then Snapshot.list context ~depth (List.rev frozen)
+        else
+          match
+            description.freeze context ~depth:(depth + 1) values.(index)
+          with
+          | Result.Error _ as error -> error
+          | Ok value -> collect (index + 1) (value :: frozen)
+      in
+      collect 0 []
+  in
+  make ~plan ~freeze
     (Repr.array ?len description.repr)
     (Json_writer.array description.json)
 
@@ -161,6 +267,9 @@ let option description =
     ~plan:(function
       | None -> Scalar (fun renderer -> null renderer)
       | Some value -> description.plan value)
+    ~freeze:(fun context ~depth -> function
+      | None -> Snapshot.null context ~depth
+      | Some value -> description.freeze context ~depth value)
     (Repr.option description.repr)
     (Json_writer.option description.json)
 
@@ -183,7 +292,16 @@ let pair left right =
           append_tree_plans renderer plans;
           finish renderer nested)
   in
-  make ~plan (Repr.pair left.repr right.repr) json
+  let freeze context ~depth (left_value, right_value) =
+    match left.freeze context ~depth:(depth + 1) left_value with
+    | Result.Error _ as error -> error
+    | Ok left_value -> (
+        match right.freeze context ~depth:(depth + 1) right_value with
+        | Result.Error _ as error -> error
+        | Ok right_value ->
+            Snapshot.list context ~depth [ left_value; right_value ])
+  in
+  make ~plan ~freeze (Repr.pair left.repr right.repr) json
 
 let triple first second third =
   let json buffer (first_value, second_value, third_value) =
@@ -206,7 +324,18 @@ let triple first second third =
           append_tree_plans renderer plans;
           finish renderer nested)
   in
-  make ~plan (Repr.triple first.repr second.repr third.repr) json
+  let freeze context ~depth (a, b, c) =
+    match first.freeze context ~depth:(depth + 1) a with
+    | Result.Error _ as error -> error
+    | Ok a -> (
+        match second.freeze context ~depth:(depth + 1) b with
+        | Result.Error _ as error -> error
+        | Ok b -> (
+            match third.freeze context ~depth:(depth + 1) c with
+            | Result.Error _ as error -> error
+            | Ok c -> Snapshot.list context ~depth [ a; b; c ]))
+  in
+  make ~plan ~freeze (Repr.triple first.repr second.repr third.repr) json
 
 let quad first second third fourth =
   let json buffer (first_value, second_value, third_value, fourth_value) =
@@ -231,7 +360,23 @@ let quad first second third fourth =
           append_tree_plans renderer plans;
           finish renderer nested)
   in
-  make ~plan (Repr.quad first.repr second.repr third.repr fourth.repr) json
+  let freeze context ~depth (a, b, c, d) =
+    match first.freeze context ~depth:(depth + 1) a with
+    | Result.Error _ as error -> error
+    | Ok a -> (
+        match second.freeze context ~depth:(depth + 1) b with
+        | Result.Error _ as error -> error
+        | Ok b -> (
+            match third.freeze context ~depth:(depth + 1) c with
+            | Result.Error _ as error -> error
+            | Ok c -> (
+                match fourth.freeze context ~depth:(depth + 1) d with
+                | Result.Error _ as error -> error
+                | Ok d -> Snapshot.list context ~depth [ a; b; c; d ])))
+  in
+  make ~plan ~freeze
+    (Repr.quad first.repr second.repr third.repr fourth.repr)
+    json
 
 let result ok error =
   let json buffer = function
@@ -262,7 +407,17 @@ let result ok error =
               (error.plan value);
             finish renderer nested)
   in
-  make ~plan (Repr.result ok.repr error.repr) json
+  let freeze context ~depth = function
+    | Ok value -> (
+        match ok.freeze context ~depth:(depth + 1) value with
+        | Result.Error _ as error -> error
+        | Ok value -> Snapshot.object_ context ~depth [ ("ok", value) ])
+    | Error value -> (
+        match error.freeze context ~depth:(depth + 1) value with
+        | Result.Error _ as error -> error
+        | Ok value -> Snapshot.object_ context ~depth [ ("error", value) ])
+  in
+  make ~plan ~freeze (Repr.result ok.repr error.repr) json
 
 let seq description =
   let repr = Repr.seq description.repr in
@@ -308,17 +463,24 @@ let seq description =
             append 0 node;
             finish renderer nested)
   in
-  make ~plan repr json
+  let freeze context ~depth values =
+    freeze_sequence_values description context ~depth values
+  in
+  make ~plan ~freeze repr json
 
 let ref description =
   make
     ~plan:(fun value -> description.plan !value)
+    ~freeze:(fun context ~depth value ->
+      description.freeze context ~depth !value)
     (Repr.ref description.repr)
     (fun buffer value -> description.json buffer !value)
 
 let lazy_t description =
   make
     ~plan:(fun value -> description.plan (Lazy.force value))
+    ~freeze:(fun context ~depth value ->
+      description.freeze context ~depth (Lazy.force value))
     (Repr.lazy_t description.repr)
     (fun buffer value -> description.json buffer (Lazy.force value))
 
@@ -345,7 +507,10 @@ let queue description =
     | [] -> Scalar (fun renderer -> empty_list renderer)
     | _ -> plan_collected plans
   in
-  make ~plan repr json
+  let freeze context ~depth values =
+    freeze_sequence_values description context ~depth (Queue.to_seq values)
+  in
+  make ~plan ~freeze repr json
 
 let stack description =
   let repr = Repr.stack description.repr in
@@ -360,7 +525,10 @@ let stack description =
     | [] -> Scalar (fun renderer -> empty_list renderer)
     | _ -> plan_collected plans
   in
-  make ~plan repr json
+  let freeze context ~depth values =
+    freeze_sequence_values description context ~depth (Stack.to_seq values)
+  in
+  make ~plan ~freeze repr json
 
 let hashtbl key value =
   let repr = Repr.hashtbl key.repr value.repr in
@@ -378,29 +546,46 @@ let hashtbl key value =
     | [] -> Scalar (fun renderer -> empty_list renderer)
     | _ -> plan_collected plans
   in
-  make ~plan repr json
+  let freeze context ~depth table =
+    freeze_sequence_values entry context ~depth (Hashtbl.to_seq table)
+  in
+  make ~plan ~freeze repr json
 
 type empty = Repr.empty = |
 
 let empty = of_repr Repr.empty
 
 type ('a, 'b, 'c) open_record = {
+  record_name : string;
   repr_record : ('a, 'b, 'c) Repr.open_record;
   json_fields_rev : (Buffer.t -> first:bool -> 'a -> bool) list;
   plan_fields_rev : ('a -> string * Pretty.rendered) list;
+  freeze_fields_rev :
+    (Snapshot.context ->
+    depth:int ->
+    'a ->
+    ((string * Snapshot.t) option, Snapshot.error) result)
+    list;
 }
 
 type ('a, 'b) field = {
   repr_field : ('a, 'b) Repr.field;
   json_record_field : Buffer.t -> first:bool -> 'a -> bool;
   plan_record_field : 'a -> string * Pretty.rendered;
+  freeze_record_field :
+    Snapshot.context ->
+    depth:int ->
+    'a ->
+    ((string * Snapshot.t) option, Snapshot.error) result;
 }
 
 let record name constructor =
   {
+    record_name = name;
     repr_record = Repr.record name constructor;
     json_fields_rev = [];
     plan_fields_rev = [];
+    freeze_fields_rev = [];
   }
 
 let field name description getter =
@@ -410,19 +595,31 @@ let field name description getter =
       (fun buffer ~first record ->
         write_field description buffer first name (getter record));
     plan_record_field = (fun record -> (name, description.plan (getter record)));
+    freeze_record_field =
+      (fun context ~depth record ->
+        let value = getter record in
+        match description.field_policy with
+        | Omit_if omit when omit value -> Ok None
+        | Required | Omit_if _ ->
+            Result.map
+              (fun value -> Some (name, value))
+              (description.freeze context ~depth value));
   }
 
 let ( |+ ) record field =
   {
     repr_record = Repr.( |+ ) record.repr_record field.repr_field;
+    record_name = record.record_name;
     json_fields_rev = field.json_record_field :: record.json_fields_rev;
     plan_fields_rev = field.plan_record_field :: record.plan_fields_rev;
+    freeze_fields_rev = field.freeze_record_field :: record.freeze_fields_rev;
   }
 
 let sealr record =
   let repr = Repr.sealr record.repr_record in
   let json_fields = List.rev record.json_fields_rev in
   let plan_fields = List.rev record.plan_fields_rev in
+  let freeze_fields = List.rev record.freeze_fields_rev in
   let json buffer value =
     Buffer.add_char buffer '{';
     let rec write first = function
@@ -452,7 +649,19 @@ let sealr record =
             append fields;
             finish renderer nested)
   in
-  make ~plan repr json
+  let freeze context ~depth value =
+    let rec collect fields frozen =
+      match fields with
+      | [] -> Snapshot.object_ context ~depth (List.rev frozen)
+      | field :: rest -> (
+          match field context ~depth:(depth + 1) value with
+          | Result.Error _ as error -> error
+          | Ok None -> collect rest frozen
+          | Ok (Some field) -> collect rest (field :: frozen))
+    in
+    collect freeze_fields []
+  in
+  make ~plan ~freeze ~record_name:record.record_name repr json
 
 type 'a json_case =
   | Json0 of { name : string; polymorphic : bool; matches : 'a -> bool }
@@ -562,7 +771,19 @@ let sealv variant =
                   (description.plan payload);
                 finish renderer nested)
       in
-      make ~plan repr json
+      let freeze context ~depth value =
+        match find value cases with
+        | None -> Result.Error Snapshot.Conversion_failed
+        | Some (Selected0 (name, polymorphic)) ->
+            Snapshot.variant context ~depth ~polymorphic name None
+        | Some (Selected1 (name, polymorphic, description, payload)) -> (
+            match description.freeze context ~depth:(depth + 1) payload with
+            | Result.Error _ as error -> error
+            | Ok payload ->
+                Snapshot.variant context ~depth ~polymorphic name (Some payload)
+            )
+      in
+      make ~plan ~freeze repr json
 
 let enum name cases =
   let repr = Repr.enum name cases in
@@ -581,7 +802,13 @@ let enum name cases =
         Scalar (fun renderer -> Pretty.variant renderer ~polymorphic:false name)
     | None -> raise (Pretty.Error Unsupported_value)
   in
-  make ~plan repr json
+  let freeze context ~depth value =
+    match find value with
+    | Some (name, _) ->
+        Snapshot.variant context ~depth ~polymorphic:false name None
+    | None -> Result.Error Snapshot.Conversion_failed
+  in
+  make ~plan ~freeze repr json
 
 (* [mu] forwards through one coherent writer record. [Repr.mu] may re-invoke
    the builder when a generic that unrolls (pretty printing, equality, size,
@@ -605,6 +832,11 @@ let mu (type value) (make_description : value description -> value description)
     | Some description -> description.plan value
     | None -> used_too_early "pretty plan"
   in
+  let forward_freeze context ~depth value =
+    match !cell with
+    | Some description -> description.freeze context ~depth value
+    | None -> used_too_early "freezer"
+  in
   let repr =
     Repr.mu (fun machine ->
         let recursive =
@@ -612,6 +844,8 @@ let mu (type value) (make_description : value description -> value description)
             repr = machine;
             json = forward_json;
             plan = forward_plan;
+            freeze = forward_freeze;
+            record_name = None;
             field_policy = Required;
           }
         in
@@ -619,7 +853,17 @@ let mu (type value) (make_description : value description -> value description)
         (match !cell with None -> cell := Some description | Some _ -> ());
         description.repr)
   in
-  { repr; json = forward_json; plan = forward_plan; field_policy = Required }
+  {
+    repr;
+    json = forward_json;
+    plan = forward_plan;
+    freeze = forward_freeze;
+    record_name =
+      (match !cell with
+      | Some description -> description.record_name
+      | None -> None);
+    field_policy = Required;
+  }
 
 let mu2 (type left right)
     (make_descriptions :
@@ -651,6 +895,16 @@ let mu2 (type left right)
     | Some (_, description) -> description.plan value
     | None -> used_too_early "right pretty plan"
   in
+  let forward_freeze_left context ~depth value =
+    match !cell with
+    | Some (description, _) -> description.freeze context ~depth value
+    | None -> used_too_early "left freezer"
+  in
+  let forward_freeze_right context ~depth value =
+    match !cell with
+    | Some (_, description) -> description.freeze context ~depth value
+    | None -> used_too_early "right freezer"
+  in
   let left_repr, right_repr =
     Repr.mu2 (fun left_machine right_machine ->
         let left_recursive =
@@ -658,6 +912,8 @@ let mu2 (type left right)
             repr = left_machine;
             json = forward_json_left;
             plan = forward_plan_left;
+            freeze = forward_freeze_left;
+            record_name = None;
             field_policy = Required;
           }
         in
@@ -666,6 +922,8 @@ let mu2 (type left right)
             repr = right_machine;
             json = forward_json_right;
             plan = forward_plan_right;
+            freeze = forward_freeze_right;
+            record_name = None;
             field_policy = Required;
           }
         in
@@ -681,12 +939,22 @@ let mu2 (type left right)
       repr = left_repr;
       json = forward_json_left;
       plan = forward_plan_left;
+      freeze = forward_freeze_left;
+      record_name =
+        (match !cell with
+        | Some (description, _) -> description.record_name
+        | None -> None);
       field_policy = Required;
     },
     {
       repr = right_repr;
       json = forward_json_right;
       plan = forward_plan_right;
+      freeze = forward_freeze_right;
+      record_name =
+        (match !cell with
+        | Some (_, description) -> description.record_name
+        | None -> None);
       field_policy = Required;
     } )
 
@@ -770,7 +1038,10 @@ let map description decode encode =
   let repr = Repr.map description.repr decode encode in
   let json buffer value = description.json buffer (encode value) in
   let plan value = description.plan (encode value) in
-  make ~plan repr json
+  let freeze context ~depth value =
+    description.freeze context ~depth (encode value)
+  in
+  make ~plan ~freeze repr json
 
 module Generated_runtime = struct
   type renderer = Pretty.t
@@ -782,6 +1053,7 @@ module Generated_runtime = struct
 
   let with_json = with_json
   let with_plan = with_plan
+  let with_freeze = with_freeze
 
   let with_recursive_plan description make_plan =
     let self = Stdlib.ref None in
@@ -797,6 +1069,38 @@ module Generated_runtime = struct
     let description = with_plan description plan in
     self := Some description;
     description
+
+  let with_recursive_freeze description make_freeze =
+    let self = Stdlib.ref None in
+    let freeze context ~depth value =
+      let description =
+        match !self with
+        | Some description -> description
+        | None ->
+            invalid_arg
+              "Observe.Generated_runtime: recursive freezer unavailable"
+      in
+      make_freeze description context ~depth value
+    in
+    let description = with_freeze description freeze in
+    self := Some description;
+    description
+
+  type freeze_context = Snapshot.context
+  type frozen = Snapshot.t
+  type freeze_error = Snapshot.error
+
+  let freeze description context ~depth value =
+    description.freeze context ~depth value
+
+  let frozen_string = Snapshot.string
+  let frozen_object = Snapshot.object_
+
+  let frozen_variant context ~depth polymorphic name =
+    Snapshot.variant context ~depth ~polymorphic name None
+
+  let frozen_variant_payload context ~depth polymorphic name payload =
+    Snapshot.variant context ~depth ~polymorphic name (Some payload)
 
   let json description buffer value = description.json buffer value
   let plan description value = description.plan value

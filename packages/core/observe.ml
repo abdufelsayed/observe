@@ -1,9 +1,30 @@
 module Type = Type
+module Schema = Schema
+module Error = Error
 
 module Generated_runtime = struct
   type 'a description = 'a Type.t
 
   include Type.Generated_runtime
+
+  type fragment = Schema.fragment
+  type patch_field = Schema.field
+  type open_patch = Message.open_patch
+
+  let fragment = Schema.fragment
+
+  let error_fragment interpretation ?backtrace error =
+    Schema.fragment_of_result (Error.freeze interpretation ?backtrace error)
+
+  let patch_fragment = Schema.patch_fragment
+  let patch_field = Schema.field
+  let record_patch = Schema.make_patch
+  let named_record_patch = Schema.make_named_patch
+  let named_error_patch = Schema.make_named_error_patch
+  let combine_named_patches = Schema.combine_named_patches
+  let record_schema = Schema.record
+  let schema_builder = Schema.builder
+  let open_value_patch = Message.open_patch_of_value
 end
 
 module Level = Level

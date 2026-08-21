@@ -13,6 +13,7 @@ type t = {
   minor_bytes_per_operation : float;
   major_bytes_per_operation : float;
   promoted_bytes_per_operation : float;
+  retained_bytes : float option;
   minor_collections_per_operation : float;
   major_collections_per_operation : float;
   r_squared : float option;
@@ -54,7 +55,7 @@ let allocations runs operation =
     float_of_int (after.major_collections - before.major_collections) /. divisor
   )
 
-let run configuration scenario operation =
+let run configuration scenario operation retained_size =
   let test =
     Test.make ~name:(Scenario.name scenario) (Staged.stage operation)
   in
@@ -93,6 +94,7 @@ let run configuration scenario operation =
       minor_collections /. scale,
       major_collections /. scale )
   in
+  let retained_bytes = retained_size () in
   {
     name = Scenario.name scenario;
     suite = Scenario.suite_name (Scenario.suite scenario);
@@ -103,6 +105,7 @@ let run configuration scenario operation =
     minor_bytes_per_operation;
     major_bytes_per_operation;
     promoted_bytes_per_operation;
+    retained_bytes;
     minor_collections_per_operation;
     major_collections_per_operation;
     r_squared;

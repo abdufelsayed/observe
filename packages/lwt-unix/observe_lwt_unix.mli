@@ -1,8 +1,8 @@
-(** Ready Observe composition for Lwt applications on Unix.
+(** Ready Observe composition for Lwt programs on Unix.
 
-    Initialize once at the application composition root. Ordinary application
-    and library code then logs through [Observe.Logs]. Console delivery is
-    bounded and serialized by one Lwt worker. *)
+    Initialize once at the process composition root. All caller code then logs
+    through [Observe.Logs]. Console delivery is bounded and serialized by one
+    Lwt worker. *)
 
 val init : Observe.Config.t -> (unit, Observe.init_error) result
 (** Install the process-wide Observe engine with Lwt dynamic context, the OS

@@ -10,6 +10,8 @@ type t =
   | Object of (string * t) list
   | Embedded : 'a Type.t * 'a -> t
 
+type frozen = Snapshot.t
+
 val null : t
 val bool : bool -> t
 val int : int -> t
@@ -32,6 +34,10 @@ val append_json : Buffer.t -> t -> (unit, json_error) result
     its length at entry. *)
 
 val append_pretty : Pretty.t -> Pretty.placement -> t -> unit
+val freeze : t -> (Snapshot.t, Snapshot.error) result
+val append_frozen_json : Buffer.t -> frozen -> unit
+val append_frozen_pretty : Pretty.t -> Pretty.placement -> frozen -> unit
+val frozen_to_json_string : frozen -> string
 
 val to_json_string : t -> (string, json_error) result
 (** Project one JSON value without repairing invalid strings or non-finite

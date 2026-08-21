@@ -6,6 +6,7 @@
   config
   diagnostics
   drain
+  error
   engine
   formatter
   formatter_intf
@@ -19,6 +20,8 @@
   observer
   pretty
   repr_projection
+  schema
+  snapshot
   type
   utf8
   value)

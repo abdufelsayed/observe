@@ -28,27 +28,47 @@ let observer =
   let host = Test_io.Host.create ~now:(fun () -> Ok !timestamp) () in
   Observer.create host
 
-let capture_one level message =
+let capture_outcome level message =
   let config = Test_io.config ~min_level:Observe.Level.Debug "example" in
   match
     Observer.with_capture observer config (fun capture ->
-        Observe.Logs.emit ~level message;
-        match Observe.Capture.logs capture with
-        | [ log ] -> log
-        | logs ->
-            Alcotest.failf "expected one captured log, received %d"
-              (List.length logs))
+        Observe.Logs.log ~level message;
+        (Observe.Capture.logs capture, Observe.Capture.diagnostics capture))
   with
-  | Ok log -> log
+  | Ok outcome -> outcome
   | Error Observe.IO_already_registered ->
       Alcotest.fail "I/O implementation unexpectedly conflicted"
   | Error (Observe.Invalid_capacity capacity) ->
       Alcotest.failf "unexpected invalid capacity: %d" capacity
 
-let untyped make (builder : Observe.Logs.builder) = builder.untyped (make ())
+let capture_one level message =
+  match capture_outcome level message with
+  | [ log ], _ -> log
+  | logs, _ ->
+      Alcotest.failf "expected one captured log, received %d" (List.length logs)
+
+let untyped make (builder : Observe.Logs.builder) = builder.value (make ())
+
+type 'a described_event = { value : 'a }
+
+type 'a described_event_builder = {
+  typed :
+    'a described_event Observe.Schema.patch ->
+    'a described_event Observe.Schema.patch;
+}
 
 let typed description value (builder : Observe.Logs.builder) =
-  builder.typed description value
+  let event_t =
+    let open Observe.Type in
+    record "described_event" (fun value -> { value })
+    |+ field "value" description (fun event -> event.value)
+    |> sealr
+  in
+  let schema =
+    Observe.Generated_runtime.record_schema event_t ~builder:(fun _ ->
+        { typed = Fun.id })
+  in
+  builder.typed schema { value }
 
 let format_pretty style log =
   match Observe.Formatter.format (Observe.Formatter.pretty style) log with
@@ -131,9 +151,10 @@ let test_typed_variant_tree () =
   Alcotest.(check string)
     "typed variant tree"
     "10:23:45.612 INFO [example]\n\
-    \  └─ User_login\n\
-    \     ├─ user_id: 42\n\
-    \     └─ method_: \"oauth\""
+    \  └─ value\n\
+    \     └─ User_login\n\
+    \        ├─ user_id: 42\n\
+    \        └─ method_: \"oauth\""
     (pretty log)
 
 let test_mixed_typed_structure () =
@@ -156,15 +177,16 @@ let test_mixed_typed_structure () =
   Alcotest.(check string)
     "mixed typed structure"
     "10:23:45.612 INFO [example]\n\
-    \  └─ Session_started\n\
-    \     ├─ user_id: 42\n\
-    \     ├─ method_: \"oauth\"\n\
-    \     ├─ label: \"Granted\"\n\
-    \     ├─ access: Granted\n\
-    \     ├─ deployment: `Development\n\
-    \     ├─ roles: [\"admin\", \"billing\"]\n\
-    \     ├─ remembered: true\n\
-    \     └─ provider: \"github\""
+    \  └─ value\n\
+    \     └─ Session_started\n\
+    \        ├─ user_id: 42\n\
+    \        ├─ method_: \"oauth\"\n\
+    \        ├─ label: \"Granted\"\n\
+    \        ├─ access: Granted\n\
+    \        ├─ deployment: `Development\n\
+    \        ├─ roles: [\"admin\", \"billing\"]\n\
+    \        ├─ remembered: true\n\
+    \        └─ provider: \"github\""
     (pretty log)
 
 let test_recursive_typed_structure () =
@@ -176,13 +198,14 @@ let test_recursive_typed_structure () =
   Alcotest.(check string)
     "recursive typed structure"
     "10:23:45.612 INFO [example]\n\
-    \  └─ Branch\n\
-    \     ├─ [0]\n\
-    \     │  └─ Leaf: \"one\"\n\
-    \     └─ [1]\n\
-    \        └─ Branch\n\
-    \           └─ [0]\n\
-    \              └─ Leaf: \"two\""
+    \  └─ value\n\
+    \     └─ Branch\n\
+    \        ├─ [0]\n\
+    \        │  └─ Leaf: \"one\"\n\
+    \        └─ [1]\n\
+    \           └─ Branch\n\
+    \              └─ [0]\n\
+    \                 └─ Leaf: \"two\""
     (pretty log)
 
 let test_nested_values_and_strings () =
@@ -265,7 +288,7 @@ let test_manual_variant_control_escaping () =
   let log = capture_one Observe.Level.Info (typed description Unsafe) in
   Alcotest.(check string)
     "manual variant is console safe"
-    "10:23:45.612 INFO [example]\n  └─ Bad\\u001b[31mName" (pretty log)
+    "10:23:45.612 INFO [example]\n  └─ value: Bad\\u001b[31mName" (pretty log)
 
 let test_empty_root_structure () =
   timestamp := Observe.Timestamp.of_unix_ns 37_425_612_000_000L;
@@ -285,31 +308,50 @@ let test_direct_container_presentations () =
   check "sequence preserves polymorphic variants"
     (Observe.Type.seq deployment_t)
     (List.to_seq [ `Development; `Staging ])
-    "10:23:45.612 INFO [example]\n  ├─ [0]: `Development\n  └─ [1]: `Staging";
+    "10:23:45.612 INFO [example]\n  └─ value: [`Development, `Staging]";
   let queue = Queue.create () in
   Queue.add Granted queue;
   Queue.add Denied queue;
   check "queue renders directly"
     (Observe.Type.queue access_t)
-    queue "10:23:45.612 INFO [example]\n  └─ [Granted, Denied]";
+    queue "10:23:45.612 INFO [example]\n  └─ value: [Granted, Denied]";
   let stack = Stack.create () in
   Stack.push `Production stack;
   check "stack renders directly"
     (Observe.Type.stack deployment_t)
-    stack "10:23:45.612 INFO [example]\n  └─ [`Production]";
+    stack "10:23:45.612 INFO [example]\n  └─ value: [`Production]";
   let table = Hashtbl.create 1 in
   Hashtbl.add table "permission" Granted;
   check "hash table renders directly"
     (Observe.Type.hashtbl Observe.Type.string access_t)
-    table "10:23:45.612 INFO [example]\n  └─ [[\"permission\", Granted]]"
+    table "10:23:45.612 INFO [example]\n  └─ value: [[\"permission\", Granted]]"
 
-let test_explicit_repr_compatibility () =
+let canonical_failure diagnostics =
+  List.exists
+    (fun (entry : Observe.Diagnostics.entry) ->
+      entry.kind = Observe.Diagnostics.Canonical_freeze_failed
+      && entry.count = 1)
+    diagnostics
+
+let check_withheld name message =
+  let logs, diagnostics = capture_outcome Observe.Level.Info message in
+  Alcotest.(check int) (name ^ " output") 0 (List.length logs);
+  Alcotest.(check bool)
+    (name ^ " diagnostic") true
+    (canonical_failure diagnostics)
+
+let test_canonical_failures_are_withheld () =
   timestamp := Observe.Timestamp.of_unix_ns 37_425_612_000_000L;
+  check_withheld "invalid text" (Test_io.text ~tag:"invalid" "\255");
+  check_withheld "invalid structured UTF-8"
+    (untyped (fun () ->
+         Observe.Value.object_ [ ("value", Observe.Value.string "\255") ]));
+  check_withheld "non-finite float"
+    (untyped (fun () ->
+         Observe.Value.object_ [ ("value", Observe.Value.float nan) ]));
   let opaque = Observe.Type.of_repr (Observe.Type.repr deployment_t) in
-  let log = capture_one Observe.Level.Info (typed opaque `Development) in
-  Alcotest.(check string)
-    "opaque Repr projection exposes only its JSON meaning"
-    "10:23:45.612 INFO [example]\n  └─ \"Development\"" (pretty log)
+  check_withheld "opaque Repr without bounded projection"
+    (typed opaque `Development)
 
 let test_ansi_16_text () =
   timestamp := Observe.Timestamp.of_unix_ns 37_425_612_000_000L;
@@ -378,53 +420,13 @@ let test_ansi_16_typed_structure () =
     "constructor and fields"
     "\027[90m10:23:45.612\027[0m \027[1;96mINFO\027[0m \
      \027[1;96m[example]\027[0m\n\
-    \  \027[90m└─\027[0m \027[1;95mUser_login\027[0m\n\
-    \     \027[90m├─\027[0m \027[95muser_id\027[0m\027[90m:\027[0m \
+    \  \027[90m└─\027[0m \027[95mvalue\027[0m\n\
+    \     \027[90m└─\027[0m \027[1;95mUser_login\027[0m\n\
+    \        \027[90m├─\027[0m \027[95muser_id\027[0m\027[90m:\027[0m \
      \027[93m42\027[0m\n\
-    \     \027[90m└─\027[0m \027[95mmethod_\027[0m\027[90m:\027[0m \
+    \        \027[90m└─\027[0m \027[95mmethod_\027[0m\027[90m:\027[0m \
      \027[92m\"oauth\"\027[0m"
     (ansi_16 log)
-
-let check_formatter_error expected log =
-  Alcotest.(check bool)
-    "formatter error" true
-    (Observe.Formatter.format
-       (Observe.Formatter.pretty Observe.Formatter.Plain)
-       log
-    = Error expected)
-
-let test_projection_failures () =
-  timestamp := Observe.Timestamp.of_unix_ns 0L;
-  let invalid_utf8 =
-    capture_one Observe.Level.Info (Test_io.text ~tag:"invalid" "\255")
-  in
-  check_formatter_error Observe.Formatter.Invalid_utf8 invalid_utf8;
-  let invalid_typed_utf8 =
-    capture_one Observe.Level.Info (typed Observe.Type.string "\255")
-  in
-  check_formatter_error Observe.Formatter.Invalid_utf8 invalid_typed_utf8;
-  Alcotest.(check bool)
-    "Repr machine JSON remains available" true
-    (match
-       Observe.Formatter.format Observe.Formatter.json invalid_typed_utf8
-     with
-    | Ok encoded -> String.length encoded > 0
-    | Error _ -> false);
-  let non_finite =
-    capture_one Observe.Level.Info (untyped (fun () -> Observe.Value.float nan))
-  in
-  check_formatter_error Observe.Formatter.Non_finite_float non_finite;
-  let unsupported_repr =
-    Repr.partially_abstract ~pp:Structural ~of_string:Structural ~json:Undefined
-      ~bin:Structural ~unboxed_bin:Structural ~equal:Structural
-      ~compare:Structural ~short_hash:Structural ~pre_hash:Structural Repr.int
-  in
-  let unsupported = Observe.Type.of_repr unsupported_repr in
-  let unsupported = capture_one Observe.Level.Info (typed unsupported 1) in
-  Alcotest.(check bool)
-    "unsupported Repr JSON" true
-    (Observe.Formatter.format Observe.Formatter.json unsupported
-    = Error Observe.Formatter.Unsupported_value)
 
 let () =
   Alcotest.run "observe-formatter"
@@ -457,8 +459,6 @@ let () =
             test_empty_root_structure;
           Alcotest.test_case "direct container presentations" `Quick
             test_direct_container_presentations;
-          Alcotest.test_case "explicit Repr compatibility" `Quick
-            test_explicit_repr_compatibility;
         ] );
       ( "ANSI styling",
         [
@@ -468,9 +468,9 @@ let () =
           Alcotest.test_case "typed structured tree" `Quick
             test_ansi_16_typed_structure;
         ] );
-      ( "failure containment",
+      ( "canonical boundary",
         [
-          Alcotest.test_case "projection failures" `Quick
-            test_projection_failures;
+          Alcotest.test_case "unsafe values are withheld" `Quick
+            test_canonical_failures_are_withheld;
         ] );
     ]

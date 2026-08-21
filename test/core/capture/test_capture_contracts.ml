@@ -2,6 +2,45 @@ module Observer = Observe.Make (Test_io.IO)
 
 let observer = Observer.create (Test_io.Host.create ())
 
+type int_event = { value : int }
+
+let int_event_t =
+  let open Observe.Type in
+  record "int_event" (fun value -> { value })
+  |+ field "value" int (fun event -> event.value)
+  |> sealr
+
+type int_event_builder = {
+  typed : int_event Observe.Schema.patch -> int_event Observe.Schema.patch;
+}
+
+let int_event_schema =
+  Observe.Generated_runtime.record_schema int_event_t ~builder:(fun _ ->
+      { typed = Fun.id })
+
+type reference_event = { reference : int ref }
+
+let reference_event_t =
+  let open Observe.Type in
+  record "reference_event" (fun reference -> { reference })
+  |+ field "reference" (ref int) (fun event -> event.reference)
+  |> sealr
+
+type reference_event_builder = {
+  typed :
+    reference_event Observe.Schema.patch -> reference_event Observe.Schema.patch;
+}
+
+let reference_event_schema =
+  Observe.Generated_runtime.record_schema reference_event_t ~builder:(fun _ ->
+      { typed = Fun.id })
+
+let structured_json log =
+  match Observe.Log.body log with
+  | Observe.Log.Text _ -> Alcotest.fail "expected a structured body"
+  | Observe.Log.Structured { value; _ } ->
+      Observe.Value.frozen_to_json_string value
+
 let capture ?capacity config callback =
   match Observer.with_capture observer config ?capacity callback with
   | Ok value -> value
@@ -15,8 +54,7 @@ let expect_text ~tag ~message log =
   | Observe.Log.Text actual ->
       Alcotest.(check string) "tag" tag actual.tag;
       Alcotest.(check string) "message" message actual.message
-  | Observe.Log.Untyped _ | Observe.Log.Typed _ ->
-      Alcotest.fail "expected a text body"
+  | Observe.Log.Structured _ -> Alcotest.fail "expected a text body"
 
 let test_bodies_and_metadata () =
   let config =
@@ -27,13 +65,13 @@ let test_bodies_and_metadata () =
     capture config (fun capture ->
         Observe.Logs.info (Test_io.text ~tag:"auth" "signed in");
         Observe.Logs.warn (fun m ->
-            m.untyped
+            m.value
               (Observe.Value.object_
                  [
                    ("attempt", Observe.Value.int 2);
                    ("ok", Observe.Value.bool true);
                  ]));
-        Observe.Logs.error (fun m -> m.typed Observe.Type.int 7);
+        Observe.Logs.error (fun m -> m.typed int_event_schema { value = 7 });
         capture)
   in
   match Observe.Capture.logs capture with
@@ -51,22 +89,16 @@ let test_bodies_and_metadata () =
         "level" true
         (Observe.Level.equal Observe.Level.Info (Observe.Log.level text));
       expect_text ~tag:"auth" ~message:"signed in" text;
-      (match Observe.Log.body untyped with
-      | Observe.Log.Untyped value ->
-          Alcotest.(check bool)
-            "untyped body pretty" true
-            (String.length (Observe.Value.to_string value) > 0)
-      | Observe.Log.Text _ | Observe.Log.Typed _ ->
-          Alcotest.fail "expected a untyped body");
+      Alcotest.(check string)
+        "anonymous snapshot" "{\"attempt\":2,\"ok\":true}"
+        (structured_json untyped);
       match Observe.Log.body typed with
-      | Observe.Log.Typed (description, value) ->
+      | Observe.Log.Structured { origin = Observe.Log.Declared "int_event"; _ }
+        ->
           Alcotest.(check string)
-            "typed value" "7"
-            (Format.asprintf "%a"
-               (Repr.pp (Observe.Type.repr description))
-               value)
-      | Observe.Log.Text _ | Observe.Log.Untyped _ ->
-          Alcotest.fail "expected a typed body")
+            "declared snapshot" "{\"value\":7}" (structured_json typed)
+      | Observe.Log.Text _ | Observe.Log.Structured _ ->
+          Alcotest.fail "expected a declared typed body")
   | logs -> Alcotest.failf "expected three logs, received %d" (List.length logs)
 
 let test_formatter_semantics () =
@@ -122,17 +154,17 @@ let test_admission_and_diagnostics () =
             m.text ~tag:"admission" "rejected");
         Observe.Logs.debug (fun m ->
             incr untyped_calls;
-            m.untyped (Observe.Value.int 0));
+            m.value (Observe.Value.int 0));
         Observe.Logs.debug (fun m ->
             incr typed_calls;
-            m.typed Observe.Type.int 0);
+            m.typed int_event_schema { value = 0 });
         Observe.Logs.info (fun m ->
             incr text_calls;
             m.text ~tag:"admission" "accepted");
         Observe.Logs.warn (Test_io.text ~tag:"overflow" "withheld");
         Observe.Logs.error (fun m ->
             incr untyped_calls;
-            m.untyped (failwith "authoring"));
+            m.value (failwith "authoring"));
         capture)
   in
   Alcotest.(check int) "text authored only after admission" 1 !text_calls;
@@ -151,26 +183,20 @@ let test_admission_and_diagnostics () =
     (Test_io.diagnostic_count diagnostics
        Observe.Diagnostics.Message_evaluation_raised)
 
-let test_typed_values_are_by_reference () =
+let test_typed_values_are_frozen () =
   let value = ref 3 in
   let log =
     capture (Test_io.config "identity") (fun capture ->
         Observe.Logs.info (fun m ->
-            m.typed (Observe.Type.ref Observe.Type.int) value);
+            m.typed reference_event_schema { reference = value });
         match Observe.Capture.logs capture with
         | [ log ] -> log
         | _ -> Alcotest.fail "expected one typed log")
   in
   value := 9;
-  match Observe.Log.body log with
-  | Observe.Log.Typed (description, retained) ->
-      Alcotest.(check string)
-        "later projection sees referenced value" "9"
-        (Format.asprintf "%a"
-           (Repr.pp (Observe.Type.repr description))
-           retained)
-  | Observe.Log.Text _ | Observe.Log.Untyped _ ->
-      Alcotest.fail "expected a typed body"
+  Alcotest.(check string)
+    "later mutation cannot change the snapshot" "{\"reference\":3}"
+    (structured_json log)
 
 let () =
   Alcotest.run "observe-capture-contracts"
@@ -183,7 +209,7 @@ let () =
             test_formatter_semantics;
           Alcotest.test_case "admission and diagnostics" `Quick
             test_admission_and_diagnostics;
-          Alcotest.test_case "typed reference semantics" `Quick
-            test_typed_values_are_by_reference;
+          Alcotest.test_case "typed snapshot semantics" `Quick
+            test_typed_values_are_frozen;
         ] );
     ]

@@ -34,6 +34,13 @@
   (pps observe.ppx)))
 
 (executable
+ (name wide_compile_surface)
+ (modules wide_compile_surface)
+ (libraries observe)
+ (preprocess
+  (pps observe.ppx)))
+
+(executable
  (name ppx_driver)
  (modules ppx_driver)
  (libraries ppxlib observe.ppx))
@@ -51,14 +58,16 @@
   test_value_semantics.exe
   test_logging_semantics.exe
   ppx_compile_surface.exe
-  inline_signature.exe)
+  inline_signature.exe
+  wide_compile_surface.exe)
  (action
   (progn
    (run %{exe:test_deriver_semantics.exe})
    (run %{exe:test_value_semantics.exe})
    (run %{exe:test_logging_semantics.exe})
    (run %{exe:ppx_compile_surface.exe})
-   (run %{exe:inline_signature.exe}))))
+   (run %{exe:inline_signature.exe})
+   (run %{exe:wide_compile_surface.exe}))))
 
 (rule
  (alias observe-ppx-negative)
@@ -70,6 +79,8 @@
   value_record_update.ml
   logging_unknown_form.ml
   logging_emit_shape.ml
+  untyped_nested_value.ml.fail
+  untyped_dynamic.ml
   deriver_abstract.ml
   deriver_gadt.ml
   deriver_open_polyvariant.ml
@@ -99,13 +110,25 @@
     %{dep:check_negative.sh}
     %{exe:ppx_driver.exe}
     %{dep:logging_unknown_form.ml}
-    "[%observe.info]: expected [text ...], [untyped value], or [typed description value]")
+    "[%observe.info]: expected [text ...], [untyped { ... }], [typed schema value], or [error interpretation value]")
    (run
     bash
     %{dep:check_negative.sh}
     %{exe:ppx_driver.exe}
     %{dep:logging_emit_shape.ml}
     "[%observe.emit]: expected [(level, text ...)]")
+   (run
+    bash
+    %{dep:check_negative.sh}
+    %{exe:ppx_driver.exe}
+    %{dep:untyped_nested_value.ml.fail}
+    "[untyped] requires one anonymous object")
+   (run
+    bash
+    %{dep:check_negative.sh}
+    %{exe:ppx_driver.exe}
+    %{dep:untyped_dynamic.ml}
+    "[%observe.info]: unsupported expression")
    (run
     bash
     %{dep:check_negative.sh}
@@ -138,6 +161,79 @@
    %{exe:ppx_driver.exe}
    %{dep:deriver_local_open.ml}
    "locally opened types are not supported")))
+
+(rule
+ (alias observe-ppx-negative)
+ (package observe)
+ (deps
+  check_compile_negative.sh
+  typed_scalar_root.ml.fail
+  typed_variant_root.ml.fail
+  typed_unknown_field.ml.fail
+  typed_wrong_field_value.ml.fail
+  typed_different_schema.ml.fail
+  typed_schema_constructor_hidden.ml.fail
+  untyped_wrong_description.ml.fail
+  ppx_driver.exe
+  %{lib:observe:observe.cmi})
+ (action
+  (progn
+   (run
+    bash
+    %{dep:check_compile_negative.sh}
+    %{bin:ocamlfind}
+    %{exe:ppx_driver.exe}
+    %{lib:observe:observe.cmi}
+    %{dep:typed_scalar_root.ml.fail}
+    "Observe.Schema.t")
+   (run
+    bash
+    %{dep:check_compile_negative.sh}
+    %{bin:ocamlfind}
+    %{exe:ppx_driver.exe}
+    %{lib:observe:observe.cmi}
+    %{dep:typed_variant_root.ml.fail}
+    "Observe.Schema.t")
+   (run
+    bash
+    %{dep:check_compile_negative.sh}
+    %{bin:ocamlfind}
+    %{exe:ppx_driver.exe}
+    %{lib:observe:observe.cmi}
+    %{dep:typed_unknown_field.ml.fail}
+    "__observe_field_missing")
+   (run
+    bash
+    %{dep:check_compile_negative.sh}
+    %{bin:ocamlfind}
+    %{exe:ppx_driver.exe}
+    %{lib:observe:observe.cmi}
+    %{dep:typed_wrong_field_value.ml.fail}
+    "expected of type")
+   (run
+    bash
+    %{dep:check_compile_negative.sh}
+    %{bin:ocamlfind}
+    %{exe:ppx_driver.exe}
+    %{lib:observe:observe.cmi}
+    %{dep:typed_different_schema.ml.fail}
+    "first Observe.Schema.patch")
+   (run
+    bash
+    %{dep:check_compile_negative.sh}
+    %{bin:ocamlfind}
+    %{exe:ppx_driver.exe}
+    %{lib:observe:observe.cmi}
+    %{dep:typed_schema_constructor_hidden.ml.fail}
+    "Unbound value")
+   (run
+    bash
+    %{dep:check_compile_negative.sh}
+    %{bin:ocamlfind}
+    %{exe:ppx_driver.exe}
+    %{lib:observe:observe.cmi}
+    %{dep:untyped_wrong_description.ml.fail}
+    "expected of type"))))
 
 (rule
  (alias observe-ppx-expansion)

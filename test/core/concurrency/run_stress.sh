@@ -45,3 +45,5 @@ fi
 "$runner" diagnostic-counting 1
 "$runner" diagnostic-counting 8
 "$runner" diagnostic-counting "$work"
+"$runner" wide-contribution-and-seal "$work"
+"$runner" wide-set-level-emit-race "$work"

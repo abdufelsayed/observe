@@ -1,5 +1,4 @@
-type event = Request of { request_id : string; attempts : int } | Idle
-[@@deriving observe]
+type event = { request_id : string; attempts : int } [@@deriving observe]
 
 let description : event Observe.Type.t = event_t
 
@@ -14,14 +13,14 @@ let value =
 let text_log () =
   [%observe.info text ~tag:"request" "received request %s" "req-1"]
 
-let untyped_log () =
-  [%observe.warn untyped [%observe.value { action = "retry"; attempts = 2 }]]
+let untyped_log () = [%observe.warn untyped { action = "retry"; attempts = 2 }]
 
 let typed_log () =
-  [%observe.error
-    typed event_t (Request { request_id = "req-1"; attempts = 2 })]
+  [%observe.error typed event_schema { request_id = "req-1"; attempts = 2 }]
 
-let dynamic_log level () = [%observe.emit level, typed event_t Idle]
+let dynamic_log level () =
+  [%observe.emit
+    level, typed event_schema { request_id = "req-2"; attempts = 0 }]
 
 let () =
   ignore description;

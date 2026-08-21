@@ -62,7 +62,7 @@
  (name observe-lwt)
  (synopsis "Configurable Lwt I/O for Observe")
  (description
-  "Lwt effects and dynamic context completed with caller-provided Observe clock and console functions.")
+  "Lwt effects and dynamic context completed with caller-provided wall and monotonic clocks, occurrence identifiers, and console functions.")
  (depends
   (ocaml
    (>= 4.14))
@@ -78,7 +78,7 @@
  (name observe-lwt-unix)
  (synopsis "Ready Lwt-Unix composition for Observe")
  (description
-  "Ready Observe initialization and scoped capture for Lwt applications on Unix.")
+  "Ready Observe initialization and scoped capture for Lwt programs on Unix.")
  (depends
   (ocaml
    (>= 4.14))
@@ -88,6 +88,7 @@
    (= :version))
   lwt
   ptime
+  mtime
   (ocamlfind :with-test)))
 
 (package

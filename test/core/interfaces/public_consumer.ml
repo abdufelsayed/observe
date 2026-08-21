@@ -18,6 +18,11 @@ module IO = struct
 
   module Clock = struct
     let now () = Ok (Observe.Timestamp.of_unix_ns 0L)
+    let monotonic_now () = Ok 0L
+  end
+
+  module Identity = struct
+    let next () = Ok "consumer-operation"
   end
 
   module Console = struct
@@ -28,10 +33,26 @@ end
 
 module Observer = Observe.Make (IO)
 
+type event = { value : int }
+
+let event_t =
+  let open Observe.Type in
+  record "event" (fun value -> { value })
+  |+ field "value" int (fun event -> event.value)
+  |> sealr
+
+type event_builder = {
+  typed : event Observe.Schema.patch -> event Observe.Schema.patch;
+}
+
+let event_schema =
+  Observe.Generated_runtime.record_schema event_t ~builder:(fun _ ->
+      { typed = Fun.id })
+
 let config = Observe.Config.create_exn ~service:"consumer" ()
 let observer = Observer.create ()
 let text = fun (m : Observe.Logs.builder) -> m.text ~tag:"consumer" "message"
-let untyped = fun (m : Observe.Logs.builder) -> m.untyped (Observe.Value.int 1)
-let typed = fun (m : Observe.Logs.builder) -> m.typed Observe.Type.int 1
+let untyped = fun (m : Observe.Logs.builder) -> m.value (Observe.Value.int 1)
+let typed = fun (m : Observe.Logs.builder) -> m.typed event_schema { value = 1 }
 let pretty = Observe.Formatter.pretty Observe.Formatter.Plain
 let _ = (config, observer, text, untyped, typed, pretty)

@@ -1,7 +1,7 @@
 (** Portable structured logging.
 
     The core owns logging policy and performs no I/O. Integrations provide one
-    completed {!module-type:IO.S} implementation. Ordinary application code logs
+    completed {!module-type:IO.S} implementation. Ordinary caller code logs
     through {!Logs}. *)
 
 (** Type descriptions used by typed structured logs. Each description keeps
@@ -106,84 +106,32 @@ module Type : sig
   val map : 'b t -> ('b -> 'a) -> ('a -> 'b) -> 'a t
 end
 
-module Generated_runtime : sig
-  (** Compatibility contract for code emitted by [observe.ppx]. Application code
-      should use {!Type}; this module may only evolve with a coordinated
-      PPX/runtime compatibility change. *)
-
-  type 'a description = 'a Type.t
-  type renderer
-  type placement
-
-  type rendered =
-    | Scalar of (renderer -> unit)
-    | Node of (renderer -> placement -> unit)
-
-  val with_json : 'a description -> (Buffer.t -> 'a -> unit) -> 'a description
-  val with_plan : 'a description -> ('a -> rendered) -> 'a description
-
-  val with_recursive_plan :
-    'a description -> ('a description -> 'a -> rendered) -> 'a description
-
-  val json : 'a description -> Buffer.t -> 'a -> unit
-  val plan : 'a description -> 'a -> rendered
-  val is_scalar : 'a description -> 'a -> bool
-  val render : 'a description -> renderer -> placement -> 'a -> unit
-  val inline : placement
-  val start : renderer -> placement -> scalar:bool -> bool
-  val finish : renderer -> bool -> unit
-
-  val field :
-    'a description -> renderer -> last:bool -> name:string -> 'a -> unit
-
-  val constructor :
-    'a description -> renderer -> last:bool -> name:string -> 'a -> unit
-
-  val constructor_start :
-    renderer -> last:bool -> name:string -> scalar:bool -> bool
-
-  val variant : renderer -> placement -> polymorphic:bool -> string -> unit
-  val variant_label : renderer -> polymorphic:bool -> string -> unit
-  val empty_record : renderer -> unit
-  val json_unit : Buffer.t -> unit -> unit
-  val json_bool : Buffer.t -> bool -> unit
-  val json_char : Buffer.t -> char -> unit
-  val json_int : Buffer.t -> int -> unit
-  val json_int32 : Buffer.t -> int32 -> unit
-  val json_int64 : Buffer.t -> int64 -> unit
-  val json_float : Buffer.t -> float -> unit
-  val json_string : Buffer.t -> string -> unit
-  val json_bytes : Buffer.t -> bytes -> unit
-  val json_list : (Buffer.t -> 'a -> unit) -> Buffer.t -> 'a list -> unit
-  val json_array : (Buffer.t -> 'a -> unit) -> Buffer.t -> 'a array -> unit
-  val json_option : (Buffer.t -> 'a -> unit) -> Buffer.t -> 'a option -> unit
-  val json_field : 'a description -> Buffer.t -> bool -> string -> 'a -> bool
+module Schema : sig
+  type ('record, 'builder) t
+  type 'record patch
 end
 
-module Level : sig
-  type t =
-    | Debug
-    | Info
-    | Warn
-    | Error  (** Ordered as [Debug < Info < Warn < Error]. *)
+module Error : sig
+  type roles
+  type 'error t
 
-  val compare : t -> t -> int
-  val equal : t -> t -> bool
-  val to_string : t -> string
-  val pp : Format.formatter -> t -> unit
-  val t : t Type.t
-end
+  val roles :
+    ?kind:string ->
+    ?code:string ->
+    ?message:string ->
+    ?explanation:string ->
+    ?remediation:string ->
+    ?documentation:string ->
+    unit ->
+    roles
 
-module Timestamp : sig
-  type t
-  (** A wall-clock occurrence timestamp expressed as Unix nanoseconds. *)
+  val create : ('error -> roles) -> 'error t
+  (** Build a reusable interpretation without replacing the consumer's domain
+      error type. *)
 
-  val of_unix_ns : int64 -> t
-  val to_unix_ns : t -> int64
-  val compare : t -> t -> int
-  val equal : t -> t -> bool
-  val pp : Format.formatter -> t -> unit
-  val t : t Type.t
+  val exn : exn t
+  (** Interpret an explicitly supplied exception. Pass its captured raw
+      backtrace at the contribution site when one is available. *)
 end
 
 module Value : sig
@@ -218,21 +166,193 @@ module Value : sig
 
   type json_error = Invalid_utf8 | Non_finite_float | Unsupported_value
 
+  type frozen
+  (** Immutable package-owned structured meaning in a completed observation. *)
+
+  val frozen_to_json_string : frozen -> string
+
   val to_json_string : t -> (string, json_error) result
   (** Encode one compact JSON value with Observe's direct writer. *)
 end
 
+module Generated_runtime : sig
+  (** Compatibility contract for code emitted by [observe.ppx]. Consumer code
+      should use {!Type}; this module may only evolve with a coordinated
+      PPX/runtime compatibility change. *)
+
+  type 'a description = 'a Type.t
+  type renderer
+  type placement
+
+  type rendered =
+    | Scalar of (renderer -> unit)
+    | Node of (renderer -> placement -> unit)
+
+  val with_json : 'a description -> (Buffer.t -> 'a -> unit) -> 'a description
+  val with_plan : 'a description -> ('a -> rendered) -> 'a description
+
+  type freeze_context
+  type frozen
+  type freeze_error
+
+  val with_freeze :
+    'a description ->
+    (freeze_context -> depth:int -> 'a -> (frozen, freeze_error) result) ->
+    'a description
+
+  val with_recursive_plan :
+    'a description -> ('a description -> 'a -> rendered) -> 'a description
+
+  val with_recursive_freeze :
+    'a description ->
+    ('a description ->
+    freeze_context ->
+    depth:int ->
+    'a ->
+    (frozen, freeze_error) result) ->
+    'a description
+
+  val freeze :
+    'a description ->
+    freeze_context ->
+    depth:int ->
+    'a ->
+    (frozen, freeze_error) result
+
+  val frozen_string :
+    freeze_context -> depth:int -> string -> (frozen, freeze_error) result
+
+  val frozen_object :
+    freeze_context ->
+    depth:int ->
+    (string * frozen) list ->
+    (frozen, freeze_error) result
+
+  val frozen_variant :
+    freeze_context ->
+    depth:int ->
+    bool ->
+    string ->
+    (frozen, freeze_error) result
+
+  val frozen_variant_payload :
+    freeze_context ->
+    depth:int ->
+    bool ->
+    string ->
+    frozen ->
+    (frozen, freeze_error) result
+
+  val json : 'a description -> Buffer.t -> 'a -> unit
+  val plan : 'a description -> 'a -> rendered
+  val is_scalar : 'a description -> 'a -> bool
+  val render : 'a description -> renderer -> placement -> 'a -> unit
+  val inline : placement
+  val start : renderer -> placement -> scalar:bool -> bool
+  val finish : renderer -> bool -> unit
+
+  val field :
+    'a description -> renderer -> last:bool -> name:string -> 'a -> unit
+
+  val constructor :
+    'a description -> renderer -> last:bool -> name:string -> 'a -> unit
+
+  val constructor_start :
+    renderer -> last:bool -> name:string -> scalar:bool -> bool
+
+  val variant : renderer -> placement -> polymorphic:bool -> string -> unit
+  val variant_label : renderer -> polymorphic:bool -> string -> unit
+  val empty_record : renderer -> unit
+  val json_unit : Buffer.t -> unit -> unit
+  val json_bool : Buffer.t -> bool -> unit
+  val json_char : Buffer.t -> char -> unit
+  val json_int : Buffer.t -> int -> unit
+  val json_int32 : Buffer.t -> int32 -> unit
+  val json_int64 : Buffer.t -> int64 -> unit
+  val json_float : Buffer.t -> float -> unit
+  val json_string : Buffer.t -> string -> unit
+  val json_bytes : Buffer.t -> bytes -> unit
+  val json_list : (Buffer.t -> 'a -> unit) -> Buffer.t -> 'a list -> unit
+  val json_array : (Buffer.t -> 'a -> unit) -> Buffer.t -> 'a array -> unit
+  val json_option : (Buffer.t -> 'a -> unit) -> Buffer.t -> 'a option -> unit
+  val json_field : 'a description -> Buffer.t -> bool -> string -> 'a -> bool
+
+  type fragment
+  type patch_field
+  type open_patch
+
+  val fragment : 'a description -> 'a -> fragment
+
+  val error_fragment :
+    'error Error.t -> ?backtrace:Printexc.raw_backtrace -> 'error -> fragment
+
+  val patch_fragment : 'record Schema.patch -> fragment
+  val patch_field : string -> fragment -> patch_field
+
+  val record_patch :
+    ('record, 'builder) Schema.t ->
+    patch_field option list ->
+    'record Schema.patch
+
+  val named_record_patch :
+    string -> patch_field option list -> 'record Schema.patch
+
+  val named_error_patch : string -> fragment -> 'record Schema.patch
+
+  val combine_named_patches :
+    string -> 'record Schema.patch list -> 'record Schema.patch
+
+  val record_schema :
+    ?name:string ->
+    builder:(string -> 'builder) ->
+    'record description ->
+    ('record, 'builder) Schema.t
+
+  val schema_builder : ('record, 'builder) Schema.t -> 'builder
+
+  val open_value_patch : Value.t -> open_patch
+  (** PPX runtime bridge for an annotation-free anonymous object. *)
+end
+
+module Level : sig
+  type t =
+    | Debug
+    | Info
+    | Warn
+    | Error  (** Ordered as [Debug < Info < Warn < Error]. *)
+
+  val compare : t -> t -> int
+  val equal : t -> t -> bool
+  val to_string : t -> string
+  val pp : Format.formatter -> t -> unit
+  val t : t Type.t
+end
+
+module Timestamp : sig
+  type t
+  (** A wall-clock occurrence timestamp expressed as Unix nanoseconds. *)
+
+  val of_unix_ns : int64 -> t
+  val to_unix_ns : t -> int64
+  val compare : t -> t -> int
+  val equal : t -> t -> bool
+  val pp : Format.formatter -> t -> unit
+  val t : t Type.t
+end
+
 module Log : sig
   type t
-  (** A completed admitted log. Typed values and values embedded in untyped
-      bodies are retained by reference, not deeply copied. *)
+  (** A completed admitted log whose structured body is an immutable bounded
+      package-owned snapshot. *)
 
   type body =
     | Text of { tag : string; message : string }
-    | Untyped of Value.t
-    | Typed : 'a Type.t * 'a -> body
-        (** The three semantic body forms. Pattern matching is safe because this
-            type carries no completed-log invariant. *)
+    | Structured of { origin : structured_origin; value : Value.frozen }
+
+  and structured_origin = Open | Declared of string
+
+  type kind = Point | Wide
+  type operation
 
   val service : t -> string
   val environment : t -> string option
@@ -240,6 +360,12 @@ module Log : sig
   val timestamp : t -> Timestamp.t
   val level : t -> Level.t
   val body : t -> body
+  val kind : t -> kind
+  val operation : t -> operation option
+  val operation_name : operation -> string
+  val operation_id : operation -> string
+  val operation_parent_id : operation -> string option
+  val operation_duration_ns : operation -> int64
 end
 
 module Diagnostics : sig
@@ -249,7 +375,15 @@ module Diagnostics : sig
     | Capture_lookup_raised
     | Clock_unavailable
     | Clock_raised
+    | Identity_unavailable
+    | Identity_raised
+    | Monotonic_clock_unavailable
+    | Monotonic_clock_raised
     | Message_evaluation_raised
+    | Canonical_freeze_failed
+    | Post_seal_set
+    | Post_seal_set_level
+    | Post_seal_emit
     | Formatting_failed
     | Formatting_raised
     | Console_rejected
@@ -271,12 +405,12 @@ module Drain : sig
   type t
 
   val create : (Log.t -> acceptance) -> t
-  (** Construct an additional output with a synchronous submission callback.
-
-      [Accepted] means immediate ownership acceptance only. A drain retaining
-      work after return must first copy or project everything it needs. Ordinary
-      callback exceptions are contained as [Diagnostics.Drain_raised]; runtime
-      control exceptions are preserved. *)
+  (** Construct an additional output with a synchronous callback over one
+      immutable completed observation. A drain can retain [Log.t] safely; it
+      must still own destination-specific projection and mutable delivery state.
+      [Accepted] means immediate ownership acceptance only. Ordinary callback
+      exceptions are contained as [Diagnostics.Drain_raised]; runtime control
+      exceptions are preserved. *)
 
   module Integration : sig
     val report_failure : unit -> unit
@@ -322,8 +456,7 @@ module Capture : sig
   val default_capacity : int
 
   val logs : t -> Log.t list
-  (** Retained logs in admission order. Typed values remain by-reference values,
-      not deep snapshots. *)
+  (** Immutable completed observations retained in admission order. *)
 
   val diagnostics : t -> Diagnostics.entry list
 end
@@ -391,20 +524,46 @@ module Logs : sig
   type message
   (** A completed authoring result produced inside an admitted callback. *)
 
+  type object_
+  type field
+  type open_patch = Generated_runtime.open_patch
+
+  type open_builder = private {
+    untyped : object_;
+    field : 'a. string -> 'a Type.t -> 'a -> field;
+    object_ : string -> (open_builder -> open_patch) -> field;
+    error :
+      'error.
+      'error Error.t ->
+      ?backtrace:Printexc.raw_backtrace ->
+      'error ->
+      open_patch;
+    seal : object_ -> open_patch;
+  }
+
   type builder = private {
     text :
       'a. tag:string -> ('a, Format.formatter, unit, message) format4 -> 'a;
-    untyped : Value.t -> message;
-    typed : 'a. 'a Type.t -> 'a -> message;
+    untyped : object_;
+    field : 'a. string -> 'a Type.t -> 'a -> field;
+    object_ : string -> (open_builder -> open_patch) -> field;
+    seal : object_ -> message;
+    value : Value.t -> message;
+    error :
+      'error.
+      'error Error.t -> ?backtrace:Printexc.raw_backtrace -> 'error -> message;
+    typed : 'a 'builder. ('a, 'builder) Schema.t -> 'a -> message;
   }
-  (** The admitted message builder. [text] supports type-safe format strings;
-      [untyped] accepts a dynamic value; [typed] retains an OCaml value with its
-      type description. *)
+  (** The admitted point builder. [text] supports type-safe format strings;
+      [untyped], [field], [object_], and [seal] author anonymous record-shaped
+      structure; [value] is the explicit {!Value} compatibility path; and
+      [typed] accepts a complete value through a record schema. Every accepted
+      result is frozen before publication. *)
 
   type author = builder -> message
   (** Message authoring invoked only after route and level admission. *)
 
-  val emit : level:Level.t -> author -> unit
+  val log : level:Level.t -> author -> unit
   (** Emit through the active scoped or production route. Before installation,
       messages are withheld and diagnosed. Logging does not raise merely because
       process initialization has not happened. Ordinary authoring exceptions are
@@ -414,6 +573,32 @@ module Logs : sig
   val info : author -> unit
   val warn : author -> unit
   val error : author -> unit
+  val ( |+ ) : object_ -> field -> object_
+
+  type ('builder, 'patch) t
+
+  val create : name:string -> unit -> (open_builder, open_patch) t
+  (** Start an empty open wide log at [Info]. An unavailable route or required
+      runtime capability produces an inert handle. *)
+
+  val create_typed :
+    name:string ->
+    ('record, 'builder) Schema.t ->
+    ('builder, 'record Schema.patch) t
+  (** Start an empty wide log locked to one declared record schema. Its
+      contributions are sparse patches; no field is mandatory at emission. *)
+
+  val set : ('builder, 'patch) t -> ('builder -> 'patch) -> unit
+  (** Lazily contribute one record-shaped patch while the handle is active.
+      Objects merge recursively and later non-object values replace earlier
+      values. Failed contributions seal and withhold the lifecycle. *)
+
+  val set_level : ('builder, 'patch) t -> Level.t -> unit
+  (** Replace the explicit level. The last explicit value wins over derived
+      [Error] regardless of call order. *)
+
+  val emit : ('builder, 'patch) t -> unit
+  (** Seal and attempt final-level admission and publication exactly once. *)
 end
 
 module IO : sig
@@ -451,6 +636,14 @@ module IO : sig
       val now : state -> (Timestamp.t, clock_error) result
       (** Return wall-clock epoch time. [Unavailable] means that no timestamp
           can be supplied. Ordinary exceptions are diagnosed by the core. *)
+
+      val monotonic_now : state -> (int64, clock_error) result
+      (** Return a process-relative monotonic nanosecond value. *)
+    end
+
+    module Identity : sig
+      val next : state -> (string, clock_error) result
+      (** Return a non-empty identifier for one active wide-log occurrence. *)
     end
 
     module Console : sig

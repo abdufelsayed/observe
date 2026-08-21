@@ -16,6 +16,11 @@ module type S = sig
 
   module Clock : sig
     val now : state -> (Timestamp.t, clock_error) result
+    val monotonic_now : state -> (int64, clock_error) result
+  end
+
+  module Identity : sig
+    val next : state -> (string, clock_error) result
   end
 
   module Console : sig
