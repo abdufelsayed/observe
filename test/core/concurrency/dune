@@ -24,6 +24,7 @@
    (run %{exe:concurrency_scenario.exe} wide-set-level-emit-race 8)
    (run %{exe:concurrency_scenario.exe} wide-set-level-emit-race 64)
    (run %{exe:concurrency_scenario.exe} wide-authoring-linearization)
+   (run %{exe:concurrency_scenario.exe} wide-parallel-materialization)
    (run %{exe:concurrency_scenario.exe} terminal-race 8)
    (run %{exe:concurrency_scenario.exe} terminal-race 64))))
 

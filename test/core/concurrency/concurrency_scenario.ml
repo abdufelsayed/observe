@@ -376,6 +376,66 @@ let wide_authoring_linearization () =
         (contains json "\"reserved\":true")
   | _ -> Alcotest.fail "authoring linearization did not publish exactly once"
 
+let wide_parallel_materialization () =
+  let observer = Observer.create (Test_io.Host.create ()) in
+  let result =
+    Observer.with_capture observer (config ()) (fun capture ->
+        let wide = Observe.Logs.create ~name:"parallel-materialization" () in
+        let first_entered = Atomic.make false in
+        let second_entered = Atomic.make false in
+        let release = Atomic.make false in
+        let rec wait_for entered attempts =
+          if Atomic.get entered then true
+          else if attempts = 0 then false
+          else (
+            Thread.yield ();
+            wait_for entered (attempts - 1))
+        in
+        let setter name entered =
+          Thread.create
+            (fun () ->
+              Observe.Logs.set wide (fun m ->
+                  Atomic.set entered true;
+                  while not (Atomic.get release) do
+                    Domain.cpu_relax ()
+                  done;
+                  let open Observe.Logs in
+                  m.untyped |+ m.field name Observe.Type.bool true |> m.seal))
+            ()
+        in
+        let first = setter "first" first_entered in
+        if not (wait_for first_entered 1_000_000) then (
+          Atomic.set release true;
+          Thread.join first;
+          Alcotest.fail "first wide author did not start");
+        let second = setter "second" second_entered in
+        let parallel = wait_for second_entered 1_000_000 in
+        Atomic.set release true;
+        Thread.join first;
+        Thread.join second;
+        Alcotest.(check bool)
+          "admitted wide callbacks materialize concurrently" true parallel;
+        Observe.Logs.emit wide;
+        Test_io.Direct.return capture)
+  in
+  let capture =
+    match result with
+    | Ok capture -> capture
+    | Error _ -> Alcotest.fail "parallel materialization capture was rejected"
+  in
+  match Observe.Capture.logs capture with
+  | [ log ] ->
+      let json =
+        match Observe.Log.body log with
+        | Observe.Log.Text _ -> Alcotest.fail "wide body was text"
+        | Observe.Log.Structured { value; _ } ->
+            Observe.Value.frozen_to_json_string value
+      in
+      Alcotest.(check bool)
+        "both parallel contributions complete before emission" true
+        (contains json "\"first\":true" && contains json "\"second\":true")
+  | _ -> Alcotest.fail "parallel materialization did not publish exactly once"
+
 let terminal_race work =
   let work = max 3 work in
   let observer = Observer.create (Test_io.Host.create ()) in
@@ -449,5 +509,6 @@ let () =
   | "wide-contribution-and-seal" -> wide_contribution_and_seal work
   | "wide-set-level-emit-race" -> wide_set_level_emit_race work
   | "wide-authoring-linearization" -> wide_authoring_linearization ()
+  | "wide-parallel-materialization" -> wide_parallel_materialization ()
   | "terminal-race" -> terminal_race work
   | _ -> Alcotest.failf "unknown concurrency scenario: %s" mode

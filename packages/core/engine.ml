@@ -198,13 +198,15 @@ let emit_point t ?correlation_id level author =
             | Error _ -> record_diagnostic t Diagnostics.Canonical_freeze_failed
             ))
 
-type wide_state = Inert | Available | Authoring | Sealed
+(* The low lifecycle bits record closing and failure; the remaining bits count
+   admitted authors. Reserving an author and closing the lifecycle are competing
+   CAS operations on this one word, so a callback is either admitted completely
+   before closing or is never evaluated. Admitted callbacks may materialize in
+   parallel. [writer] serializes only mutation of the shared accumulator. *)
 
-(* [closing] is the enrollment gate; [state] serializes the one mutable wide
-   snapshot. An author claims [Available] before evaluating caller code and
-   rechecks the gate. Emission closes the gate first, then waits for an already
-   admitted author to publish [Available] before sealing. Therefore a callback
-   either contributes completely before completion or is never evaluated. *)
+let lifecycle_closing = 1
+let lifecycle_failed = 2
+let lifecycle_author = 4
 
 type contribution =
   | Contribution of Snapshot.fragment * bool
@@ -220,8 +222,8 @@ type wide = {
   mutable body : Snapshot.Object_accumulator.state;
   mutable explicit_level : Level.t option;
   mutable has_error : bool;
-  state : wide_state Atomic.t;
-  closing : bool Atomic.t;
+  lifecycle : int Atomic.t;
+  writer : bool Atomic.t;
 }
 
 let inert_wide () =
@@ -235,8 +237,8 @@ let inert_wide () =
     body = Snapshot.Object_accumulator.empty;
     explicit_level = None;
     has_error = false;
-    state = Atomic.make Inert;
-    closing = Atomic.make false;
+    lifecycle = Atomic.make lifecycle_closing;
+    writer = Atomic.make false;
   }
 
 let contained_call t callback =
@@ -302,8 +304,8 @@ let create_wide t ?parent ~name ~origin () =
                       body = Snapshot.Object_accumulator.empty;
                       explicit_level = None;
                       has_error = false;
-                      state = Atomic.make Available;
-                      closing = Atomic.make false;
+                      lifecycle = Atomic.make 0;
+                      writer = Atomic.make false;
                     })))
 
 let merge_body = Snapshot.Object_accumulator.merge
@@ -313,37 +315,62 @@ let reject_authoring engine diagnostic =
   record_diagnostic engine diagnostic;
   false
 
-let acquire_authoring wide engine diagnostic =
-  let rec acquire () =
-    if Atomic.get wide.closing then reject_authoring engine diagnostic
-    else
-      match Atomic.get wide.state with
-      | Inert -> false
-      | Sealed -> reject_authoring engine diagnostic
-      | Authoring -> acquire ()
-      | Available ->
-          if Atomic.compare_and_set wide.state Available Authoring then
-            if Atomic.get wide.closing then (
-              Atomic.set wide.state Available;
-              reject_authoring engine diagnostic)
-            else true
-          else acquire ()
-  in
-  acquire ()
+let lifecycle_is_closing state = state land lifecycle_closing <> 0
+let lifecycle_is_failed state = state land lifecycle_failed <> 0
+let lifecycle_has_authors state = state >= lifecycle_author
 
-let finish_authoring wide = Atomic.set wide.state Available
+let reserve_authoring wide engine diagnostic =
+  let rec reserve () =
+    let state = Atomic.get wide.lifecycle in
+    if lifecycle_is_closing state then reject_authoring engine diagnostic
+    else if state > max_int - lifecycle_author then
+      reject_authoring engine Diagnostics.Canonical_freeze_failed
+    else if
+      Atomic.compare_and_set wide.lifecycle state (state + lifecycle_author)
+    then true
+    else reserve ()
+  in
+  reserve ()
+
+let release_authoring wide =
+  ignore (Atomic.fetch_and_add wide.lifecycle (-lifecycle_author) : int)
+
+let rec acquire_writer wide =
+  if Atomic.compare_and_set wide.writer false true then ()
+  else (
+    Domain.cpu_relax ();
+    acquire_writer wide)
+
+let release_writer wide = Atomic.set wide.writer false
+
+let rec mark_failed wide =
+  let state = Atomic.get wide.lifecycle in
+  let failed = state lor lifecycle_closing lor lifecycle_failed in
+  if failed <> state && not (Atomic.compare_and_set wide.lifecycle state failed)
+  then mark_failed wide
 
 let fail_authoring wide engine diagnostic =
-  Atomic.set wide.closing true;
+  mark_failed wide;
+  acquire_writer wide;
   clear_wide_body wide;
-  Atomic.set wide.state Sealed;
+  release_writer wide;
+  release_authoring wide;
   record_diagnostic engine diagnostic
+
+let fail_authoring_with_writer wide engine diagnostic =
+  mark_failed wide;
+  clear_wide_body wide;
+  release_writer wide;
+  release_authoring wide;
+  record_diagnostic engine diagnostic
+
+let authoring_failed wide = lifecycle_is_failed (Atomic.get wide.lifecycle)
 
 let contribute_wide wide materialize =
   match wide.engine with
   | None -> false
   | Some engine
-    when not (acquire_authoring wide engine Diagnostics.Post_seal_set) ->
+    when not (reserve_authoring wide engine Diagnostics.Post_seal_set) ->
       false
   | Some engine -> (
       let materialized =
@@ -362,93 +389,113 @@ let contribute_wide wide materialize =
           fail_authoring wide engine Diagnostics.Canonical_freeze_failed;
           false
       | Returned (Contribution (contribution_body, contribution_has_error)) -> (
-          let merged =
-            match
-              contained_call engine (fun () ->
-                  merge_body wide.body contribution_body)
-            with
-            | result -> result
-            | exception raised ->
-                let backtrace = Printexc.get_raw_backtrace () in
-                fail_authoring wide engine Diagnostics.Message_evaluation_raised;
-                Printexc.raise_with_backtrace raised backtrace
-          in
-          match merged with
-          | Raised ->
-              fail_authoring wide engine Diagnostics.Message_evaluation_raised;
-              false
-          | Returned (Error _) ->
-              fail_authoring wide engine Diagnostics.Canonical_freeze_failed;
-              false
-          | Returned (Ok body) ->
-              wide.body <- body;
-              wide.has_error <- wide.has_error || contribution_has_error;
-              finish_authoring wide;
-              true))
+          acquire_writer wide;
+          if authoring_failed wide then (
+            release_writer wide;
+            release_authoring wide;
+            false)
+          else
+            let merged =
+              match
+                contained_call engine (fun () ->
+                    merge_body wide.body contribution_body)
+              with
+              | result -> result
+              | exception raised ->
+                  let backtrace = Printexc.get_raw_backtrace () in
+                  fail_authoring_with_writer wide engine
+                    Diagnostics.Message_evaluation_raised;
+                  Printexc.raise_with_backtrace raised backtrace
+            in
+            match merged with
+            | Raised ->
+                fail_authoring_with_writer wide engine
+                  Diagnostics.Message_evaluation_raised;
+                false
+            | Returned (Error _) ->
+                fail_authoring_with_writer wide engine
+                  Diagnostics.Canonical_freeze_failed;
+                false
+            | Returned (Ok body) ->
+                wide.body <- body;
+                wide.has_error <- wide.has_error || contribution_has_error;
+                release_writer wide;
+                release_authoring wide;
+                true))
 
 let set_wide_level wide level =
   match wide.engine with
   | None -> ()
   | Some engine ->
-      if acquire_authoring wide engine Diagnostics.Post_seal_set_level then (
-        wide.explicit_level <- Some level;
-        finish_authoring wide)
+      if reserve_authoring wide engine Diagnostics.Post_seal_set_level then (
+        acquire_writer wide;
+        if not (authoring_failed wide) then wide.explicit_level <- Some level;
+        release_writer wide;
+        release_authoring wide)
+
+let rec close_lifecycle wide =
+  let state = Atomic.get wide.lifecycle in
+  if lifecycle_is_closing state then false
+  else if
+    Atomic.compare_and_set wide.lifecycle state (state lor lifecycle_closing)
+  then true
+  else close_lifecycle wide
+
+let rec wait_for_authors wide =
+  if lifecycle_has_authors (Atomic.get wide.lifecycle) then (
+    Domain.cpu_relax ();
+    wait_for_authors wide)
 
 let emit_wide wide =
   match wide.engine with
   | None -> ()
   | Some engine ->
-      let rec finish_seal () =
-        match Atomic.get wide.state with
-        | Inert | Sealed -> false
-        | Authoring -> finish_seal ()
-        | Available ->
-            if Atomic.compare_and_set wide.state Available Sealed then true
-            else finish_seal ()
-      in
-      if not (Atomic.compare_and_set wide.closing false true) then
+      if not (close_lifecycle wide) then
         record_diagnostic engine Diagnostics.Post_seal_emit
-      else if finish_seal () then (
-        let body = Snapshot.Object_accumulator.as_fragment wide.body in
-        clear_wide_body wide;
-        let level =
-          match wide.explicit_level with
-          | Some level -> level
-          | None when wide.has_error -> Level.Error
-          | None -> Level.Info
-        in
-        match contained_call engine engine.monotonic_now with
-        | Raised -> record_diagnostic engine Diagnostics.Monotonic_clock_raised
-        | Returned (Error Io.Unavailable) ->
-            record_diagnostic engine Diagnostics.Monotonic_clock_unavailable
-        | Returned (Ok end_ns) -> (
-            match contained_call engine engine.clock with
-            | Raised -> record_diagnostic engine Diagnostics.Clock_raised
-            | Returned (Error Io.Unavailable) ->
-                record_diagnostic engine Diagnostics.Clock_unavailable
-            | Returned (Ok timestamp) -> (
-                if admitted engine level then
-                  match (wide.id, wide.start_ns) with
-                  | Some id, Some start_ns -> (
-                      let duration_ns =
-                        if Int64.compare end_ns start_ns < 0 then 0L
-                        else Int64.sub end_ns start_ns
-                      in
-                      let operation =
-                        Log.Producer.operation ~name:wide.name ~id
-                          ?parent_id:wide.parent_id ~duration_ns ()
-                      in
-                      match
-                        contained_call engine (fun () ->
-                            create_log engine level timestamp ~operation
-                              (Log.Producer.Structured
-                                 { origin = wide.origin; value = body }))
-                      with
-                      | Raised | Returned (Error _) ->
-                          record_diagnostic engine
-                            Diagnostics.Canonical_freeze_failed
-                      | Returned (Ok log) -> dispatch engine log)
-                  | None, _ | _, None ->
-                      record_diagnostic engine
-                        Diagnostics.Canonical_freeze_failed)))
-      else ()
+      else (
+        wait_for_authors wide;
+        if not (authoring_failed wide) then (
+          let body = Snapshot.Object_accumulator.as_fragment wide.body in
+          clear_wide_body wide;
+          let level =
+            match wide.explicit_level with
+            | Some level -> level
+            | None when wide.has_error -> Level.Error
+            | None -> Level.Info
+          in
+          match contained_call engine engine.monotonic_now with
+          | Raised ->
+              record_diagnostic engine Diagnostics.Monotonic_clock_raised
+          | Returned (Error Io.Unavailable) ->
+              record_diagnostic engine Diagnostics.Monotonic_clock_unavailable
+          | Returned (Ok end_ns) -> (
+              match contained_call engine engine.clock with
+              | Raised -> record_diagnostic engine Diagnostics.Clock_raised
+              | Returned (Error Io.Unavailable) ->
+                  record_diagnostic engine Diagnostics.Clock_unavailable
+              | Returned (Ok timestamp) -> (
+                  if admitted engine level then
+                    match (wide.id, wide.start_ns) with
+                    | Some id, Some start_ns -> (
+                        let duration_ns =
+                          if Int64.compare end_ns start_ns < 0 then 0L
+                          else Int64.sub end_ns start_ns
+                        in
+                        let operation =
+                          Log.Producer.operation ~name:wide.name ~id
+                            ?parent_id:wide.parent_id ~duration_ns ()
+                        in
+                        match
+                          contained_call engine (fun () ->
+                              create_log engine level timestamp ~operation
+                                (Log.Producer.Structured
+                                   { origin = wide.origin; value = body }))
+                        with
+                        | Raised | Returned (Error _) ->
+                            record_diagnostic engine
+                              Diagnostics.Canonical_freeze_failed
+                        | Returned (Ok log) -> dispatch engine log)
+                    | None, _ | _, None ->
+                        record_diagnostic engine
+                          Diagnostics.Canonical_freeze_failed)))
+        else ())

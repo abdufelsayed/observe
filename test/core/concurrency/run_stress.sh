@@ -48,4 +48,5 @@ fi
 "$runner" wide-contribution-and-seal "$work"
 "$runner" wide-set-level-emit-race "$work"
 "$runner" wide-authoring-linearization
+"$runner" wide-parallel-materialization
 "$runner" terminal-race "$work"
