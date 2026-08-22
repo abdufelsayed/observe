@@ -131,7 +131,7 @@ let redirect_standard_error () =
       Unix.dup2 saved Unix.stderr;
       Unix.close saved)
 
-let lwt_unix_emit config emit =
+let prepare_lwt_unix_operation config emit =
   let restore = redirect_standard_error () in
   try
     Observe_lwt_unix.init_exn config;
@@ -153,7 +153,8 @@ let lwt_unix_emit config emit =
     Printexc.raise_with_backtrace exception_raised backtrace
 
 let lwt_unix_operation config make_message =
-  lwt_unix_emit config (fun () -> Observe.Logs.info (make_message ()))
+  prepare_lwt_unix_operation config (fun () ->
+      Observe.Logs.info (make_message ()))
 
 let temporary_directory () =
   let path = Filename.temp_file "observe-bench-fs" ".dir" in
@@ -172,7 +173,7 @@ let rec remove_tree path =
       Sys.remove path
   | exception Unix.Unix_error (Unix.ENOENT, _, _) -> ()
 
-let fs_lwt_unix_emit ~batch_size emit =
+let prepare_fs_lwt_unix_operation ~batch_size emit =
   let directory = temporary_directory () in
   try
     let drain =
@@ -201,7 +202,8 @@ let fs_lwt_unix_emit ~batch_size emit =
     Printexc.raise_with_backtrace exception_raised backtrace
 
 let fs_lwt_unix_operation ~batch_size make_message =
-  fs_lwt_unix_emit ~batch_size (fun () -> Observe.Logs.info (make_message ()))
+  prepare_fs_lwt_unix_operation ~batch_size (fun () ->
+      Observe.Logs.info (make_message ()))
 
 let make ?(logical_operations = 1) ~name ~suite ~boundary ~payload prepare =
   { name; suite; boundary; payload; logical_operations; prepare }
@@ -234,10 +236,48 @@ let opaque () (m : Observe.Logs.builder) =
 
 let retained_wide_operation operation = retained_core_operation operation
 
+let count_occurrences text fragment =
+  let text_length = String.length text in
+  let fragment_length = String.length fragment in
+  let rec count offset total =
+    if offset + fragment_length > text_length then total
+    else if String.equal (String.sub text offset fragment_length) fragment then
+      count (offset + fragment_length) (total + 1)
+    else count (offset + 1) total
+  in
+  if fragment_length = 0 then 0 else count 0 0
+
+let validate_contended_log mode expected_fields = function
+  | None -> failwith "contended wide benchmark emitted no observation"
+  | Some log ->
+      let body =
+        match Observe.Log.body log with
+        | Observe.Log.Text _ ->
+            failwith "contended wide benchmark emitted a text observation"
+        | Observe.Log.Structured { value; _ } ->
+            Observe.Value.frozen_to_json_string value
+      in
+      let actual =
+        match mode with
+        | `Accumulate -> count_occurrences body "\"field_"
+        | `Replace -> count_occurrences body "\"value\":"
+      in
+      if actual <> expected_fields then
+        failwith
+          (Format.asprintf
+             "contended wide benchmark retained %d fields; expected %d" actual
+             expected_fields)
+
 let contended_wide_operation mode =
   let workers = 4 in
   let contributions_per_worker = 16 in
-  let drain = accepted_drain () in
+  let retained = ref None in
+  let validate_next = ref true in
+  let drain =
+    Observe.Drain.create (fun log ->
+        if !validate_next then retained := Some log else consume log;
+        Observe.Drain.Accepted)
+  in
   let state = Benchmark_io.create () in
   let observer = Observer.create state in
   Observer.init_exn observer
@@ -294,21 +334,29 @@ let contended_wide_operation mode =
             work ())
           ())
   in
+  let operation () =
+    let wide = Observe.Logs.create ~name:"contended-wide" () in
+    Mutex.lock mutex;
+    current := Some wide;
+    finished := 0;
+    incr generation;
+    Condition.broadcast ready;
+    while !finished < workers do
+      Condition.wait completed mutex
+    done;
+    current := None;
+    Mutex.unlock mutex;
+    Observe.Logs.emit wide
+  in
+  operation ();
+  validate_contended_log mode
+    (match mode with
+    | `Accumulate -> workers * contributions_per_worker
+    | `Replace -> 1)
+    !retained;
+  validate_next := false;
   {
-    operation =
-      (fun () ->
-        let wide = Observe.Logs.create ~name:"contended-wide" () in
-        Mutex.lock mutex;
-        current := Some wide;
-        finished := 0;
-        incr generation;
-        Condition.broadcast ready;
-        while !finished < workers do
-          Condition.wait completed mutex
-        done;
-        current := None;
-        Mutex.unlock mutex;
-        Observe.Logs.emit wide);
+    operation;
     retained_bytes = no_size;
     encoded_bytes = no_size;
     cleanup =
@@ -588,14 +636,14 @@ let component_scenarios =
     make ~name:"component/capture/wide-open" ~suite:Component
       ~boundary:"capture-wide" ~payload:"open-wide" (fun () ->
         capture_operation open_wide);
-    make ~name:"component/formatter-json/wide-parent" ~suite:Component
-      ~boundary:"formatter-json" ~payload:"wide-parent" (fun () ->
+    make ~name:"component/formatter-json/wide-root" ~suite:Component
+      ~boundary:"formatter-json" ~payload:"wide-root" (fun () ->
         formatter_observation Observe.Formatter.json open_wide);
-    make ~name:"component/formatter-ndjson/wide-parent" ~suite:Component
-      ~boundary:"formatter-ndjson" ~payload:"wide-parent" (fun () ->
+    make ~name:"component/formatter-ndjson/wide-root" ~suite:Component
+      ~boundary:"formatter-ndjson" ~payload:"wide-root" (fun () ->
         formatter_observation Observe.Formatter.ndjson open_wide);
-    make ~name:"component/formatter-pretty/wide-parent" ~suite:Component
-      ~boundary:"formatter-pretty" ~payload:"wide-parent" (fun () ->
+    make ~name:"component/formatter-pretty/wide-root" ~suite:Component
+      ~boundary:"formatter-pretty" ~payload:"wide-root" (fun () ->
         formatter_observation
           (Observe.Formatter.pretty Observe.Formatter.Truecolor)
           open_wide);
@@ -789,12 +837,14 @@ let lwt_unix_scenarios =
         lwt_unix_operation
           (config ~environment:"development" ~console:Observe.Config.Pretty ())
           typed_nested);
-    make ~name:"lwt-unix/json/wide-parent" ~suite:Lwt_unix ~boundary:"json"
-      ~payload:"wide-parent" (fun () ->
-        lwt_unix_emit (config ~console:Observe.Config.Ndjson ()) open_wide);
+    make ~name:"lwt-unix/json/wide-root" ~suite:Lwt_unix ~boundary:"json"
+      ~payload:"wide-root" (fun () ->
+        prepare_lwt_unix_operation
+          (config ~console:Observe.Config.Ndjson ())
+          open_wide);
     make ~name:"lwt-unix/pretty/wide-child" ~suite:Lwt_unix ~boundary:"pretty"
       ~payload:"wide-child" (fun () ->
-        lwt_unix_emit
+        prepare_lwt_unix_operation
           (config ~environment:"development" ~console:Observe.Config.Pretty ())
           child_wide);
     make ~name:"lwt-unix/managed/success" ~suite:Lwt_unix
@@ -819,9 +869,9 @@ let fs_lwt_unix_scenarios =
     make ~name:"fs-lwt-unix/completed/typed-small" ~suite:Fs_lwt_unix
       ~boundary:"completed-write" ~payload:"typed-small" (fun () ->
         fs_lwt_unix_operation ~batch_size:1 typed_small);
-    make ~name:"fs-lwt-unix/completed/wide-parent" ~suite:Fs_lwt_unix
-      ~boundary:"completed-write" ~payload:"wide-parent" (fun () ->
-        fs_lwt_unix_emit ~batch_size:1 open_wide);
+    make ~name:"fs-lwt-unix/completed/wide-root" ~suite:Fs_lwt_unix
+      ~boundary:"completed-write" ~payload:"wide-root" (fun () ->
+        prepare_fs_lwt_unix_operation ~batch_size:1 open_wide);
     make ~logical_operations:100 ~name:"fs-lwt-unix/batch-100/tagged-text"
       ~suite:Fs_lwt_unix ~boundary:"amortized-write" ~payload:"tagged-text"
       (fun () -> fs_lwt_unix_operation ~batch_size:100 text);

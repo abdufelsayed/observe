@@ -268,6 +268,26 @@ let managed_execution () =
              ignore
                (Observer.manage observer cancelled ~error:Observe.Error.exn
                   (fun () -> raise Test_io.Direct.Control)));
+         let interpreter_failure =
+           Observe.Logs.create ~name:"interpreter-failure" ()
+         in
+         let original = Failure "application-failure" in
+         let raising_interpreter =
+           Observe.Error.create (fun _ -> raise Test_io.Direct.Control)
+         in
+         let propagated =
+           try
+             ignore
+               (Observer.manage observer interpreter_failure
+                  ~error:raising_interpreter (fun () -> raise original));
+             None
+           with raised -> Some raised
+         in
+         Alcotest.(check bool)
+           "interpreter control failure preserves application exception" true
+           (match propagated with
+           | Some raised -> raised == original
+           | None -> false);
          captured := Some capture));
   match Observe.Capture.logs (Option.get !captured) with
   | [ point; success; failure; cancelled ] ->
@@ -288,7 +308,12 @@ let managed_execution () =
         (Observe.Level.equal Observe.Level.Info (Observe.Log.level cancelled));
       Alcotest.(check string)
         "cancellation adds no fields" "{}"
-        (structured_json cancelled)
+        (structured_json cancelled);
+      Alcotest.(check int)
+        "interpreter failure withholds the managed observation" 1
+        (Test_io.diagnostic_count
+           (Observe.Capture.diagnostics (Option.get !captured))
+           Observe.Diagnostics.Message_evaluation_raised)
   | _ -> Alcotest.fail "expected managed point and three completed wide logs"
 
 let terminal_completion () =

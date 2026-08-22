@@ -47,7 +47,6 @@ module Object_accumulator : sig
   val empty : state
   val merge : state -> fragment -> (state, error) result
   val as_fragment : state -> fragment
-  val seal : state -> fragment
 end
 
 val validate_extension :

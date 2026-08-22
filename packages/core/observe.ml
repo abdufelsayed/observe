@@ -80,9 +80,18 @@ module Make (IO : Io.S) = struct
               Logs.emit wide;
               IO.return value
           | Io.Raised (raised, backtrace) ->
-              if not (is_control_exception t raised) then
-                Logs.contribute_error wide error ~backtrace raised;
-              Logs.emit wide;
+              let () =
+                if is_control_exception t raised then Logs.emit wide
+                else
+                  let contributed =
+                    match
+                      Logs.contribute_error wide error ~backtrace raised
+                    with
+                    | contributed -> contributed
+                    | exception _ -> false
+                  in
+                  if contributed then Logs.emit wide
+              in
               IO.repropagate raised backtrace))
 
   let fork t ~parent ~name ~error callback =

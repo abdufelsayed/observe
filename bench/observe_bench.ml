@@ -62,6 +62,64 @@ let selected_scenarios () =
 
 let process_succeeded = function Unix.WEXITED 0 -> true | _ -> false
 
+let require_finite_nonnegative scenario field value =
+  if (not (Float.is_finite value)) || value < 0. then
+    fail
+      (Format.asprintf "scenario %s returned invalid %s: %g"
+         (Scenario.name scenario) field value)
+
+let validate_optional_measure scenario field = function
+  | None -> ()
+  | Some value -> require_finite_nonnegative scenario field value
+
+let validate_measurement scenario (measurement : Measurement.t) =
+  let expected_name = Scenario.name scenario in
+  let expected_suite = Scenario.suite_name (Scenario.suite scenario) in
+  if not (String.equal measurement.name expected_name) then
+    fail
+      (Format.asprintf "scenario %s returned measurement for %s" expected_name
+         measurement.name);
+  if not (String.equal measurement.suite expected_suite) then
+    fail
+      (Format.asprintf "scenario %s returned suite %s; expected %s"
+         expected_name measurement.suite expected_suite);
+  if not (String.equal measurement.boundary (Scenario.boundary scenario)) then
+    fail
+      (Format.asprintf "scenario %s returned the wrong boundary" expected_name);
+  if not (String.equal measurement.payload (Scenario.payload scenario)) then
+    fail
+      (Format.asprintf "scenario %s returned the wrong payload" expected_name);
+  require_finite_nonnegative scenario "nanoseconds_per_operation"
+    measurement.nanoseconds_per_operation;
+  if measurement.nanoseconds_per_operation = 0. then
+    fail (Format.asprintf "scenario %s returned zero latency" expected_name);
+  require_finite_nonnegative scenario "operations_per_second"
+    measurement.operations_per_second;
+  require_finite_nonnegative scenario "minor_bytes_per_operation"
+    measurement.minor_bytes_per_operation;
+  require_finite_nonnegative scenario "major_bytes_per_operation"
+    measurement.major_bytes_per_operation;
+  require_finite_nonnegative scenario "promoted_bytes_per_operation"
+    measurement.promoted_bytes_per_operation;
+  require_finite_nonnegative scenario "minor_collections_per_operation"
+    measurement.minor_collections_per_operation;
+  require_finite_nonnegative scenario "major_collections_per_operation"
+    measurement.major_collections_per_operation;
+  validate_optional_measure scenario "retained_bytes" measurement.retained_bytes;
+  validate_optional_measure scenario "encoded_bytes" measurement.encoded_bytes;
+  Option.iter
+    (fun value ->
+      if not (Float.is_finite value) then
+        fail
+          (Format.asprintf "scenario %s returned invalid r_squared: %g"
+             expected_name value))
+    measurement.r_squared;
+  if measurement.samples <= 0 then
+    fail (Format.asprintf "scenario %s returned no samples" expected_name);
+  if Int64.compare measurement.measured_nanoseconds 0L <= 0 then
+    fail (Format.asprintf "scenario %s returned no measured time" expected_name);
+  measurement
+
 let run_worker configuration scenario =
   let arguments =
     [|
@@ -83,7 +141,8 @@ let run_worker configuration scenario =
   in
   let status = Unix.close_process_in channel in
   match (status, decoded) with
-  | status, Some result when process_succeeded status -> result
+  | status, Some result when process_succeeded status ->
+      validate_measurement scenario result
   | Unix.WEXITED 0, None ->
       fail ("scenario " ^ Scenario.name scenario ^ " returned no measurement")
   | Unix.WEXITED code, _ ->

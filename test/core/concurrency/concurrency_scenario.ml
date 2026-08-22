@@ -294,6 +294,88 @@ let wide_set_level_emit_race work =
           (Observe.Level.equal Observe.Level.Error (Observe.Log.level log))
   | _ -> Alcotest.fail "full wide race did not publish exactly once"
 
+let wide_authoring_linearization () =
+  let observer = Observer.create (Test_io.Host.create ()) in
+  let result =
+    Observer.with_capture observer (config ()) (fun capture ->
+        let wide = Observe.Logs.create ~name:"authoring-linearization" () in
+        let mutex = Mutex.create () in
+        let condition = Condition.create () in
+        let entered = ref false in
+        let release = ref false in
+        let setter =
+          Thread.create
+            (fun () ->
+              Observe.Logs.set wide (fun m ->
+                  Mutex.lock mutex;
+                  entered := true;
+                  Condition.broadcast condition;
+                  while not !release do
+                    Condition.wait condition mutex
+                  done;
+                  Mutex.unlock mutex;
+                  let open Observe.Logs in
+                  m.untyped
+                  |+ m.field "reserved" Observe.Type.bool true
+                  |> m.seal))
+            ()
+        in
+        Mutex.lock mutex;
+        while not !entered do
+          Condition.wait condition mutex
+        done;
+        Mutex.unlock mutex;
+        let emitter = Thread.create (fun () -> Observe.Logs.emit wide) () in
+        let rec observe_rejection () =
+          let before =
+            Test_io.diagnostic_count
+              (Observe.Capture.diagnostics capture)
+              Observe.Diagnostics.Post_seal_set
+          in
+          let callbacks = ref 0 in
+          Observe.Logs.set wide (fun m ->
+              incr callbacks;
+              let open Observe.Logs in
+              m.untyped |+ m.field "late" Observe.Type.bool true |> m.seal);
+          let after =
+            Test_io.diagnostic_count
+              (Observe.Capture.diagnostics capture)
+              Observe.Diagnostics.Post_seal_set
+          in
+          if after > before then
+            Alcotest.(check int)
+              "post-seal author callback is not evaluated" 0 !callbacks
+          else (
+            Thread.yield ();
+            observe_rejection ())
+        in
+        observe_rejection ();
+        Mutex.lock mutex;
+        release := true;
+        Condition.broadcast condition;
+        Mutex.unlock mutex;
+        Thread.join setter;
+        Thread.join emitter;
+        Test_io.Direct.return capture)
+  in
+  let capture =
+    match result with
+    | Ok capture -> capture
+    | Error _ -> Alcotest.fail "authoring linearization capture was rejected"
+  in
+  match Observe.Capture.logs capture with
+  | [ log ] ->
+      let json =
+        match Observe.Log.body log with
+        | Observe.Log.Text _ -> Alcotest.fail "wide body was text"
+        | Observe.Log.Structured { value; _ } ->
+            Observe.Value.frozen_to_json_string value
+      in
+      Alcotest.(check bool)
+        "a pre-seal reserved callback contributes before completion" true
+        (contains json "\"reserved\":true")
+  | _ -> Alcotest.fail "authoring linearization did not publish exactly once"
+
 let terminal_race work =
   let work = max 3 work in
   let observer = Observer.create (Test_io.Host.create ()) in
@@ -366,5 +448,6 @@ let () =
   | "diagnostic-counting" -> diagnostic_counting work
   | "wide-contribution-and-seal" -> wide_contribution_and_seal work
   | "wide-set-level-emit-race" -> wide_set_level_emit_race work
+  | "wide-authoring-linearization" -> wide_authoring_linearization ()
   | "terminal-race" -> terminal_race work
   | _ -> Alcotest.failf "unknown concurrency scenario: %s" mode

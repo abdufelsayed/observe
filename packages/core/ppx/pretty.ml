@@ -20,26 +20,14 @@ let create_context ?(recursive = []) () =
 let bindings context = List.rev context.bindings_rev
 
 let replace_recursive context expression =
-  let mapper =
-    object
-      inherit Ast_traverse.map as super
-
-      method! expression expression =
-        match expression.pexp_desc with
-        | Pexp_apply
-            ({ pexp_desc = Pexp_ident { txt = Lident name; _ }; _ }, _arguments)
-          -> (
-            match List.assoc_opt name context.recursive with
-            | Some replacement -> replacement
-            | None -> super#expression expression)
-        | Pexp_ident { txt = Lident name; _ } -> (
-            match List.assoc_opt name context.recursive with
-            | Some replacement -> replacement
-            | None -> super#expression expression)
-        | _ -> super#expression expression
-    end
-  in
-  mapper#expression expression
+  rewrite_expression
+    (fun expression ->
+      match expression.pexp_desc with
+      | Pexp_apply ({ pexp_desc = Pexp_ident { txt = Lident name; _ }; _ }, _)
+      | Pexp_ident { txt = Lident name; _ } ->
+          List.assoc_opt name context.recursive
+      | _ -> None)
+    expression
 
 let descriptor context (module Engine : Ppx_repr_lib.Engine.S) ~library
     description =

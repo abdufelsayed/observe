@@ -57,6 +57,6 @@ val create_wide :
   wide
 
 val wide_id : wide -> string option
-val contribute_wide : wide -> (unit -> contribution) -> unit
+val contribute_wide : wide -> (unit -> contribution) -> bool
 val set_wide_level : wide -> Level.t -> unit
 val emit_wide : wide -> unit

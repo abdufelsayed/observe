@@ -890,7 +890,6 @@ module Object_accumulator = struct
   let empty = empty_object
   let merge = merge_object
   let as_fragment accumulator = accumulator
-  let seal accumulator = compact accumulator
 end
 
 let append_integer buffer = function

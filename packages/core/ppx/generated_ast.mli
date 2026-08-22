@@ -29,3 +29,10 @@ val inline_record_pattern :
   label_declaration list ->
   ('a * 'b * pattern) list ->
   pattern
+
+val rewrite_expression :
+  (expression -> expression option) -> expression -> expression
+
+val iter_expression : (expression -> unit) -> expression -> unit
+val iter_core_type : (core_type -> unit) -> core_type -> unit
+val iter_type_declaration : (core_type -> unit) -> type_declaration -> unit

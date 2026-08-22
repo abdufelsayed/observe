@@ -198,7 +198,13 @@ let emit_point t ?correlation_id level author =
             | Error _ -> record_diagnostic t Diagnostics.Canonical_freeze_failed
             ))
 
-type wide_state = Inert | Available | Busy | Sealed
+type wide_state = Inert | Available | Authoring | Sealed
+
+(* [closing] is the enrollment gate; [state] serializes the one mutable wide
+   snapshot. An author claims [Available] before evaluating caller code and
+   rechecks the gate. Emission closes the gate first, then waits for an already
+   admitted author to publish [Available] before sealing. Therefore a callback
+   either contributes completely before completion or is never evaluated. *)
 
 type contribution =
   | Contribution of Snapshot.fragment * bool
@@ -215,6 +221,7 @@ type wide = {
   mutable explicit_level : Level.t option;
   mutable has_error : bool;
   state : wide_state Atomic.t;
+  closing : bool Atomic.t;
 }
 
 let inert_wide () =
@@ -229,6 +236,7 @@ let inert_wide () =
     explicit_level = None;
     has_error = false;
     state = Atomic.make Inert;
+    closing = Atomic.make false;
   }
 
 let contained_call t callback =
@@ -295,104 +303,113 @@ let create_wide t ?parent ~name ~origin () =
                       explicit_level = None;
                       has_error = false;
                       state = Atomic.make Available;
+                      closing = Atomic.make false;
                     })))
 
 let merge_body = Snapshot.Object_accumulator.merge
 let clear_wide_body wide = wide.body <- Snapshot.Object_accumulator.empty
 
-let abort_contribution wide engine diagnostic =
-  let rec abort () =
-    match Atomic.get wide.state with
-    | Inert -> ()
-    | Sealed -> record_diagnostic engine Diagnostics.Post_seal_set
-    | Busy -> abort ()
-    | Available ->
-        if Atomic.compare_and_set wide.state Available Sealed then (
-          clear_wide_body wide;
-          record_diagnostic engine diagnostic)
-        else abort ()
+let reject_authoring engine diagnostic =
+  record_diagnostic engine diagnostic;
+  false
+
+let acquire_authoring wide engine diagnostic =
+  let rec acquire () =
+    if Atomic.get wide.closing then reject_authoring engine diagnostic
+    else
+      match Atomic.get wide.state with
+      | Inert -> false
+      | Sealed -> reject_authoring engine diagnostic
+      | Authoring -> acquire ()
+      | Available ->
+          if Atomic.compare_and_set wide.state Available Authoring then
+            if Atomic.get wide.closing then (
+              Atomic.set wide.state Available;
+              reject_authoring engine diagnostic)
+            else true
+          else acquire ()
   in
-  abort ()
+  acquire ()
+
+let finish_authoring wide = Atomic.set wide.state Available
+
+let fail_authoring wide engine diagnostic =
+  Atomic.set wide.closing true;
+  clear_wide_body wide;
+  Atomic.set wide.state Sealed;
+  record_diagnostic engine diagnostic
 
 let contribute_wide wide materialize =
-  match (wide.engine, Atomic.get wide.state) with
-  | None, _ | Some _, Inert -> ()
-  | Some engine, Sealed -> record_diagnostic engine Diagnostics.Post_seal_set
-  | Some engine, (Available | Busy) -> (
-      match contained_call engine materialize with
+  match wide.engine with
+  | None -> false
+  | Some engine
+    when not (acquire_authoring wide engine Diagnostics.Post_seal_set) ->
+      false
+  | Some engine -> (
+      let materialized =
+        match contained_call engine materialize with
+        | result -> result
+        | exception raised ->
+            let backtrace = Printexc.get_raw_backtrace () in
+            fail_authoring wide engine Diagnostics.Message_evaluation_raised;
+            Printexc.raise_with_backtrace raised backtrace
+      in
+      match materialized with
       | Raised ->
-          abort_contribution wide engine Diagnostics.Message_evaluation_raised
+          fail_authoring wide engine Diagnostics.Message_evaluation_raised;
+          false
       | Returned (Invalid_contribution _) ->
-          abort_contribution wide engine Diagnostics.Canonical_freeze_failed
-      | Returned (Contribution (contribution_body, contribution_has_error)) ->
-          let rec apply () =
-            match Atomic.get wide.state with
-            | Inert -> ()
-            | Sealed -> record_diagnostic engine Diagnostics.Post_seal_set
-            | Busy -> apply ()
-            | Available -> (
-                if not (Atomic.compare_and_set wide.state Available Busy) then
-                  apply ()
-                else
-                  let merged =
-                    match
-                      contained_call engine (fun () ->
-                          merge_body wide.body contribution_body)
-                    with
-                    | result -> result
-                    | exception raised ->
-                        Atomic.set wide.state Available;
-                        raise raised
-                  in
-                  match merged with
-                  | Raised ->
-                      Atomic.set wide.state Sealed;
-                      clear_wide_body wide;
-                      record_diagnostic engine
-                        Diagnostics.Message_evaluation_raised
-                  | Returned (Error _) ->
-                      Atomic.set wide.state Sealed;
-                      clear_wide_body wide;
-                      record_diagnostic engine
-                        Diagnostics.Canonical_freeze_failed
-                  | Returned (Ok body) ->
-                      wide.body <- body;
-                      wide.has_error <- wide.has_error || contribution_has_error;
-                      Atomic.set wide.state Available)
+          fail_authoring wide engine Diagnostics.Canonical_freeze_failed;
+          false
+      | Returned (Contribution (contribution_body, contribution_has_error)) -> (
+          let merged =
+            match
+              contained_call engine (fun () ->
+                  merge_body wide.body contribution_body)
+            with
+            | result -> result
+            | exception raised ->
+                let backtrace = Printexc.get_raw_backtrace () in
+                fail_authoring wide engine Diagnostics.Message_evaluation_raised;
+                Printexc.raise_with_backtrace raised backtrace
           in
-          apply ())
+          match merged with
+          | Raised ->
+              fail_authoring wide engine Diagnostics.Message_evaluation_raised;
+              false
+          | Returned (Error _) ->
+              fail_authoring wide engine Diagnostics.Canonical_freeze_failed;
+              false
+          | Returned (Ok body) ->
+              wide.body <- body;
+              wide.has_error <- wide.has_error || contribution_has_error;
+              finish_authoring wide;
+              true))
 
-let rec set_wide_level wide level =
-  match Atomic.get wide.state with
-  | Inert -> ()
-  | Sealed ->
-      Option.iter
-        (fun engine -> record_diagnostic engine Diagnostics.Post_seal_set_level)
-        wide.engine
-  | Busy -> set_wide_level wide level
-  | Available ->
-      if not (Atomic.compare_and_set wide.state Available Busy) then
-        set_wide_level wide level
-      else wide.explicit_level <- Some level;
-      Atomic.set wide.state Available
+let set_wide_level wide level =
+  match wide.engine with
+  | None -> ()
+  | Some engine ->
+      if acquire_authoring wide engine Diagnostics.Post_seal_set_level then (
+        wide.explicit_level <- Some level;
+        finish_authoring wide)
 
 let emit_wide wide =
   match wide.engine with
   | None -> ()
   | Some engine ->
-      let rec seal () =
+      let rec finish_seal () =
         match Atomic.get wide.state with
-        | Inert -> false
-        | Sealed ->
-            record_diagnostic engine Diagnostics.Post_seal_emit;
-            false
-        | Busy -> seal ()
+        | Inert | Sealed -> false
+        | Authoring -> finish_seal ()
         | Available ->
             if Atomic.compare_and_set wide.state Available Sealed then true
-            else seal ()
+            else finish_seal ()
       in
-      if seal () then (
-        let sealed_body = Snapshot.Object_accumulator.seal wide.body in
+      if not (Atomic.compare_and_set wide.closing false true) then
+        record_diagnostic engine Diagnostics.Post_seal_emit
+      else if finish_seal () then (
+        let body = Snapshot.Object_accumulator.as_fragment wide.body in
         clear_wide_body wide;
         let level =
           match wide.explicit_level with
@@ -425,7 +442,7 @@ let emit_wide wide =
                         contained_call engine (fun () ->
                             create_log engine level timestamp ~operation
                               (Log.Producer.Structured
-                                 { origin = wide.origin; value = sealed_body }))
+                                 { origin = wide.origin; value = body }))
                       with
                       | Raised | Returned (Error _) ->
                           record_diagnostic engine

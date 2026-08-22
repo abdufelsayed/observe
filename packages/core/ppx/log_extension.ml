@@ -50,23 +50,19 @@ let qualify_description expression =
       "hashtbl";
     ]
   in
-  let mapper =
-    object
-      inherit Ast_traverse.map as super
-
-      method! expression expression =
-        match expression.pexp_desc with
-        | Pexp_ident { txt = Lident name; loc } when List.mem name builtins ->
+  rewrite_expression
+    (fun expression ->
+      match expression.pexp_desc with
+      | Pexp_ident { txt = Lident name; loc } when List.mem name builtins ->
+          Some
             {
               expression with
               pexp_desc =
                 Pexp_ident
                   { txt = Ldot (Ldot (Lident "Observe", "Type"), name); loc };
             }
-        | _ -> super#expression expression
-    end
-  in
-  mapper#expression expression
+      | _ -> None)
+    expression
 
 let described_value expression =
   let loc = expression.pexp_loc in

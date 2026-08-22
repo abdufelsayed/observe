@@ -92,8 +92,9 @@ let create_typed ?parent ~name schema =
   }
 
 let set handle author =
-  Engine.contribute_wide handle.wide (fun () ->
-      handle.materialize (author handle.builder))
+  ignore
+    (Engine.contribute_wide handle.wide (fun () ->
+         handle.materialize (author handle.builder)))
 
 let contribute_error handle interpretation ?backtrace error =
   Engine.contribute_wide handle.wide (fun () ->
@@ -128,7 +129,7 @@ module Terminal = struct
   let fail terminal ?set:final ?backtrace raised =
     claim terminal (fun () ->
         contribute_final terminal final;
-        contribute_error terminal.log terminal.error ?backtrace raised;
+        ignore (contribute_error terminal.log terminal.error ?backtrace raised);
         emit terminal.log)
 
   let cancel terminal ?set () = complete terminal ?set ()

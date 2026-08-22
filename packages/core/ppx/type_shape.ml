@@ -1,5 +1,6 @@
 open Ppxlib
 open Ast_builder.Default
+open Generated_ast
 
 type builtin =
   | Unit
@@ -68,44 +69,38 @@ let error ~loc format =
   Location.raise_errorf ~loc ("[@@deriving observe]: " ^^ format)
 
 let validate_core_type description =
-  let visitor =
-    object
-      inherit Ast_traverse.iter as super
-
-      method! core_type description =
-        (match description.ptyp_desc with
-        | Ptyp_variant (rows, Open, _) ->
-            error ~loc:description.ptyp_loc
-              "open polymorphic variants are not supported"
-        | Ptyp_variant (rows, Closed, _) ->
-            List.iter
-              (fun row ->
-                match row.prf_desc with
-                | Rinherit _ ->
-                    error ~loc:row.prf_loc
-                      "inherited polymorphic-variant rows are not supported"
-                | Rtag _ -> ())
-              rows
-        | Ptyp_arrow _ ->
-            error ~loc:description.ptyp_loc "function types are not supported"
-        | Ptyp_object _ ->
-            error ~loc:description.ptyp_loc "object types are not supported"
-        | Ptyp_class _ ->
-            error ~loc:description.ptyp_loc "class types are not supported"
-        | Ptyp_package _ ->
-            error ~loc:description.ptyp_loc "package types are not supported"
-        | Ptyp_extension _ ->
-            error ~loc:description.ptyp_loc "type extensions are not supported"
-        | Ptyp_open _ ->
-            error ~loc:description.ptyp_loc
-              "locally opened types are not supported"
-        | Ptyp_any | Ptyp_var _ | Ptyp_constr _ | Ptyp_tuple _ | Ptyp_alias _
-        | Ptyp_poly _ ->
-            ());
-        super#core_type description
-    end
-  in
-  visitor#core_type description
+  iter_core_type
+    (fun description ->
+      match description.ptyp_desc with
+      | Ptyp_variant (_, Open, _) ->
+          error ~loc:description.ptyp_loc
+            "open polymorphic variants are not supported"
+      | Ptyp_variant (rows, Closed, _) ->
+          List.iter
+            (fun row ->
+              match row.prf_desc with
+              | Rinherit _ ->
+                  error ~loc:row.prf_loc
+                    "inherited polymorphic-variant rows are not supported"
+              | Rtag _ -> ())
+            rows
+      | Ptyp_arrow _ ->
+          error ~loc:description.ptyp_loc "function types are not supported"
+      | Ptyp_object _ ->
+          error ~loc:description.ptyp_loc "object types are not supported"
+      | Ptyp_class _ ->
+          error ~loc:description.ptyp_loc "class types are not supported"
+      | Ptyp_package _ ->
+          error ~loc:description.ptyp_loc "package types are not supported"
+      | Ptyp_extension _ ->
+          error ~loc:description.ptyp_loc "type extensions are not supported"
+      | Ptyp_open _ ->
+          error ~loc:description.ptyp_loc
+            "locally opened types are not supported"
+      | Ptyp_any | Ptyp_var _ | Ptyp_constr _ | Ptyp_tuple _ | Ptyp_alias _
+      | Ptyp_poly _ ->
+          ())
+    description
 
 let validate_constructor constructor =
   if constructor.pcd_vars <> [] then
@@ -148,20 +143,17 @@ let validate_group (rec_flag, declarations) =
   List.iter validate_declaration declarations
 
 let free_parameters description =
-  let visitor =
-    object
-      inherit [string list * string list] Ast_traverse.fold as super
-
-      method! core_type_desc node (seen, parameters) =
-        match node with
-        | Ptyp_var name when not (List.mem name seen) ->
-            (name :: seen, name :: parameters)
-        | Ptyp_var _ -> (seen, parameters)
-        | _ -> super#core_type_desc node (seen, parameters)
-    end
-  in
-  let _, parameters = visitor#core_type description ([], []) in
-  List.rev parameters
+  let seen = ref [] in
+  let parameters_rev = ref [] in
+  iter_core_type
+    (fun description ->
+      match description.ptyp_desc with
+      | Ptyp_var name when not (List.mem name !seen) ->
+          seen := name :: !seen;
+          parameters_rev := name :: !parameters_rev
+      | _ -> ())
+    description;
+  List.rev !parameters_rev
 
 let expand_descriptor (module Engine : Ppx_repr_lib.Engine.S) ~library
     description =

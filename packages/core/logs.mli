@@ -110,5 +110,6 @@ val contribute_error :
   'error Error.t ->
   ?backtrace:Printexc.raw_backtrace ->
   'error ->
-  unit
-(** Internal schema-independent error contribution used by managed runtimes. *)
+  bool
+(** Internal schema-independent error contribution used by managed runtimes.
+    Returns whether the error contribution was accepted. *)

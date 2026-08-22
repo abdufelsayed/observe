@@ -50,21 +50,16 @@ let has_inline_record declaration =
 
 let is_self_recursive declaration =
   let type_name = declaration.ptype_name.txt in
-  let visitor =
-    object
-      inherit [bool] Ast_traverse.fold as super
-
-      method! core_type_desc description found =
-        found
-        ||
-        match description with
-        | Ptyp_constr ({ txt = Lident name; _ }, _)
-          when String.equal name type_name ->
-            true
-        | _ -> super#core_type_desc description false
-    end
-  in
-  visitor#type_declaration declaration false
+  let found = ref false in
+  iter_type_declaration
+    (fun description ->
+      match description.ptyp_desc with
+      | Ptyp_constr ({ txt = Lident name; _ }, _)
+        when String.equal name type_name ->
+          found := true
+      | _ -> ())
+    declaration;
+  !found
 
 let inline_error ~loc format =
   Location.raise_errorf ~loc ("[@@deriving observe]: " ^^ format)
@@ -315,24 +310,19 @@ let descriptor_parameters declaration =
 let recursive_freeze_descriptor declaration self expression =
   let recursive_name = repr_name_of_type_name declaration.ptype_name.txt in
   let parameters = descriptor_parameters declaration in
-  let mapper =
-    object
-      inherit Ast_traverse.map as super
-
-      method! expression expression =
-        match expression.pexp_desc with
-        | Pexp_apply
-            ({ pexp_desc = Pexp_ident { txt = Lident name; _ }; _ }, arguments)
-          when String.equal name recursive_name
-               && List.length arguments = List.length parameters ->
-            self
-        | Pexp_ident { txt = Lident name; _ }
-          when parameters = [] && String.equal name recursive_name ->
-            self
-        | _ -> super#expression expression
-    end
-  in
-  mapper#expression expression
+  rewrite_expression
+    (fun expression ->
+      match expression.pexp_desc with
+      | Pexp_apply
+          ({ pexp_desc = Pexp_ident { txt = Lident name; _ }; _ }, arguments)
+        when String.equal name recursive_name
+             && List.length arguments = List.length parameters ->
+          Some self
+      | Pexp_ident { txt = Lident name; _ }
+        when parameters = [] && String.equal name recursive_name ->
+          Some self
+      | _ -> None)
+    expression
 
 let variant_freezer (module Engine : Ppx_repr_lib.Engine.S) ~library ~recursive
     declaration =
@@ -877,10 +867,19 @@ let rec longident_last = function
 let is_builtin_path path =
   List.mem (String.lowercase_ascii (longident_last path)) builtin_type_names
 
-let patch_input_type type_ =
+let local_type atomic_type_names = function
+  | Lident name -> List.mem name atomic_type_names
+  | Ldot _ | Lapply _ -> false
+
+let atomic_patch_type ~atomic_type_names type_ path =
+  Type_shape.has_custom_repr type_ || local_type atomic_type_names path
+
+let patch_input_type ~atomic_type_names type_ =
   match type_.ptyp_desc with
-  | Ptyp_constr ({ txt = path; _ }, arguments) when not (is_builtin_path path)
-    ->
+  | Ptyp_constr ({ txt = path; _ }, arguments)
+    when not
+           (is_builtin_path path
+           || atomic_patch_type ~atomic_type_names type_ path) ->
       {
         type_ with
         ptyp_desc =
@@ -891,10 +890,12 @@ let patch_input_type type_ =
       }
   | _ -> type_
 
-let patch_author_input_type type_ =
+let patch_author_input_type ~atomic_type_names type_ =
   match type_.ptyp_desc with
-  | Ptyp_constr ({ txt = path; _ }, arguments) when not (is_builtin_path path)
-    ->
+  | Ptyp_constr ({ txt = path; _ }, arguments)
+    when not
+           (is_builtin_path path
+           || atomic_patch_type ~atomic_type_names type_ path) ->
       {
         type_ with
         ptyp_desc =
@@ -926,7 +927,7 @@ let arrow_chain ~loc arguments result =
     (fun (label, type_) result -> ptyp_arrow ~loc label type_ result)
     arguments result
 
-let patch_builder_declaration ~private_ declaration fields =
+let patch_builder_declaration ~private_ ~atomic_type_names declaration fields =
   let loc = declaration.ptype_loc in
   let patch = patch_core_type declaration in
   let arrow argument result = ptyp_arrow ~loc Nolabel argument result in
@@ -968,7 +969,10 @@ let patch_builder_declaration ~private_ declaration fields =
               (Located.mk ~loc:field.pld_loc
                  ("__observe_field_" ^ field.pld_name.txt))
             ~mutable_:Immutable
-            ~type_:(arrow (patch_author_input_type field.pld_type) patch))
+            ~type_:
+              (arrow
+                 (patch_author_input_type ~atomic_type_names field.pld_type)
+                 patch))
         fields
   in
   type_declaration ~loc
@@ -982,7 +986,7 @@ let descriptor_argument_types declaration =
       description_core_type ~loc:parameter.ptyp_loc parameter)
     declaration.ptype_params
 
-let patch_signature_items declaration =
+let patch_signature_items ~atomic_type_names declaration =
   let loc = declaration.ptype_loc in
   let parameter_arguments =
     List.map
@@ -1041,7 +1045,10 @@ let patch_signature_items declaration =
           [
             psig_type ~loc Nonrecursive [ patch_declaration declaration ];
             psig_type ~loc Nonrecursive
-              [ patch_builder_declaration ~private_:Private declaration fields ];
+              [
+                patch_builder_declaration ~private_:Private ~atomic_type_names
+                  declaration fields;
+              ];
             psig_type ~loc Nonrecursive [ patch_author_declaration declaration ];
           ]
       in
@@ -1056,7 +1063,8 @@ let patch_signature_items declaration =
       let patch_arguments =
         List.map
           (fun field ->
-            (Optional field.pld_name.txt, patch_input_type field.pld_type))
+            ( Optional field.pld_name.txt,
+              patch_input_type ~atomic_type_names field.pld_type ))
           fields
       in
       let patch_description =
@@ -1076,16 +1084,45 @@ let patch_signature_items declaration =
         ]
   | Ptype_abstract | Ptype_variant _ | Ptype_open -> atomic_common
 
-let fragment_expression (module Engine : Ppx_repr_lib.Engine.S) ~library type_
-    value =
+let remap_local_descriptions local_descriptions expression =
+  let names =
+    List.map
+      (fun (type_name, description_name) ->
+        (repr_name_of_type_name type_name, description_name))
+      local_descriptions
+  in
+  rewrite_expression
+    (fun expression ->
+      match expression.pexp_desc with
+      | Pexp_ident ({ txt = Lident name; _ } as identifier) ->
+          Option.map
+            (fun replacement ->
+              {
+                expression with
+                pexp_desc =
+                  Pexp_ident { identifier with txt = Lident replacement };
+              })
+            (List.assoc_opt name names)
+      | _ -> None)
+    expression
+
+let expanded_descriptor (module Engine : Ppx_repr_lib.Engine.S) ~library
+    ~local_descriptions type_ =
+  Type_shape.expand_descriptor (module Engine) ~library type_
+  |> remap_local_descriptions local_descriptions
+
+let fragment_expression (module Engine : Ppx_repr_lib.Engine.S) ~library
+    ~atomic_type_names ~local_descriptions type_ value =
   let loc = type_.ptyp_loc in
   match type_.ptyp_desc with
-  | Ptyp_constr ({ txt = path; _ }, arguments) when not (is_builtin_path path)
-    ->
+  | Ptyp_constr ({ txt = path; _ }, arguments)
+    when not
+           (is_builtin_path path
+           || atomic_patch_type ~atomic_type_names type_ path) ->
       let function_path = map_longident_last fragment_value_name path in
       let descriptions =
         List.map
-          (Type_shape.expand_descriptor (module Engine) ~library)
+          (expanded_descriptor (module Engine) ~library ~local_descriptions)
           arguments
       in
       pexp_apply ~loc
@@ -1095,20 +1132,22 @@ let fragment_expression (module Engine : Ppx_repr_lib.Engine.S) ~library type_
            (descriptions @ [ value ]))
   | _ ->
       let description =
-        Type_shape.expand_descriptor (module Engine) ~library type_
+        expanded_descriptor (module Engine) ~library ~local_descriptions type_
       in
       for_ppx_call ~loc "fragment" [ description; value ]
 
 let author_fragment_expression (module Engine : Ppx_repr_lib.Engine.S) ~library
-    type_ value =
+    ~atomic_type_names ~local_descriptions type_ value =
   let loc = type_.ptyp_loc in
   match type_.ptyp_desc with
-  | Ptyp_constr ({ txt = path; _ }, arguments) when not (is_builtin_path path)
-    ->
+  | Ptyp_constr ({ txt = path; _ }, arguments)
+    when not
+           (is_builtin_path path
+           || atomic_patch_type ~atomic_type_names type_ path) ->
       let function_path = map_longident_last author_fragment_value_name path in
       let descriptions =
         List.map
-          (Type_shape.expand_descriptor (module Engine) ~library)
+          (expanded_descriptor (module Engine) ~library ~local_descriptions)
           arguments
       in
       pexp_apply ~loc
@@ -1116,19 +1155,18 @@ let author_fragment_expression (module Engine : Ppx_repr_lib.Engine.S) ~library
         (List.map
            (fun argument -> (Nolabel, argument))
            (descriptions @ [ value ]))
-  | _ -> fragment_expression (module Engine) ~library type_ value
+  | _ ->
+      fragment_expression
+        (module Engine)
+        ~library ~atomic_type_names ~local_descriptions type_ value
 
 let patch_structure_items (module Engine : Ppx_repr_lib.Engine.S) ~library ~path
-    declaration =
+    ~atomic_type_names ~local_descriptions ~description_name declaration =
   let loc = declaration.ptype_loc in
   let parameters = descriptor_parameters declaration in
   let parameter_patterns = List.map (pvar ~loc) parameters in
   let parameter_values = List.map (evar ~loc) parameters in
-  let description =
-    apply ~loc
-      (evar ~loc (repr_name_of_type_name declaration.ptype_name.txt))
-      parameter_values
-  in
+  let description = apply ~loc (evar ~loc description_name) parameter_values in
   let fragment_value = "__observe_patch_value" in
   let fragment_body =
     if is_record declaration then
@@ -1157,7 +1195,7 @@ let patch_structure_items (module Engine : Ppx_repr_lib.Engine.S) ~library ~path
         let fragment =
           author_fragment_expression
             (module Engine)
-            ~library field.pld_type
+            ~library ~atomic_type_names ~local_descriptions field.pld_type
             (evar ~loc:field_loc value_name)
         in
         let field_fragment =
@@ -1229,18 +1267,21 @@ let patch_structure_items (module Engine : Ppx_repr_lib.Engine.S) ~library ~path
         let fragment =
           fragment_expression
             (module Engine)
-            ~library field.pld_type
+            ~library ~atomic_type_names ~local_descriptions field.pld_type
             (evar ~loc:field_loc value_name)
         in
         for_ppx_call ~loc:field_loc "patch_field"
           [ estr ~loc:field_loc field.pld_name.txt; fragment ]
       in
+      let indexed_fields =
+        List.mapi (fun index field -> (index, field)) fields
+      in
       let fields_expression =
         List.fold_right
-          (fun field rest ->
+          (fun (index, field) rest ->
             let field_loc = field.pld_loc in
-            let option_name = "__observe_patch_" ^ field.pld_name.txt in
-            let value_name = option_name ^ "_value" in
+            let option_name = indexed "__observe_patch_option_" index in
+            let value_name = indexed "__observe_patch_value_" index in
             let present = present_field_expression field value_name in
             let cons =
               pexp_construct ~loc:field_loc
@@ -1263,7 +1304,7 @@ let patch_structure_items (module Engine : Ppx_repr_lib.Engine.S) ~library ~path
                        (Some (pvar ~loc:field_loc value_name)))
                   ~guard:None ~rhs:cons;
               ])
-          fields (elist ~loc [])
+          indexed_fields (elist ~loc [])
       in
       let patch_body =
         for_ppx_call ~loc "record_patch_fields"
@@ -1275,12 +1316,12 @@ let patch_structure_items (module Engine : Ppx_repr_lib.Engine.S) ~library ~path
       let patch_body = pexp_fun ~loc Nolabel None (punit ~loc) patch_body in
       let patch_body =
         List.fold_right
-          (fun field body ->
+          (fun (index, field) body ->
             let field_loc = field.pld_loc in
             pexp_fun ~loc:field_loc (Optional field.pld_name.txt) None
-              (pvar ~loc:field_loc ("__observe_patch_" ^ field.pld_name.txt))
+              (pvar ~loc:field_loc (indexed "__observe_patch_option_" index))
               body)
-          fields patch_body
+          indexed_fields patch_body
       in
       let patch_body = lambda ~loc parameter_patterns patch_body in
       let patch_binding =
@@ -1309,7 +1350,10 @@ let patch_structure_items (module Engine : Ppx_repr_lib.Engine.S) ~library ~path
       [
         pstr_type ~loc Nonrecursive [ patch_declaration declaration ];
         pstr_type ~loc Nonrecursive
-          [ patch_builder_declaration ~private_:Public declaration fields ];
+          [
+            patch_builder_declaration ~private_:Public ~atomic_type_names
+              declaration fields;
+          ];
         pstr_type ~loc Nonrecursive [ patch_author_declaration declaration ];
         pstr_value ~loc Nonrecursive [ fragment_binding ];
       ]
@@ -1353,27 +1397,21 @@ let normalize_recursive_parameter_application declaration expression =
         String.equal parameter name
     | _ -> false
   in
-  let mapper =
-    object
-      inherit Ast_traverse.map as super
-
-      method! expression expression =
-        match expression.pexp_desc with
-        | Pexp_apply
-            ( ({ pexp_desc = Pexp_ident { txt = Lident name; _ }; _ } as self),
-              arguments )
-          when String.equal name recursive_name
-               && List.length arguments = List.length parameters
-               && List.for_all2
-                    (fun parameter (label, argument) ->
-                      label = Nolabel
-                      && is_parameter_argument parameter argument)
-                    parameters arguments ->
-            self
-        | _ -> super#expression expression
-    end
-  in
-  mapper#expression expression
+  rewrite_expression
+    (fun expression ->
+      match expression.pexp_desc with
+      | Pexp_apply
+          ( ({ pexp_desc = Pexp_ident { txt = Lident name; _ }; _ } as self),
+            arguments )
+        when String.equal name recursive_name
+             && List.length arguments = List.length parameters
+             && List.for_all2
+                  (fun parameter (label, argument) ->
+                    label = Nolabel && is_parameter_argument parameter argument)
+                  parameters arguments ->
+          Some self
+      | _ -> None)
+    expression
 
 let add_generated (module Engine : Ppx_repr_lib.Engine.S) ~library ~recursive
     declaration items =
@@ -1538,6 +1576,23 @@ let register_repr_deriver () =
         Type_shape.validate_group input;
         let library = Option.fold lib ~none:library ~some:Engine.parse_lib in
         let declarations = snd input in
+        let atomic_type_names =
+          List.map (fun declaration -> declaration.ptype_name.txt) declarations
+        in
+        let local_descriptions =
+          match (name, declarations) with
+          | Some description_name, [ declaration ] ->
+              [ (declaration.ptype_name.txt, description_name) ]
+          | None, _ | Some _, [] ->
+              List.map
+                (fun declaration ->
+                  ( declaration.ptype_name.txt,
+                    repr_name_of_type_name declaration.ptype_name.txt ))
+                declarations
+          | Some _, declaration :: _ :: _ ->
+              inline_error ~loc:declaration.ptype_loc
+                "a custom description name requires one type declaration"
+        in
         let descriptions =
           if List.exists has_inline_record declarations then
             derive_inline_structure
@@ -1564,7 +1619,13 @@ let register_repr_deriver () =
         in
         descriptions
         @ List.concat_map
-            (patch_structure_items (module Engine) ~library ~path)
+            (fun declaration ->
+              patch_structure_items
+                (module Engine)
+                ~library ~path ~atomic_type_names ~local_descriptions
+                ~description_name:
+                  (List.assoc declaration.ptype_name.txt local_descriptions)
+                declaration)
             declarations )
   in
   let signature =
@@ -1573,8 +1634,14 @@ let register_repr_deriver () =
       ( with_repr_engine @@ fun (module Engine) ~path:_ plugins input name lib ->
         Type_shape.validate_group input;
         let library = Option.fold lib ~none:library ~some:Engine.parse_lib in
+        let declarations = snd input in
+        let atomic_type_names =
+          List.map (fun declaration -> declaration.ptype_name.txt) declarations
+        in
         Engine.derive_sig ~plugins ~name ~lib:library input
-        @ List.concat_map patch_signature_items (snd input) )
+        @ List.concat_map
+            (patch_signature_items ~atomic_type_names)
+            declarations )
   in
   Deriving.add ~str_type_decl:structure ~sig_type_decl:signature "observe"
   |> Deriving.ignore

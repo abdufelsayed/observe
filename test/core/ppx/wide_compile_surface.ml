@@ -9,6 +9,38 @@ type checkout_event = {
 }
 [@@deriving observe]
 
+module Custom_description_name = struct
+  type event = { value : int } [@@deriving observe { name = "custom" }]
+
+  let description : event Observe.Type.t = custom
+  let patch = event_patch ~value:1 ()
+end
+
+module External_description = struct
+  module External = struct
+    type t = int
+
+    let t = Observe.Type.int
+  end
+
+  type event = { value : (External.t[@observe.repr External.t]) }
+  [@@deriving observe]
+
+  let patch = event_patch ~value:1 ()
+end
+
+module Hygienic_patch_binders = struct
+  type event = { a : int; a_value : int } [@@deriving observe]
+
+  let patch = event_patch ~a:1 ~a_value:2 ()
+end
+
+module Recursive_record = struct
+  type node = { child : node } [@@deriving observe]
+
+  let schema = node_schema
+end
+
 let manual () =
   let checkout =
     Observe.Logs.create_typed ~name:"checkout" checkout_event_schema
@@ -43,6 +75,11 @@ let anonymous_point () =
       }]
 
 let () =
+  ignore Custom_description_name.description;
+  ignore Custom_description_name.patch;
+  ignore External_description.patch;
+  ignore Hygienic_patch_binders.patch;
+  ignore Recursive_record.schema;
   ignore manual;
   ignore open_wide;
   ignore anonymous_point

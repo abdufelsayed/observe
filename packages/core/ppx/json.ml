@@ -224,6 +224,14 @@ let needs_runtime_field_policy description =
       | Ptyp_extension _ | Ptyp_open _ ->
           false)
 
+let recursive_reference encoders description =
+  match description.ptyp_desc with
+  | Ptyp_constr ({ txt = Lident name; _ }, _) -> List.mem_assoc name encoders
+  | Ptyp_constr _ | Ptyp_any | Ptyp_var _ | Ptyp_arrow _ | Ptyp_tuple _
+  | Ptyp_object _ | Ptyp_class _ | Ptyp_alias _ | Ptyp_variant _ | Ptyp_poly _
+  | Ptyp_package _ | Ptyp_extension _ | Ptyp_open _ ->
+      false
+
 let json_field_write (module Engine : Ppx_repr_lib.Engine.S) ~library ~encoders
     ~loc ~first ~name description buffer value =
   let prefix = "\"" ^ name ^ "\":" in
@@ -238,7 +246,12 @@ let json_field_write (module Engine : Ppx_repr_lib.Engine.S) ~library ~encoders
   in
   match omittable_field description with
   | `Required ->
-      if needs_runtime_field_policy description then
+      if recursive_reference encoders description then
+        write
+          (json_of_core
+             (module Engine : Ppx_repr_lib.Engine.S)
+             ~library ~encoders description buffer value)
+      else if needs_runtime_field_policy description then
         let expanded =
           Type_shape.expand_descriptor (module Engine) ~library description
         in
