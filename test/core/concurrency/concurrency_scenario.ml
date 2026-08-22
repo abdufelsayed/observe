@@ -436,6 +436,64 @@ let wide_parallel_materialization () =
         (contains json "\"first\":true" && contains json "\"second\":true")
   | _ -> Alcotest.fail "parallel materialization did not publish exactly once"
 
+let wide_parallel_failure_linearization () =
+  let observer = Observer.create (Test_io.Host.create ()) in
+  let result =
+    Observer.with_capture observer (config ()) (fun capture ->
+        let wide = Observe.Logs.create ~name:"parallel-failure" () in
+        let first_entered = Atomic.make false in
+        let second_entered = Atomic.make false in
+        let release = Atomic.make false in
+        let rec wait_for entered attempts =
+          if Atomic.get entered then true
+          else if attempts = 0 then false
+          else (
+            Thread.yield ();
+            wait_for entered (attempts - 1))
+        in
+        let setter entered =
+          Thread.create
+            (fun () ->
+              Observe.Logs.set wide (fun m ->
+                  Atomic.set entered true;
+                  while not (Atomic.get release) do
+                    Domain.cpu_relax ()
+                  done;
+                  let open Observe.Logs in
+                  m.untyped
+                  |+ m.field "invalid" Observe.Type.float Float.nan
+                  |> m.seal))
+            ()
+        in
+        let first = setter first_entered in
+        if not (wait_for first_entered 1_000_000) then (
+          Atomic.set release true;
+          Thread.join first;
+          Alcotest.fail "first failing wide author did not start");
+        let second = setter second_entered in
+        let parallel = wait_for second_entered 1_000_000 in
+        Atomic.set release true;
+        Thread.join first;
+        Thread.join second;
+        Alcotest.(check bool)
+          "failing wide callbacks materialize concurrently" true parallel;
+        Observe.Logs.emit wide;
+        Test_io.Direct.return capture)
+  in
+  let capture =
+    match result with
+    | Ok capture -> capture
+    | Error _ -> Alcotest.fail "parallel failure capture was rejected"
+  in
+  Alcotest.(check int)
+    "one lifecycle failure is diagnosed" 1
+    (Test_io.diagnostic_count
+       (Observe.Capture.diagnostics capture)
+       Observe.Diagnostics.Canonical_freeze_failed);
+  Alcotest.(check int)
+    "failed lifecycle publishes nothing" 0
+    (List.length (Observe.Capture.logs capture))
+
 let terminal_race work =
   let work = max 3 work in
   let observer = Observer.create (Test_io.Host.create ()) in
@@ -510,5 +568,7 @@ let () =
   | "wide-set-level-emit-race" -> wide_set_level_emit_race work
   | "wide-authoring-linearization" -> wide_authoring_linearization ()
   | "wide-parallel-materialization" -> wide_parallel_materialization ()
+  | "wide-parallel-failure-linearization" ->
+      wide_parallel_failure_linearization ()
   | "terminal-race" -> terminal_race work
   | _ -> Alcotest.failf "unknown concurrency scenario: %s" mode

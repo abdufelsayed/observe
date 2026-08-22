@@ -345,24 +345,27 @@ let release_writer wide = Atomic.set wide.writer false
 
 let rec mark_failed wide =
   let state = Atomic.get wide.lifecycle in
-  let failed = state lor lifecycle_closing lor lifecycle_failed in
-  if failed <> state && not (Atomic.compare_and_set wide.lifecycle state failed)
-  then mark_failed wide
+  if lifecycle_is_failed state then false
+  else
+    let failed = state lor lifecycle_closing lor lifecycle_failed in
+    if Atomic.compare_and_set wide.lifecycle state failed then true
+    else mark_failed wide
 
 let fail_authoring wide engine diagnostic =
-  mark_failed wide;
-  acquire_writer wide;
-  clear_wide_body wide;
-  release_writer wide;
+  let first_failure = mark_failed wide in
+  if first_failure then (
+    acquire_writer wide;
+    clear_wide_body wide;
+    release_writer wide);
   release_authoring wide;
-  record_diagnostic engine diagnostic
+  if first_failure then record_diagnostic engine diagnostic
 
 let fail_authoring_with_writer wide engine diagnostic =
-  mark_failed wide;
-  clear_wide_body wide;
+  let first_failure = mark_failed wide in
+  if first_failure then clear_wide_body wide;
   release_writer wide;
   release_authoring wide;
-  record_diagnostic engine diagnostic
+  if first_failure then record_diagnostic engine diagnostic
 
 let authoring_failed wide = lifecycle_is_failed (Atomic.get wide.lifecycle)
 
