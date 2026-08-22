@@ -52,7 +52,7 @@ and fragment = {
   string_bytes : int;
   byte_bytes : int;
   retained_bytes : int;
-  height : int;
+  shape : int;
 }
 
 type t = value
@@ -108,14 +108,28 @@ let resources_of (snapshot : fragment) : resources =
     retained_bytes = snapshot.retained_bytes;
   }
 
-let snapshot value (resources : resources) height =
+(* Snapshot height is bounded to [max_depth], so its sign bit is otherwise
+   unused. A negative shape stores the complement of the height and marks a
+   fragment that still contains wide-merge machinery. Keeping both facts in
+   one word avoids making every transient field fragment larger. *)
+
+let shape ~height ~requires_compaction =
+  if requires_compaction then lnot height else height
+
+let fragment_height fragment =
+  if fragment.shape < 0 then lnot fragment.shape else fragment.shape
+
+let requires_compaction fragment = fragment.shape < 0
+
+let snapshot ?(requires_compaction = false) value (resources : resources) height
+    =
   {
     value;
     nodes = resources.nodes;
     string_bytes = resources.string_bytes;
     byte_bytes = resources.byte_bytes;
     retained_bytes = resources.retained_bytes;
-    height;
+    shape = shape ~height ~requires_compaction;
   }
 
 let node_resources ?(string_bytes = 0) ?(byte_bytes = 0) retained_bytes :
@@ -332,7 +346,7 @@ let seal (context : context) value =
     string_bytes = context.string_bytes;
     byte_bytes = context.byte_bytes;
     retained_bytes = context.retained_bytes;
-    height = context.height;
+    shape = context.height;
   }
 
 let rec measure_value value =
@@ -359,17 +373,20 @@ let rec measure_value value =
         node_resources
           (base_node_retained + (list_entry_retained * List.length values))
       in
-      let resources, height =
+      let resources, height, needs_compaction =
         List.fold_left
-          (fun (resources, height) value ->
+          (fun (resources, height, needs_compaction) value ->
             let child = measure_value value in
             ( add_resources resources (resources_of child),
-              max height (child.height + 1) ))
-          (own, 0) values
+              max height (fragment_height child + 1),
+              needs_compaction || requires_compaction child ))
+          (own, 0, false) values
       in
-      snapshot value resources height
-  | Object (Indexed indexed) -> snapshot value indexed.resources indexed.height
-  | Object (Packed packed) -> snapshot value packed.resources packed.height
+      snapshot ~requires_compaction:needs_compaction value resources height
+  | Object (Indexed indexed) ->
+      snapshot ~requires_compaction:true value indexed.resources indexed.height
+  | Object (Packed packed) ->
+      snapshot ~requires_compaction:true value packed.resources packed.height
   | Object (Single (name, child)) ->
       let length = String.length name in
       let child = measure_value child in
@@ -384,7 +401,10 @@ let rec measure_value value =
             retained_bytes = object_field_retained + length;
           }
       in
-      snapshot value resources (child.height + 1)
+      snapshot
+        ~requires_compaction:(requires_compaction child)
+        value resources
+        (fragment_height child + 1)
   | Object (Flat fields) ->
       let own =
         List.fold_left
@@ -399,15 +419,16 @@ let rec measure_value value =
           (node_resources base_node_retained)
           fields
       in
-      let resources, height =
+      let resources, height, needs_compaction =
         List.fold_left
-          (fun (resources, height) (_, value) ->
+          (fun (resources, height, needs_compaction) (_, value) ->
             let child = measure_value value in
             ( add_resources resources (resources_of child),
-              max height (child.height + 1) ))
-          (own, 0) fields
+              max height (fragment_height child + 1),
+              needs_compaction || requires_compaction child ))
+          (own, 0, false) fields
       in
-      snapshot value resources height
+      snapshot ~requires_compaction:needs_compaction value resources height
   | Variant { name; payload; _ } -> (
       let length = String.length name in
       let own =
@@ -417,12 +438,16 @@ let rec measure_value value =
       | None -> snapshot value own 0
       | Some payload ->
           let child = measure_value payload in
-          snapshot value
+          snapshot
+            ~requires_compaction:(requires_compaction child)
+            value
             (add_resources own (resources_of child))
-            (child.height + 1))
+            (fragment_height child + 1))
 
 let validate (snapshot : fragment) =
-  if snapshot.height > max_depth || not (resources_fit (resources_of snapshot))
+  if
+    fragment_height snapshot > max_depth
+    || not (resources_fit (resources_of snapshot))
   then Error Limit_exceeded
   else Ok snapshot
 
@@ -462,16 +487,20 @@ let singleton_object_from_owned name (child : fragment) =
           + length;
       }
     in
-    let height = child.height + 1 in
-    validate (snapshot (Object (Single (name, child.value))) resources height)
+    let height = fragment_height child + 1 in
+    validate
+      (snapshot
+         ~requires_compaction:(requires_compaction child)
+         (Object (Single (name, child.value)))
+         resources height)
 
 let object_from_owned fields =
   match fields with
   | [ (name, child) ] -> singleton_object_from_owned name child
   | _ when List.length fields > width_limit -> Error Limit_exceeded
   | _ ->
-      let rec build nodes string_bytes byte_bytes retained_bytes height copied =
-        function
+      let rec build nodes string_bytes byte_bytes retained_bytes height
+          child_requires_compaction copied = function
         | [] ->
             let resources =
               { nodes; string_bytes; byte_bytes; retained_bytes }
@@ -482,7 +511,14 @@ let object_from_owned fields =
               | [ (name, child) ] -> Single (name, child.value)
               | fields -> Packed { fields; resources; height }
             in
-            validate (snapshot (Object object_) resources height)
+            validate
+              (snapshot
+                 ~requires_compaction:
+                   (match object_ with
+                   | Single _ -> child_requires_compaction
+                   | Packed _ -> true
+                   | Flat _ | Indexed _ -> assert false)
+                 (Object object_) resources height)
         | (name, (child : fragment)) :: rest ->
             if not (Utf8.is_valid name) then Error Invalid_utf8
             else
@@ -497,21 +533,22 @@ let object_from_owned fields =
                 + object_field_retained
                 + length
               in
-              let height = max height (child.height + 1) in
+              let height = max height (fragment_height child + 1) in
               if
                 counts_fit ~nodes ~string_bytes ~byte_bytes ~retained_bytes
                 && height <= max_depth
               then
                 build nodes string_bytes byte_bytes retained_bytes height
+                  (child_requires_compaction || requires_compaction child)
                   ((name, child) :: copied) rest
               else Error Limit_exceeded
       in
-      build 1 0 0 base_node_retained 0 [] fields
+      build 1 0 0 base_node_retained 0 false [] fields
 
 let empty_object =
   let resources = node_resources base_node_retained in
   let packed = { fields = []; resources; height = 0 } in
-  snapshot (Object (Packed packed)) resources 0
+  snapshot ~requires_compaction:true (Object (Packed packed)) resources 0
 
 let rec fold_indexed indexed callback accumulator = function
   | [] -> accumulator
@@ -574,7 +611,7 @@ let index_object = function
         first = String_map.singleton name 0;
         next_slot = 1;
         resources;
-        height = child.height + 1;
+        height = fragment_height child + 1;
       }
   | Packed packed ->
       List.fold_left
@@ -620,7 +657,7 @@ let index_object = function
                   string_bytes = length;
                   retained_bytes = object_field_retained + length;
                 };
-            height = max indexed.height (child.height + 1);
+            height = max indexed.height (fragment_height child + 1);
           })
         {
           order_rev = [];
@@ -649,7 +686,11 @@ let pack_object = function
             retained_bytes = object_field_retained + length;
           }
       in
-      { fields = [ (name, child) ]; resources; height = child.height + 1 }
+      {
+        fields = [ (name, child) ];
+        resources;
+        height = fragment_height child + 1;
+      }
   | Flat fields ->
       let fields =
         List.map (fun (name, value) -> (name, measure_value value)) fields
@@ -665,7 +706,7 @@ let pack_object = function
                   string_bytes = length;
                   retained_bytes = object_field_retained + length;
                 },
-              max height (child.height + 1) ))
+              max height (fragment_height child + 1) ))
           (node_resources base_node_retained, 0)
           fields
       in
@@ -688,7 +729,7 @@ let rec update_packed packed name next =
                 retained_bytes = object_field_retained + length;
               }
           in
-          let height = max packed.height (next.height + 1) in
+          let height = max packed.height (fragment_height next + 1) in
           let after =
             {
               fields = List.rev_append prefix [ (name, next) ];
@@ -704,7 +745,7 @@ let rec update_packed packed name next =
                 replace_resources packed.resources
                   ~before:(resources_of previous) ~after:(resources_of merged)
               in
-              let height = max packed.height (merged.height + 1) in
+              let height = max packed.height (fragment_height merged + 1) in
               let after =
                 {
                   fields = List.rev_append prefix ((field_name, merged) :: rest);
@@ -738,12 +779,14 @@ and merge_objects previous patch =
          (Ok initial) patch)
       (fun packed ->
         if List.length packed.fields <= packed_index_threshold then
-          Ok (snapshot (Object (Packed packed)) packed.resources packed.height)
+          Ok
+            (snapshot ~requires_compaction:true (Object (Packed packed))
+               packed.resources packed.height)
         else
           let indexed = index_object (Packed packed) in
           Ok
-            (snapshot (Object (Indexed indexed)) indexed.resources
-               indexed.height))
+            (snapshot ~requires_compaction:true (Object (Indexed indexed))
+               indexed.resources indexed.height))
   else merge_indexed previous patch
 
 and merge_indexed previous patch =
@@ -764,7 +807,7 @@ and merge_indexed previous patch =
                 retained_bytes = object_field_retained + length;
               }
           in
-          let height = max indexed.height (next.height + 1) in
+          let height = max indexed.height (fragment_height next + 1) in
           let after =
             {
               order_rev = (slot, name) :: indexed.order_rev;
@@ -783,7 +826,7 @@ and merge_indexed previous patch =
               replace_resources indexed.resources
                 ~before:(resources_of previous) ~after:(resources_of merged)
             in
-            let height = max indexed.height (merged.height + 1) in
+            let height = max indexed.height (fragment_height merged + 1) in
             let after =
               {
                 indexed with
@@ -796,7 +839,8 @@ and merge_indexed previous patch =
   in
   Result.map
     (fun indexed ->
-      snapshot (Object (Indexed indexed)) indexed.resources indexed.height)
+      snapshot ~requires_compaction:true (Object (Indexed indexed))
+        indexed.resources indexed.height)
     (fold_object_snapshots
        (fun result name next ->
          Result.bind result (fun indexed -> update indexed name next))
@@ -838,12 +882,14 @@ let merge_object previous patch =
                 + merged.retained_bytes;
             }
           in
-          let height = max previous.height (merged.height + 1) in
+          let height = max previous.height (fragment_height merged + 1) in
           let packed =
             { fields = [ (previous_name, merged) ]; resources; height }
           in
           Result.map
-            (fun () -> snapshot (Object (Packed packed)) resources height)
+            (fun () ->
+              snapshot ~requires_compaction:true (Object (Packed packed))
+                resources height)
             (validate_parts resources height))
   | Object previous, Object patch -> merge_objects previous patch
   | _, _ -> Error Conversion_failed
@@ -861,28 +907,31 @@ let rec compact_value = function
   | Variant ({ payload = Some payload; _ } as variant) ->
       Variant { variant with payload = Some (compact_value payload) }
 
+and compact_fragment_value fragment =
+  if requires_compaction fragment then compact_value fragment.value
+  else fragment.value
+
 and compact_object = function
   | Single (name, value) -> Single (name, compact_value value)
   | Flat fields ->
       Flat (List.map (fun (name, value) -> (name, compact_value value)) fields)
   | Packed packed -> (
       match packed.fields with
-      | [ (name, child) ] -> Single (name, compact_value child.value)
+      | [ (name, child) ] -> Single (name, compact_fragment_value child)
       | fields ->
           Flat
             (List.map
-               (fun (name, child) -> (name, compact_value child.value))
+               (fun (name, child) -> (name, compact_fragment_value child))
                fields))
   | Indexed indexed ->
       Flat
         (List.rev_map
            (fun (slot, name) ->
              let child = Int_map.find slot indexed.values in
-             (name, compact_value child.value))
+             (name, compact_fragment_value child))
            indexed.order_rev)
 
-let compact snapshot = { snapshot with value = compact_value snapshot.value }
-let complete fragment = (compact fragment).value
+let complete fragment = compact_fragment_value fragment
 
 module Object_accumulator = struct
   type state = fragment
