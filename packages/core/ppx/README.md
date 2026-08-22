@@ -100,7 +100,7 @@ in
 ```
 
 Self-describing anonymous syntax expands through the same package-owned value
-conversion as E1 and becomes an open patch through the PPX runtime contract.
+conversion as E1 and becomes an untyped patch through the PPX runtime contract.
 Explicitly described arbitrary expressions retain their supplied description.
 Typed sparse records expand through the generated builder attached to the
 handle, so OCaml checks field names, nested patch shapes, and value types

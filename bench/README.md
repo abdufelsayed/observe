@@ -43,7 +43,7 @@ amortized. Report schema version 3 adds this field.
 ## Suites
 
 - `component` isolates untyped value construction, typed JSON projection,
-  point and wide capture, and point, parent-wide, and child-wide JSON, NDJSON,
+  point and wide capture, and point, root-wide, and child-wide JSON, NDJSON,
   or pretty formatting.
 - `core` measures public logging calls with a controlled clock and no-op I/O.
   It covers filtering, routing, drain fan-out, JSON, true-color pretty
