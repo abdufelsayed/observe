@@ -4,11 +4,13 @@
 type t =
   | Text of { tag : string; message : string }
   | Untyped of Value.t
+  | Open of (Snapshot.fragment, Snapshot.error) result
   | Typed : ('a, 'builder) Schema.t * 'a -> t
 
-type object_ = { fields : (string * Value.t) list; has_error : bool }
-type field = { name : string; value : Value.t; has_error : bool }
-type open_patch = { value : Value.t; has_error : bool }
+type fragment = (Snapshot.fragment, Snapshot.error) result
+type object_ = { fields : (string * fragment) list; has_error : bool }
+type field = { name : string; fragment : fragment; has_error : bool }
+type open_patch = { fragment : fragment; has_error : bool }
 
 type open_builder = {
   untyped : object_;
@@ -38,7 +40,7 @@ type author = builder -> t
 
 let ( |+ ) object_ field =
   {
-    fields = (field.name, field.value) :: object_.fields;
+    fields = (field.name, field.fragment) :: object_.fields;
     has_error = object_.has_error || field.has_error;
   }
 
@@ -47,30 +49,47 @@ let rec open_builder =
     untyped = { fields = []; has_error = false };
     field =
       (fun name description value ->
-        { name; value = Value.embed description value; has_error = false });
+        { name; fragment = Type.freeze description value; has_error = false });
     object_ =
       (fun name author ->
         let patch = author open_builder in
-        { name; value = patch.value; has_error = patch.has_error });
+        { name; fragment = patch.fragment; has_error = patch.has_error });
     error =
       (fun interpretation ?backtrace error ->
         {
-          value = Error.value interpretation ?backtrace error;
+          fragment = Error.freeze interpretation ?backtrace error;
           has_error = true;
         });
     seal =
       (fun object_ ->
+        let rec collect one fields = function
+          | [] -> (
+              match (one, fields) with
+              | None, [] -> Snapshot.object_from_owned []
+              | Some (name, value), [] ->
+                  Snapshot.singleton_object_from_owned name value
+              | None, fields -> Snapshot.object_from_owned fields
+              | Some _, _ -> assert false)
+          | (_, Error error) :: _ -> Error error
+          | (name, Ok value) :: rest -> (
+              match (one, fields) with
+              | None, [] -> collect (Some (name, value)) [] rest
+              | Some field, [] -> collect None [ (name, value); field ] rest
+              | None, fields -> collect None ((name, value) :: fields) rest
+              | Some _, _ -> assert false)
+        in
         {
-          value = Value.object_ (List.rev object_.fields);
+          fragment = collect None [] object_.fields;
           has_error = object_.has_error;
         });
   }
 
-let open_patch_value (patch : open_patch) = patch.value
+let open_patch_fragment (patch : open_patch) = patch.fragment
 let open_patch_has_error (patch : open_patch) = patch.has_error
 
 let open_patch_of_value = function
-  | Value.Object _ as value -> { value; has_error = false }
+  | Value.Object _ as value ->
+      { fragment = Value.freeze value; has_error = false }
   | _ ->
       invalid_arg "Observe.Generated_runtime.open_value_patch: expected object"
 
@@ -82,10 +101,10 @@ let builder =
     untyped = open_builder.untyped;
     field = open_builder.field;
     object_ = open_builder.object_;
-    seal = (fun object_ -> Untyped (open_builder.seal object_).value);
+    seal = (fun object_ -> Open (open_builder.seal object_).fragment);
     value = (fun value -> Untyped value);
     error =
       (fun interpretation ?backtrace error ->
-        Untyped (Error.value interpretation ?backtrace error));
+        Open (Error.freeze interpretation ?backtrace error));
     typed = (fun description value -> Typed (description, value));
   }

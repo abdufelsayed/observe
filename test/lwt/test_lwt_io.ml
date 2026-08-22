@@ -75,6 +75,42 @@ let test_control_exception () =
     "ordinary exception is not control flow" false
     (IO.is_control_exception state Exit)
 
+let test_outcome_and_backtrace () =
+  Printexc.record_backtrace true;
+  let escaped = Failure "outcome" in
+  let original =
+    try failwith "outcome-origin"
+    with Failure _ -> Printexc.get_raw_backtrace ()
+  in
+  let outcome =
+    Lwt_main.run
+      (IO.observe (fun () ->
+           Lwt.bind (Lwt.pause ()) (fun () ->
+               Printexc.raise_with_backtrace escaped original)))
+  in
+  match outcome with
+  | Observe.IO.Returned _ -> Alcotest.fail "failure became a successful outcome"
+  | Observe.IO.Raised (raised, backtrace) ->
+      Alcotest.(check bool)
+        "outcome preserves exception identity" true (raised == escaped);
+      let original = Printexc.raw_backtrace_to_string original in
+      let captured = Printexc.raw_backtrace_to_string backtrace in
+      Alcotest.(check bool)
+        "outcome preserves backtrace origin" true
+        (String.length captured >= String.length original
+        && String.sub captured 0 (String.length original) = original)
+
+let test_observed_cancellation () =
+  let pending, _ = Lwt.task () in
+  let observed = IO.observe (fun () -> pending) in
+  Lwt.cancel observed;
+  match Lwt.state observed with
+  | Lwt.Return (Observe.IO.Raised (Lwt.Canceled, _)) -> ()
+  | Lwt.Return (Observe.IO.Returned _)
+  | Lwt.Return (Observe.IO.Raised _)
+  | Lwt.Fail _ | Lwt.Sleep ->
+      Alcotest.fail "native cancellation was not observable as an outcome"
+
 let test_foreign_thread_lookup () =
   let key = IO.create_key () in
   let seen = ref (Some "not-run") in
@@ -101,6 +137,10 @@ let () =
           Alcotest.test_case "cancellation cleanup" `Quick
             test_cancellation_cleanup;
           Alcotest.test_case "control exception" `Quick test_control_exception;
+          Alcotest.test_case "outcome and backtrace" `Quick
+            test_outcome_and_backtrace;
+          Alcotest.test_case "observed cancellation" `Quick
+            test_observed_cancellation;
           Alcotest.test_case "foreign thread lookup" `Quick
             test_foreign_thread_lookup;
         ] );

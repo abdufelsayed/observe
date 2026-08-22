@@ -27,6 +27,17 @@ module IO = struct
 
   let return = Lwt.return
   let bind = Lwt.bind
+
+  let observe callback =
+    Lwt.try_bind callback
+      (fun value -> Lwt.return (Observe.IO.Returned value))
+      (fun raised ->
+        let backtrace = Printexc.get_raw_backtrace () in
+        Lwt.return (Observe.IO.Raised (raised, backtrace)))
+
+  let repropagate raised backtrace =
+    Printexc.raise_with_backtrace raised backtrace
+
   let create_key = Lwt.new_key
   let get state key = if state.can_lookup_context () then Lwt.get key else None
 

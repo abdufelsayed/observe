@@ -9,10 +9,27 @@ module Raising_get_io = struct
 end
 
 module Raising_get_observer = Observe.Make (Raising_get_io)
+
+module Raising_operation_get_io = struct
+  include Test_io.IO
+
+  let lookups = ref 0
+
+  let get state key =
+    incr lookups;
+    if !lookups mod 2 = 0 then failwith "operation lookup"
+    else Test_io.IO.get state key
+end
+
+module Raising_operation_get_observer = Observe.Make (Raising_operation_get_io)
 module Inherited_observer = Observe.Make (Test_io.Inherited_io)
 
-let make_observer ?console_style ?now ?offer_console () =
-  let host = Test_io.Host.create ?console_style ?now ?offer_console () in
+let make_observer ?console_style ?now ?monotonic_now ?next_id ?offer_console ()
+    =
+  let host =
+    Test_io.Host.create ?console_style ?now ?monotonic_now ?next_id
+      ?offer_console ()
+  in
   Observer.create host
 
 let config ?enabled ?console ?min_level ?drains () =
@@ -139,6 +156,195 @@ let wide_lifecycle () =
             "monotonic duration" 25L
             (Observe.Log.operation_duration_ns operation))
   | _ -> Alcotest.fail "expected one completed wide observation"
+
+let causal_children_and_correlation () =
+  let observer = make_observer () in
+  let captured = ref None in
+  ignore
+    (Observer.with_capture observer (config ()) (fun capture ->
+         let parent = Observe.Logs.create ~name:"parent" () in
+         Observe.Logs.set parent (fun m ->
+             let open Observe.Logs in
+             m.untyped
+             |+ m.field "parent_only" Observe.Type.string "parent"
+             |> m.seal);
+         let child =
+           Observe.Logs.create_typed ~parent ~name:"typed-child"
+             mutable_event_schema
+         in
+         Observe.Logs.info ~operation:child
+           (Test_io.text ~tag:"explicit" "child");
+         Observer.with_wide observer parent (fun () ->
+             Observe.Logs.info (Test_io.text ~tag:"parent" "before");
+             Observer.with_wide observer child (fun () ->
+                 Observe.Logs.info (Test_io.text ~tag:"child" "inside"));
+             Observe.Logs.info (Test_io.text ~tag:"parent" "after"));
+         Observe.Logs.emit child;
+         Observe.Logs.emit parent;
+         captured := Some capture));
+  let logs = Observe.Capture.logs (Option.get !captured) in
+  match logs with
+  | [ explicit; parent_before; child_inside; parent_after; child; parent ] ->
+      List.iter
+        (fun (log, expected) ->
+          Alcotest.(check (option string))
+            "point correlation" (Some expected)
+            (Observe.Log.correlation_id log))
+        [
+          (explicit, "operation-2");
+          (parent_before, "operation-1");
+          (child_inside, "operation-2");
+          (parent_after, "operation-1");
+        ];
+      let child_operation = Option.get (Observe.Log.operation child) in
+      Alcotest.(check string)
+        "child has fresh identity" "operation-2"
+        (Observe.Log.operation_id child_operation);
+      Alcotest.(check (option string))
+        "child references parent only" (Some "operation-1")
+        (Observe.Log.operation_parent_id child_operation);
+      Alcotest.(check string)
+        "typed child starts without copied parent fields" "{}"
+        (structured_json child);
+      let parent_operation = Option.get (Observe.Log.operation parent) in
+      Alcotest.(check (option string))
+        "parent has no parent" None
+        (Observe.Log.operation_parent_id parent_operation);
+      Alcotest.(check string)
+        "parent payload remains independent" "{\"parent_only\":\"parent\"}"
+        (structured_json parent)
+  | _ -> Alcotest.fail "expected four point logs and two wide logs"
+
+let managed_execution () =
+  Printexc.record_backtrace true;
+  let observer = make_observer () in
+  let captured = ref None in
+  let escaped = Failure "managed" in
+  let original_backtrace =
+    try failwith "managed-origin"
+    with Failure _ -> Printexc.get_raw_backtrace ()
+  in
+  ignore
+    (Observer.with_capture observer (config ()) (fun capture ->
+         let success = Observe.Logs.create ~name:"success" () in
+         let marker = ref 7 in
+         let returned =
+           Observer.manage observer success ~error:Observe.Error.exn (fun () ->
+               Observe.Logs.info (Test_io.text ~tag:"managed" "success");
+               marker)
+         in
+         Alcotest.(check bool)
+           "managed success returns the exact value" true (returned == marker);
+         let failure = Observe.Logs.create ~name:"failure" () in
+         let caught =
+           try
+             ignore
+               (Observer.manage observer failure ~error:Observe.Error.exn
+                  (fun () ->
+                    Printexc.raise_with_backtrace escaped original_backtrace));
+             None
+           with raised -> Some (raised, Printexc.get_raw_backtrace ())
+         in
+         (match caught with
+         | Some (raised, backtrace) ->
+             Alcotest.(check bool)
+               "managed failure preserves exception identity" true
+               (raised == escaped);
+             let original =
+               Printexc.raw_backtrace_to_string original_backtrace
+             in
+             let propagated = Printexc.raw_backtrace_to_string backtrace in
+             let preserves_origin =
+               String.length propagated >= String.length original
+               && String.sub propagated 0 (String.length original) = original
+             in
+             Alcotest.(check bool)
+               "managed failure preserves raw backtrace origin" true
+               preserves_origin
+         | None -> Alcotest.fail "managed failure was swallowed");
+         let cancelled = Observe.Logs.create ~name:"cancelled" () in
+         Alcotest.check_raises "managed cancellation is preserved"
+           Test_io.Direct.Control (fun () ->
+             ignore
+               (Observer.manage observer cancelled ~error:Observe.Error.exn
+                  (fun () -> raise Test_io.Direct.Control)));
+         captured := Some capture));
+  match Observe.Capture.logs (Option.get !captured) with
+  | [ point; success; failure; cancelled ] ->
+      Alcotest.(check (option string))
+        "managed point uses current identity" (Some "operation-1")
+        (Observe.Log.correlation_id point);
+      Alcotest.(check bool)
+        "success remains info" true
+        (Observe.Level.equal Observe.Level.Info (Observe.Log.level success));
+      Alcotest.(check bool)
+        "ordinary failure derives error" true
+        (Observe.Level.equal Observe.Level.Error (Observe.Log.level failure));
+      Alcotest.(check bool)
+        "failure contains interpreted error" true
+        (contains (structured_json failure) "managed");
+      Alcotest.(check bool)
+        "cancellation infers no error level" true
+        (Observe.Level.equal Observe.Level.Info (Observe.Log.level cancelled));
+      Alcotest.(check string)
+        "cancellation adds no fields" "{}"
+        (structured_json cancelled)
+  | _ -> Alcotest.fail "expected managed point and three completed wide logs"
+
+let terminal_completion () =
+  let observer = make_observer () in
+  let captured = ref None in
+  ignore
+    (Observer.with_capture observer (config ()) (fun capture ->
+         let wide = Observe.Logs.create ~name:"stream" () in
+         let terminal =
+           Observe.Logs.Terminal.create ~error:Observe.Error.exn wide
+         in
+         Observe.Logs.Terminal.fail terminal
+           ~set:(fun m ->
+             let open Observe.Logs in
+             m.untyped
+             |+ m.field "terminal" Observe.Type.string "failure"
+             |> m.seal)
+           (Failure "stream-failed");
+         Observe.Logs.Terminal.complete terminal ();
+         Observe.Logs.Terminal.cancel terminal ();
+         captured := Some capture));
+  match Observe.Capture.logs (Option.get !captured) with
+  | [ log ] ->
+      Alcotest.(check bool)
+        "first terminal action publishes once" true
+        (Observe.Level.equal Observe.Level.Error (Observe.Log.level log));
+      Alcotest.(check bool)
+        "terminal failure is structured" true
+        (contains (structured_json log) "stream-failed");
+      Alcotest.(check bool)
+        "winning terminal facts precede completion" true
+        (contains (structured_json log) "\"terminal\":\"failure\"")
+  | _ -> Alcotest.fail "terminal actions published more than once"
+
+let operation_lookup_failure () =
+  let observer =
+    Raising_operation_get_observer.create (Test_io.Host.create ())
+  in
+  let capture =
+    match
+      Raising_operation_get_observer.with_capture observer (config ())
+        (fun capture ->
+          Observe.Logs.info (Test_io.text ~tag:"lookup" "survives");
+          capture)
+    with
+    | Ok capture -> capture
+    | Error _ -> Alcotest.fail "capture was rejected"
+  in
+  Alcotest.(check int)
+    "operation lookup failure does not withhold point log" 1
+    (List.length (Observe.Capture.logs capture));
+  Alcotest.(check int)
+    "operation lookup failure is captured" 1
+    (Test_io.diagnostic_count
+       (Observe.Capture.diagnostics capture)
+       Observe.Diagnostics.Operation_lookup_raised)
 
 let wide_inert_laziness () =
   let identifiers = ref 0 in
@@ -885,6 +1091,63 @@ let console_and_drains () =
     "drain exception diagnosed" 1
     (Test_io.process_diagnostic_count Observe.Diagnostics.Drain_raised)
 
+let wide_console_and_drains () =
+  let console = Buffer.create 256 in
+  let first = ref None in
+  let second = ref None in
+  let drains =
+    [
+      Observe.Drain.create (fun log ->
+          first := Some log;
+          Observe.Drain.Accepted);
+      Observe.Drain.create (fun _ -> failwith "wide drain");
+      Observe.Drain.create (fun log ->
+          second := Some log;
+          Observe.Drain.Accepted);
+    ]
+  in
+  let monotonic = ref [ 0L; 184_000_000L ] in
+  let observer =
+    make_observer
+      ~now:(fun () -> Ok (Observe.Timestamp.of_unix_ns 37_425_612_000_000L))
+      ~monotonic_now:(fun () ->
+        match !monotonic with
+        | value :: rest ->
+            monotonic := rest;
+            Ok value
+        | [] -> Alcotest.fail "monotonic fixture exhausted")
+      ~next_id:(fun () -> Ok "op_checkout")
+      ~offer_console:(fun output ->
+        Buffer.add_string console output;
+        Observe.IO.Accepted)
+      ()
+  in
+  init_ok observer (config ~drains ());
+  let wide = Observe.Logs.create ~name:"checkout" () in
+  Observe.Logs.set wide (fun m ->
+      let open Observe.Logs in
+      m.untyped |+ m.field "cart_id" Observe.Type.string "cart-1" |> m.seal);
+  Observe.Logs.emit wide;
+  let first = Option.get !first in
+  let second = Option.get !second in
+  Alcotest.(check bool)
+    "both drains receive the same completed value" true (first == second);
+  let expected =
+    match
+      Observe.Formatter.format
+        (Observe.Formatter.pretty Observe.Formatter.Plain)
+        first
+    with
+    | Ok output -> output ^ "\n"
+    | Error _ -> Alcotest.fail "public pretty formatter rejected wide log"
+  in
+  Alcotest.(check string)
+    "automatic console uses public pretty meaning" expected
+    (Buffer.contents console);
+  Alcotest.(check int)
+    "middle drain failure remains branch-local" 1
+    (Test_io.process_diagnostic_count Observe.Diagnostics.Drain_raised)
+
 let console_raised () =
   let observer =
     make_observer ~offer_console:(fun _ -> failwith "console") ()
@@ -1174,6 +1437,10 @@ let control_backtrace () =
 let scenario = function
   | "not-initialized" -> not_initialized
   | "wide-lifecycle" -> wide_lifecycle
+  | "causal-correlation" -> causal_children_and_correlation
+  | "managed-execution" -> managed_execution
+  | "terminal-completion" -> terminal_completion
+  | "operation-lookup-failure" -> operation_lookup_failure
   | "wide-inert-laziness" -> wide_inert_laziness
   | "wide-merge-and-seal" -> wide_merge_and_seal
   | "wide-final-admission" -> wide_final_admission
@@ -1194,6 +1461,7 @@ let scenario = function
   | "formatting-failed" -> formatting_failed
   | "callback-containment" -> callback_containment
   | "console-and-drains" -> console_and_drains
+  | "wide-console-and-drains" -> wide_console_and_drains
   | "ANSI-console" -> ansi_console
   | "console-raised" -> console_raised
   | "disabled" -> disabled

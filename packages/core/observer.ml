@@ -14,6 +14,8 @@ and capture_scope = {
   closed : bool Atomic.t;
 }
 
+and operation_scope = { id : string; closed : bool Atomic.t }
+
 type route =
   | Vacant
   | Io_registered of io_registration
@@ -68,21 +70,22 @@ let active_engine () =
   | Io_registered io -> resolve io Missing
   | Outputs (io, engine) -> resolve io (Engine engine)
 
-let emit_point ~level author =
+let emit_point ?correlation_id ~level author =
   match active_engine () with
-  | Engine engine -> Engine.emit_point engine level author
+  | Engine engine -> Engine.emit_point engine ?correlation_id level author
   | Withhold -> ()
   | Missing -> Diagnostics.record Diagnostics.Not_initialized
 
-let create_wide ~name ~origin =
+let create_wide ?parent ~name ~origin () =
   match active_engine () with
-  | Engine engine -> Engine.create_wide engine ~name ~origin
+  | Engine engine -> Engine.create_wide engine ?parent ~name ~origin ()
   | Withhold | Missing -> Engine.inert_wide ()
 
 module Make (IO : Io.S) = struct
   type +'a io = 'a IO.t
 
   let capture_key : capture_scope IO.key = IO.create_key ()
+  let operation_key : operation_scope IO.key = IO.create_key ()
 
   type t = { state : IO.state; io : io_registration }
 
@@ -98,6 +101,12 @@ module Make (IO : Io.S) = struct
   let clock t () = IO.Clock.now t.state
   let monotonic_now t () = IO.Clock.monotonic_now t.state
   let next_id t () = IO.Identity.next t.state
+
+  let resolve_operation_id t () =
+    match IO.get t.state operation_key with
+    | None -> None
+    | Some scope -> if Atomic.get scope.closed then None else Some scope.id
+
   let offer_console t output = IO.Console.offer t.state output
 
   let engine t config output =
@@ -106,11 +115,13 @@ module Make (IO : Io.S) = struct
     | `Outputs ->
         Engine.create_outputs config ~console_style:(IO.Console.style t.state)
           ~clock:(clock t) ~monotonic_now:(monotonic_now t) ~next_id:(next_id t)
+          ~resolve_operation_id:(resolve_operation_id t)
           ~console:(offer_console t) ~is_control_exception
     | `Capture capture ->
         Engine.create_capture config ~clock:(clock t)
           ~monotonic_now:(monotonic_now t) ~next_id:(next_id t)
-          ~is_control_exception capture
+          ~resolve_operation_id:(resolve_operation_id t) ~is_control_exception
+          capture
 
   let init t config = publish t.io (engine t config `Outputs)
 
@@ -148,4 +159,13 @@ module Make (IO : Io.S) = struct
               IO.with_binding t.state capture_key scope (fun () ->
                   IO.bind (callback capture) (fun result ->
                       IO.return (Ok result))))
+
+  let with_wide t wide callback =
+    match Engine.wide_id wide with
+    | None -> callback ()
+    | Some id ->
+        let scope = { id; closed = Atomic.make false } in
+        IO.protect t.state
+          ~finally:(fun () -> Atomic.set scope.closed true)
+          (fun () -> IO.with_binding t.state operation_key scope callback)
 end

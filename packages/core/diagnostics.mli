@@ -4,6 +4,7 @@ type kind =
   | Not_initialized
   | No_delivery_target
   | Capture_lookup_raised
+  | Operation_lookup_raised
   | Clock_unavailable
   | Clock_raised
   | Identity_unavailable

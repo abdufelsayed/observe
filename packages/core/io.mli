@@ -3,6 +3,7 @@
 
 type clock_error = Unavailable
 type console_acceptance = Accepted | Rejected
+type 'a outcome = Returned of 'a | Raised of exn * Printexc.raw_backtrace
 
 module type S = sig
   type +'a t
@@ -11,6 +12,16 @@ module type S = sig
 
   val return : 'a -> 'a t
   val bind : 'a t -> ('a -> 'b t) -> 'b t
+
+  val observe : (unit -> 'a t) -> 'a outcome t
+  (** Observe effect settlement without changing it: return the exact value or
+      the same exception with the raw backtrace visible at the runtime failure
+      boundary. Native cancellation is represented as [Raised] and remains
+      distinguishable through [is_control_exception]. *)
+
+  val repropagate : exn -> Printexc.raw_backtrace -> 'a t
+  (** Re-propagate the supplied exception through the runtime effect with the
+      supplied backtrace. *)
 
   val create_key : unit -> 'a key
   (** Return a fresh generative dynamic-context key. *)

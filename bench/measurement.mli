@@ -11,6 +11,7 @@ type t = {
   major_bytes_per_operation : float;
   promoted_bytes_per_operation : float;
   retained_bytes : float option;
+  encoded_bytes : float option;
   minor_collections_per_operation : float;
   major_collections_per_operation : float;
   r_squared : float option;
@@ -19,4 +20,9 @@ type t = {
 }
 
 val run :
-  configuration -> Scenario.t -> (unit -> unit) -> (unit -> float option) -> t
+  configuration ->
+  Scenario.t ->
+  (unit -> unit) ->
+  (unit -> float option) ->
+  (unit -> float option) ->
+  t

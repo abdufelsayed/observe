@@ -9,15 +9,19 @@ installable package family.
 The core owns logging behavior without performing I/O or depending on a
 specific runtime.
 
-Observe supports auto-emitting point logs and manually completed wide logs
-through one logging surface. Runtime-managed current operations and child
-operations remain later work; the portable wide lifecycle is available now.
+Observe supports auto-emitting point logs and manually or deliberately managed
+wide logs through one logging surface. Wide logs can form causal parent-child
+relationships, and separate point logs can correlate with the active wide
+operation without becoming part of its accumulated body.
 
 ## What You Get
 
 - Process-wide tagged text and structured logging.
 - Open and schema-locked wide logs with incremental contributions and
   at-most-once completion.
+- Explicit causal children, point-log correlation, and isolated Lwt scope.
+- Managed Lwt completion that preserves results, failures, backtraces, and
+  cancellation.
 - Admission-first authoring callbacks shared by every message shape.
 - Typed structured values with Repr machine behavior and type-aware pretty
   presentation.
@@ -125,6 +129,13 @@ writer rejects the newest record without discarding earlier acceptance.
 `Observe_lwt_unix.flush` and `shutdown` include registered filesystem workers.
 Acceptance does not promise `fsync`, crash durability, retry, retention,
 compression, or cross-process coordination.
+
+Point and wide logs use the same files and worker. A completed wide log keeps
+consumer fields under `body` and package metadata under `operation`:
+
+```json
+{"service":"orders","timestamp":"1787120625700000000","level":"info","operation":{"name":"checkout","id":"op_01J...","duration_ns":"184000000"},"body":{"cart_id":"cart-1","phase":"completed"}}
+```
 
 ## Logging
 
@@ -267,13 +278,109 @@ Errors are explicit contributions, not automatic exception tracking:
 
 ```ocaml
 try charge () with exn ->
-  Observe.Logs.set checkout (fun m -> m.error Observe.Error.exn exn);
-  raise exn
+  let backtrace = Printexc.get_raw_backtrace () in
+  Observe.Logs.set checkout (fun m ->
+    m.error Observe.Error.exn ~backtrace exn);
+  Printexc.raise_with_backtrace exn backtrace
 ```
 
 An explicit error derives `Error` when no level was selected. An explicit
-`set_level` always wins. Observe records only errors supplied by the caller in
-this portable API; managed runtime catching belongs to later integrations.
+`set_level` always wins. Observe records errors supplied by the caller or an
+error escaping a deliberately invoked managed boundary; initialization and
+scope-only binding catch nothing.
+
+### Causality and point correlation
+
+Deriving a child creates another ordinary wide log. It copies only the parent
+occurrence identifier—not the parent body, schema, level, or lifecycle:
+
+```ocaml
+let payment =
+  Observe.Logs.create ~parent:checkout ~name:"capture-payment" ()
+in
+
+Observe.Logs.info ~operation:payment (fun m ->
+  m.text ~tag:"payment" "capture started");
+
+Observe.Logs.emit payment
+```
+
+The point log is still a separate auto-emitting observation. Its envelope
+carries the payment occurrence identifier; it does not patch or emit
+`payment`.
+
+The ready Lwt runtime can bind the same handle for automatic point correlation:
+
+```ocaml
+Observe_lwt_unix.with_wide checkout (fun () ->
+  [%observe.info text ~tag:"checkout" "authorizing payment"];
+  authorize_payment ())
+```
+
+`with_wide` is scope only. It neither catches the callback's exception nor
+emits `checkout`. Nested scopes restore their parent, concurrent scopes remain
+isolated, and there is no fallback current operation outside a valid scope.
+
+### Managed Lwt completion
+
+Use `manage` only when the supplied callback is the real boundary being
+observed:
+
+```ocaml
+let checkout = Observe.Logs.create ~name:"checkout" () in
+
+Observe_lwt_unix.manage checkout ~error:Observe.Error.exn (fun () ->
+  let open Lwt.Syntax in
+  let* authorization = authorize_payment () in
+  [%observe.set checkout
+    untyped { payment = { authorization_id = string authorization.id } }];
+  Lwt.return authorization)
+```
+
+On success, `manage` emits once and returns the exact result. An ordinary
+escaping exception is interpreted into this wide log, which derives `Error`
+unless an explicit level wins; the same exception and backtrace are then
+propagated. `Lwt.Canceled` also completes once but contributes no inferred
+error, level, outcome, or status.
+
+A managed child keeps Evlog's useful callback shape while preserving the
+callback outcome and independent child lifecycle:
+
+```ocaml
+Observe_lwt_unix.fork ~parent:checkout ~name:"capture-payment"
+  ~error:Observe.Error.exn (fun payment ->
+    let open Lwt.Syntax in
+    let* authorization = authorize_payment () in
+    [%observe.set payment
+      untyped { authorization_id = string authorization.id }];
+    Lwt.return authorization)
+```
+
+For a stream whose true terminal boundary occurs after its handler returns,
+the integration owns a single-use terminal token instead of calling `manage`
+at the handler boundary:
+
+```ocaml
+let terminal =
+  Observe.Logs.Terminal.create ~error:Observe.Error.exn response
+in
+
+on_close (fun status ->
+  Observe.Logs.Terminal.complete terminal
+    ~set:(fun m ->
+      let open Observe.Logs in
+      m.untyped
+      |+ m.field "status" Observe.Type.int status
+      |> m.seal)
+    ());
+on_error (fun exn backtrace ->
+  Observe.Logs.Terminal.fail terminal ~backtrace exn);
+on_cancel (fun () -> Observe.Logs.Terminal.cancel terminal ())
+```
+
+Only the first terminal action wins. Its optional `~set` callback uses the same
+lazy sparse-patch API and contributes protocol status or other terminal facts
+before canonical completion. Losing callbacks author nothing.
 
 ## Console Output
 
@@ -287,6 +394,15 @@ The ready Unix composition produces compact text and ordered structured trees:
 10:23:45.614 INFO [orders]
   ├─ cart_id: "cart-1"
   └─ phase: Started
+10:23:45.700 INFO [charge-card] 71ms (op_child <- op_parent)
+  └─ result: Authorized
+```
+
+A correlated point stays a separate point observation and shows its operation
+identity without becoming part of the wide body:
+
+```text
+10:23:45.650 INFO [payment] (op_parent) waiting for authorization
 ```
 
 The Unix adapter passively detects terminal color capability. Redirected
@@ -306,10 +422,32 @@ but an opaque lifted description cannot enter a completed log unless Observe
 has a bounded package-owned freezer for it; there is no live or unbounded
 fallback.
 
+## Machine Output
+
+Uncorrelated point JSON retains the E1 envelope. A correlated point adds only
+`operation_id`:
+
+```json
+{"service":"orders","timestamp":"1787120625660000000","level":"info","operation_id":"op_parent","body":{"kind":"inventory_wait"}}
+```
+
+A wide log uses a nested collision-free operation envelope. A child adds
+`parent_id` inside that envelope:
+
+```json
+{"service":"orders","timestamp":"1787120625771000000","level":"info","operation":{"name":"charge-card","id":"op_child","parent_id":"op_parent","duration_ns":"71000000"},"body":{"result":"authorized"}}
+```
+
+`timestamp` and `duration_ns` are exact decimal nanosecond strings. JSON adds
+no inferred outcome, status, start time, progress-log array, delivery state, or
+formatted duration. `Observe.Formatter.ndjson` produces the same object with
+exactly one final line feed.
+
 ## Example
 
 The runnable example follows one checkout scenario through text and structured
-point logs, then open and schema-locked wide logs:
+point logs, manual open and schema-locked wide logs, and managed causal Lwt
+work:
 
 ```sh
 opam exec -- dune exec examples/simple.exe
@@ -334,8 +472,8 @@ effect, and ready-composition boundaries:
 | --- | --- |
 | `observe` | Portable logging core, public authoring API, formatters, drains, diagnostics, capture, and the completed `Observe.IO` contract. |
 | `observe.ppx` | Core-package sublibrary for concise logging, `[@@deriving observe]`, `[%observe.value ...]`, and embedded typed values. |
-| `observe-lwt` | Lwt callback-local effects completed with caller-provided clock and console functions. |
-| `observe-lwt-unix` | Ready Lwt-Unix composition, standard-error output, and Lwt-scoped test capture. |
+| `observe-lwt` | Lwt callback-local scope and outcome effects completed with caller-provided clock and console functions. |
+| `observe-lwt-unix` | Ready Lwt-Unix composition, managed wide execution, standard-error output, and Lwt-scoped test capture. |
 | `observe-fs` | Portable daily filename, NDJSON projection, bounded worker state, barriers, and failure behavior over injected I/O. |
 | `observe-fs-lwt` | Lwt completion for caller-provided filesystem capabilities, including Mirage capabilities, without Unix dependencies. |
 | `observe-fs-lwt-unix` | Ready recursive-directory setup, append-only daily files, and registration with the Lwt-Unix lifecycle. |
@@ -372,6 +510,38 @@ Capture is finite and deterministic. Every retained `Log.t` is the same
 bounded immutable completed observation offered to console and drains; caller
 mutation after emission cannot change later capture or output.
 
+Consumers inspect semantic values directly instead of parsing presentation
+output:
+
+```ocaml
+let inspect log =
+  match Observe.Log.kind log, Observe.Log.operation log with
+  | Observe.Log.Point, None ->
+      Observe.Log.correlation_id log
+  | Observe.Log.Wide, Some operation ->
+      Some (Observe.Log.operation_id operation)
+  | Observe.Log.Point, Some _ | Observe.Log.Wide, None ->
+      assert false
+```
+
+A third-party formatter or drain receives this same public immutable value:
+
+```ocaml
+let formatter =
+  Observe.Formatter.create (fun log ->
+    inspect log |> ignore;
+    Observe.Formatter.format Observe.Formatter.json log)
+
+let drain =
+  Observe.Drain.create (fun log ->
+    inspect log |> ignore;
+    Observe.Drain.Accepted)
+```
+
+Drain acceptance means only that the drain took immediate ownership. It does
+not mean that formatting, queuing, flushing, persistence, or acknowledgement
+completed.
+
 ## Development
 
 ```sh
@@ -385,7 +555,9 @@ Use `scripts/test.sh quick` when the correctness run should leave a durable
 report. All runner profiles record their workload controls; correctness and
 stress failures also copy Alcotest outputs under the ignored `.logs/`
 directory. The separate benchmark tool records informational measurements and
-never participates in correctness or stress gates. See
+never participates in correctness or stress gates. Its report separates point
+and wide capture, formatting, drain, runtime, and filesystem boundaries and
+records encoded byte size where a formatter owns a stable byte result. See
 [`bench/README.md`](bench/README.md) for its suites and output contract.
 
 CI also proves each installable package independently:

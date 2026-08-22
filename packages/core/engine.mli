@@ -16,6 +16,7 @@ val create_outputs :
   clock:(unit -> (Timestamp.t, Io.clock_error) result) ->
   monotonic_now:(unit -> (int64, Io.clock_error) result) ->
   next_id:(unit -> (string, Io.clock_error) result) ->
+  resolve_operation_id:(unit -> string option) ->
   console:(string -> Io.console_acceptance) ->
   is_control_exception:(exn -> bool) ->
   t
@@ -25,6 +26,7 @@ val create_capture :
   clock:(unit -> (Timestamp.t, Io.clock_error) result) ->
   monotonic_now:(unit -> (int64, Io.clock_error) result) ->
   next_id:(unit -> (string, Io.clock_error) result) ->
+  resolve_operation_id:(unit -> string option) ->
   is_control_exception:(exn -> bool) ->
   Capture.t ->
   t
@@ -32,16 +34,29 @@ val create_capture :
 val after_install : t -> unit
 (** Record installation-only diagnostics after this engine wins publication. *)
 
-val emit_point : t -> Level.t -> Message.author -> unit
+val record_diagnostic : t -> Diagnostics.kind -> unit
+(** Record through the engine's active output or capture diagnostic boundary. *)
+
+val emit_point :
+  t -> ?correlation_id:string -> Level.t -> Message.author -> unit
 
 type wide
-type contribution = { body : Snapshot.t; has_error : bool }
+
+type contribution =
+  | Contribution of Snapshot.fragment * bool
+  | Invalid_contribution of Snapshot.error
 
 val inert_wide : unit -> wide
-val create_wide : t -> name:string -> origin:Log.structured_origin -> wide
 
-val contribute_wide :
-  wide -> (unit -> (contribution, Snapshot.error) result) -> unit
+val create_wide :
+  t ->
+  ?parent:wide ->
+  name:string ->
+  origin:Log.structured_origin ->
+  unit ->
+  wide
 
+val wide_id : wide -> string option
+val contribute_wide : wide -> (unit -> contribution) -> unit
 val set_wide_level : wide -> Level.t -> unit
 val emit_wide : wide -> unit

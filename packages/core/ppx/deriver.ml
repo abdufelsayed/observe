@@ -1148,12 +1148,8 @@ let patch_structure_items (module Engine : Ppx_repr_lib.Engine.S) ~library ~path
       let schema_name = schema_value_name declaration.ptype_name.txt in
       let schema_name_parameter = "__observe_schema_name" in
       let named_patch field_fragment =
-        for_ppx_call ~loc "named_record_patch"
-          [
-            evar ~loc schema_name_parameter;
-            elist ~loc
-              [ pexp_construct ~loc (lident ~loc "Some") (Some field_fragment) ];
-          ]
+        for_ppx_call ~loc "named_record_patch_fields"
+          [ evar ~loc schema_name_parameter; elist ~loc [ field_fragment ] ]
       in
       let builder_field field =
         let field_loc = field.pld_loc in
@@ -1228,35 +1224,52 @@ let patch_structure_items (module Engine : Ppx_repr_lib.Engine.S) ~library ~path
         value_binding ~loc ~pat:(pvar ~loc schema_name)
           ~expr:(lambda ~loc parameter_patterns schema_expression)
       in
-      let field_expression field =
+      let present_field_expression field value_name =
         let field_loc = field.pld_loc in
-        let option_name = "__observe_patch_" ^ field.pld_name.txt in
-        let value_name = option_name ^ "_value" in
         let fragment =
           fragment_expression
             (module Engine)
             ~library field.pld_type
             (evar ~loc:field_loc value_name)
         in
-        let mapped =
-          for_ppx_call ~loc:field_loc "patch_field"
-            [ estr ~loc:field_loc field.pld_name.txt; fragment ]
-        in
-        pexp_apply ~loc:field_loc
-          (evar ~loc:field_loc "Option.map")
-          [
-            ( Nolabel,
-              pexp_fun ~loc:field_loc Nolabel None
-                (pvar ~loc:field_loc value_name)
-                mapped );
-            (Nolabel, evar ~loc:field_loc option_name);
-          ]
+        for_ppx_call ~loc:field_loc "patch_field"
+          [ estr ~loc:field_loc field.pld_name.txt; fragment ]
+      in
+      let fields_expression =
+        List.fold_right
+          (fun field rest ->
+            let field_loc = field.pld_loc in
+            let option_name = "__observe_patch_" ^ field.pld_name.txt in
+            let value_name = option_name ^ "_value" in
+            let present = present_field_expression field value_name in
+            let cons =
+              pexp_construct ~loc:field_loc
+                (lident ~loc:field_loc "::")
+                (Some (pexp_tuple ~loc:field_loc [ present; rest ]))
+            in
+            pexp_match ~loc:field_loc
+              (evar ~loc:field_loc option_name)
+              [
+                case
+                  ~lhs:
+                    (ppat_construct ~loc:field_loc
+                       (lident ~loc:field_loc "None")
+                       None)
+                  ~guard:None ~rhs:rest;
+                case
+                  ~lhs:
+                    (ppat_construct ~loc:field_loc
+                       (lident ~loc:field_loc "Some")
+                       (Some (pvar ~loc:field_loc value_name)))
+                  ~guard:None ~rhs:cons;
+              ])
+          fields (elist ~loc [])
       in
       let patch_body =
-        for_ppx_call ~loc "record_patch"
+        for_ppx_call ~loc "record_patch_fields"
           [
             apply ~loc (evar ~loc schema_name) parameter_values;
-            elist ~loc (List.map field_expression fields);
+            fields_expression;
           ]
       in
       let patch_body = pexp_fun ~loc Nolabel None (punit ~loc) patch_body in

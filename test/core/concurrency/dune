@@ -22,7 +22,9 @@
    (run %{exe:concurrency_scenario.exe} wide-contribution-and-seal 8)
    (run %{exe:concurrency_scenario.exe} wide-contribution-and-seal 64)
    (run %{exe:concurrency_scenario.exe} wide-set-level-emit-race 8)
-   (run %{exe:concurrency_scenario.exe} wide-set-level-emit-race 64))))
+   (run %{exe:concurrency_scenario.exe} wide-set-level-emit-race 64)
+   (run %{exe:concurrency_scenario.exe} terminal-race 8)
+   (run %{exe:concurrency_scenario.exe} terminal-race 64))))
 
 (rule
  (alias observe-concurrency-stress)

@@ -108,6 +108,15 @@ let io =
 let observer = Observer.create io
 let init config = Observer.init observer config
 let init_exn config = Observer.init_exn observer config
+let with_wide wide callback = Observer.with_wide observer wide callback
+let manage wide ~error callback = Observer.manage observer wide ~error callback
+
+let fork ~parent ~name ~error callback =
+  Observer.fork observer ~parent ~name ~error callback
+
+let fork_typed ~parent ~name schema ~error callback =
+  Observer.fork_typed observer ~parent ~name schema ~error callback
+
 let flush () = Writer_registry.flush writers
 let shutdown () = Writer_registry.shutdown writers
 

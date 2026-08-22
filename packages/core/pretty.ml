@@ -104,19 +104,7 @@ let level_label = function
 let valid_string value =
   if Utf8.is_valid value then value else raise (Error Invalid_utf8)
 
-let text renderer value =
-  let length = String.length value in
-  let rec scan index first_escape has_non_ascii =
-    if index = length then (first_escape, has_non_ascii)
-    else
-      let code = Char.code (String.unsafe_get value index) in
-      scan (index + 1)
-        (if first_escape < 0 && (code < 0x20 || code = 0x7f) then index
-         else first_escape)
-        (has_non_ascii || code >= 0x80)
-  in
-  let first_escape, has_non_ascii = scan 0 (-1) false in
-  if has_non_ascii && not (Utf8.is_valid value) then raise (Error Invalid_utf8);
+let append_text renderer value length first_escape =
   if first_escape < 0 then Buffer.add_string renderer.buffer value
   else
     let hex = "0123456789abcdef" in
@@ -143,9 +131,75 @@ let text renderer value =
     in
     escaped 0 first_escape
 
+let text renderer value =
+  let length = String.length value in
+  let rec scan index first_escape has_non_ascii =
+    if index = length then (first_escape, has_non_ascii)
+    else
+      let code = Char.code (String.unsafe_get value index) in
+      scan (index + 1)
+        (if first_escape < 0 && (code < 0x20 || code = 0x7f) then index
+         else first_escape)
+        (has_non_ascii || code >= 0x80)
+  in
+  let first_escape, has_non_ascii = scan 0 (-1) false in
+  if has_non_ascii && not (Utf8.is_valid value) then raise (Error Invalid_utf8);
+  append_text renderer value length first_escape
+
+let trusted_text renderer value =
+  let length = String.length value in
+  let rec scan index first_escape =
+    if index = length then first_escape
+    else
+      let code = Char.code (String.unsafe_get value index) in
+      scan (index + 1)
+        (if first_escape < 0 && (code < 0x20 || code = 0x7f) then index
+         else first_escape)
+  in
+  append_text renderer value length (scan 0 (-1))
+
+let duration renderer duration_ns =
+  let duration_ns =
+    if Int64.compare duration_ns 0L < 0 then 0L else duration_ns
+  in
+  let add_two value =
+    Buffer.add_char renderer.buffer (Char.unsafe_chr (48 + (value / 10)));
+    Buffer.add_char renderer.buffer (Char.unsafe_chr (48 + (value mod 10)))
+  in
+  let add_three value =
+    Buffer.add_char renderer.buffer (Char.unsafe_chr (48 + (value / 100)));
+    Buffer.add_char renderer.buffer (Char.unsafe_chr (48 + (value / 10 mod 10)));
+    Buffer.add_char renderer.buffer (Char.unsafe_chr (48 + (value mod 10)))
+  in
+  let add unit suffix =
+    let whole = Int64.div duration_ns unit in
+    let remainder = Int64.rem duration_ns unit in
+    let fraction =
+      Int64.div remainder (Int64.div unit 1_000L) |> Int64.to_int
+    in
+    Json_writer.decimal_int64 renderer.buffer whole;
+    if fraction <> 0 then (
+      Buffer.add_char renderer.buffer '.';
+      if fraction mod 100 = 0 then
+        Buffer.add_char renderer.buffer
+          (Char.unsafe_chr (48 + (fraction / 100)))
+      else if fraction mod 10 = 0 then add_two (fraction / 10)
+      else add_three fraction);
+    Buffer.add_string renderer.buffer suffix
+  in
+  if Int64.compare duration_ns 1_000L < 0 then (
+    Json_writer.decimal_int64 renderer.buffer duration_ns;
+    Buffer.add_string renderer.buffer "ns")
+  else if Int64.compare duration_ns 1_000_000L < 0 then add 1_000L "us"
+  else if Int64.compare duration_ns 1_000_000_000L < 0 then add 1_000_000L "ms"
+  else add 1_000_000_000L "s"
+
 let quoted renderer value =
   try Json_writer.string renderer.buffer value
   with Json_writer.Invalid_utf8 -> raise (Error Invalid_utf8)
+
+let trusted_quoted renderer value =
+  Json_writer.trusted_string renderer.buffer value
 
 let nanoseconds_per_day = 86_400_000_000_000L
 
@@ -187,7 +241,7 @@ let header renderer ~unix_ns ~severity ~scope =
   space renderer;
   start_style ~bold:true renderer (level_color severity);
   Buffer.add_char renderer.buffer '[';
-  text renderer scope;
+  trusted_text renderer scope;
   Buffer.add_char renderer.buffer ']';
   end_style renderer
 
@@ -302,6 +356,11 @@ let string renderer value =
   quoted renderer value;
   end_style renderer
 
+let trusted_string renderer value =
+  start_style renderer string_color;
+  trusted_quoted renderer value;
+  end_style renderer
+
 let empty_record renderer = styled renderer metadata "{}"
 let empty_list renderer = Buffer.add_string renderer.buffer "[]"
 
@@ -309,6 +368,12 @@ let variant renderer ~polymorphic name =
   start_style ~bold:true renderer constructor_color;
   if polymorphic then Buffer.add_char renderer.buffer '`';
   text renderer name;
+  end_style renderer
+
+let trusted_variant renderer ~polymorphic name =
+  start_style ~bold:true renderer constructor_color;
+  if polymorphic then Buffer.add_char renderer.buffer '`';
+  trusted_text renderer name;
   end_style renderer
 
 let list_start renderer = Buffer.add_char renderer.buffer '['

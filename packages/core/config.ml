@@ -25,6 +25,9 @@ let validate_optional field = function
   | None -> Ok ()
   | Some value -> validate field value
 
+let copy_string value = Bytes.unsafe_to_string (Bytes.of_string value)
+let copy_optional = Option.map copy_string
+
 let create ~service ?environment ?version ?(enabled = true) ?(console = Auto)
     ?(min_level = Level.Info) ?(drains = []) () =
   match validate Service service with
@@ -38,9 +41,9 @@ let create ~service ?environment ?version ?(enabled = true) ?(console = Auto)
           | Ok () ->
               Ok
                 {
-                  service;
-                  environment;
-                  version;
+                  service = copy_string service;
+                  environment = copy_optional environment;
+                  version = copy_optional version;
                   enabled;
                   console;
                   min_level;

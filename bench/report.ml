@@ -9,6 +9,7 @@ type entry = {
   major_bytes_per_operation : float;
   promoted_bytes_per_operation : float;
   retained_bytes : float option;
+  encoded_bytes : float option;
   minor_collections_per_operation : float;
   major_collections_per_operation : float;
   r_squared : float option;
@@ -114,6 +115,7 @@ let entry (measurement : Measurement.t) =
     major_bytes_per_operation = measurement.major_bytes_per_operation;
     promoted_bytes_per_operation = measurement.promoted_bytes_per_operation;
     retained_bytes = measurement.retained_bytes;
+    encoded_bytes = measurement.encoded_bytes;
     minor_collections_per_operation =
       measurement.minor_collections_per_operation;
     major_collections_per_operation =
@@ -140,20 +142,23 @@ let write_file path contents =
 
 let write_json ~path metadata measurements =
   let report =
-    { schema_version = 2; metadata; results = List.map entry measurements }
+    { schema_version = 3; metadata; results = List.map entry measurements }
   in
   write_file path (Observe.Type.to_json_string report_t report)
 
 let print_table measurements =
-  Format.printf "%-43s %12s %12s %12s %12s %12s %8s\n%!" "scenario" "ns/op"
-    "ops/s" "minor B/op" "major B/op" "retained B" "samples";
+  Format.printf "%-43s %12s %12s %12s %12s %12s %12s %8s\n%!" "scenario" "ns/op"
+    "ops/s" "minor B/op" "major B/op" "retained B" "encoded B" "samples";
   List.iter
     (fun (measurement : Measurement.t) ->
-      Format.printf "%-43s %12.1f %12.0f %12.1f %12.1f %12s %8d\n%!"
+      Format.printf "%-43s %12.1f %12.0f %12.1f %12.1f %12s %12s %8d\n%!"
         measurement.name measurement.nanoseconds_per_operation
         measurement.operations_per_second measurement.minor_bytes_per_operation
         measurement.major_bytes_per_operation
         (match measurement.retained_bytes with
+        | None -> "n/a"
+        | Some bytes -> Format.asprintf "%.0f" bytes)
+        (match measurement.encoded_bytes with
         | None -> "n/a"
         | Some bytes -> Format.asprintf "%.0f" bytes)
         measurement.samples)

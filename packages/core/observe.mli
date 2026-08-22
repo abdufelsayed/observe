@@ -294,8 +294,14 @@ module Generated_runtime : sig
     patch_field option list ->
     'record Schema.patch
 
+  val record_patch_fields :
+    ('record, 'builder) Schema.t -> patch_field list -> 'record Schema.patch
+
   val named_record_patch :
     string -> patch_field option list -> 'record Schema.patch
+
+  val named_record_patch_fields :
+    string -> patch_field list -> 'record Schema.patch
 
   val named_error_patch : string -> fragment -> 'record Schema.patch
 
@@ -360,12 +366,24 @@ module Log : sig
   val timestamp : t -> Timestamp.t
   val level : t -> Level.t
   val body : t -> body
+
   val kind : t -> kind
+  (** Distinguish an auto-emitted point observation from a completed wide
+      operation without inspecting presentation output. *)
+
   val operation : t -> operation option
+  (** The immutable operation envelope on a wide observation. Point observations
+      return [None], including correlated points. *)
+
+  val correlation_id : t -> string option
+  (** The associated wide-log occurrence identifier on a point log. *)
+
   val operation_name : operation -> string
   val operation_id : operation -> string
   val operation_parent_id : operation -> string option
+
   val operation_duration_ns : operation -> int64
+  (** The non-negative monotonic elapsed duration. *)
 end
 
 module Diagnostics : sig
@@ -373,6 +391,7 @@ module Diagnostics : sig
     | Not_initialized
     | No_delivery_target
     | Capture_lookup_raised
+    | Operation_lookup_raised
     | Clock_unavailable
     | Clock_raised
     | Identity_unavailable
@@ -442,12 +461,17 @@ module Formatter : sig
 
   val pretty : style -> t
   (** Render compact tagged text or an ordered structured tree with UTC
-      millisecond timestamps and console-safe caller data. *)
+      millisecond timestamps and console-safe caller data. Wide headers show
+      operation identity, human-readable duration, and optional parent identity.
+  *)
 
   val json : t
+  (** Render one compact object. Correlated points add [operation_id]. Wide logs
+      add a nested [operation] object and keep consumer data under [body]. Exact
+      timestamps and durations are decimal nanosecond strings. *)
 
   val ndjson : t
-  (** One compact JSON object followed by one line feed. *)
+  (** The same compact object as {!json}, followed by one line feed. *)
 end
 
 module Capture : sig
@@ -563,25 +587,36 @@ module Logs : sig
   type author = builder -> message
   (** Message authoring invoked only after route and level admission. *)
 
-  val log : level:Level.t -> author -> unit
+  type ('builder, 'patch) t
+
+  val log :
+    ?operation:('operation_builder, 'operation_patch) t ->
+    level:Level.t ->
+    author ->
+    unit
   (** Emit through the active scoped or production route. Before installation,
       messages are withheld and diagnosed. Logging does not raise merely because
       process initialization has not happened. Ordinary authoring exceptions are
-      withheld and diagnosed as [Diagnostics.Message_evaluation_raised]. *)
+      withheld and diagnosed as [Diagnostics.Message_evaluation_raised].
+      [operation] explicitly associates the separate point observation with that
+      wide-log occurrence. *)
 
-  val debug : author -> unit
-  val info : author -> unit
-  val warn : author -> unit
-  val error : author -> unit
+  val debug : ?operation:('builder, 'patch) t -> author -> unit
+  val info : ?operation:('builder, 'patch) t -> author -> unit
+  val warn : ?operation:('builder, 'patch) t -> author -> unit
+  val error : ?operation:('builder, 'patch) t -> author -> unit
   val ( |+ ) : object_ -> field -> object_
 
-  type ('builder, 'patch) t
-
-  val create : name:string -> unit -> (open_builder, open_patch) t
+  val create :
+    ?parent:('parent_builder, 'parent_patch) t ->
+    name:string ->
+    unit ->
+    (open_builder, open_patch) t
   (** Start an empty open wide log at [Info]. An unavailable route or required
       runtime capability produces an inert handle. *)
 
   val create_typed :
+    ?parent:('parent_builder, 'parent_patch) t ->
     name:string ->
     ('record, 'builder) Schema.t ->
     ('builder, 'record Schema.patch) t
@@ -599,11 +634,38 @@ module Logs : sig
 
   val emit : ('builder, 'patch) t -> unit
   (** Seal and attempt final-level admission and publication exactly once. *)
+
+  module Terminal : sig
+    type ('builder, 'patch) log = ('builder, 'patch) t
+    type ('builder, 'patch) t
+
+    val create :
+      error:exn Error.t -> ('builder, 'patch) log -> ('builder, 'patch) t
+    (** Create a single-use terminal owner for an existing wide log. *)
+
+    val complete :
+      ('builder, 'patch) t -> ?set:('builder -> 'patch) -> unit -> unit
+
+    val fail :
+      ('builder, 'patch) t ->
+      ?set:('builder -> 'patch) ->
+      ?backtrace:Printexc.raw_backtrace ->
+      exn ->
+      unit
+
+    val cancel :
+      ('builder, 'patch) t -> ?set:('builder -> 'patch) -> unit -> unit
+    (** The first terminal action wins and emits the same ordinary lifecycle.
+        Its optional [set] contribution is authored only by that winner and
+        before emission. [fail] then contributes the selected safe error
+        interpretation; cancellation contributes no inferred fields or level. *)
+  end
 end
 
 module IO : sig
   type clock_error = Unavailable
   type console_acceptance = Accepted | Rejected
+  type 'a outcome = Returned of 'a | Raised of exn * Printexc.raw_backtrace
 
   module type S = sig
     type +'a t
@@ -612,6 +674,14 @@ module IO : sig
 
     val return : 'a -> 'a t
     val bind : 'a t -> ('a -> 'b t) -> 'b t
+
+    val observe : (unit -> 'a t) -> 'a outcome t
+    (** Observe effect settlement as the exact result or the same exception and
+        raw backtrace at the runtime failure boundary. Cancellation remains a
+        classified [Raised] outcome. *)
+
+    val repropagate : exn -> Printexc.raw_backtrace -> 'a t
+    (** Re-propagate that exception through the runtime effect. *)
 
     val create_key : unit -> 'a key
     (** Return a fresh generative dynamic-context key. *)
@@ -692,4 +762,35 @@ module Make (IO : IO.S) : sig
       exception, or cancellation. The callback outcome is preserved; a retained
       capture remains available for inspection but closed to further delivery.
   *)
+
+  val with_wide : t -> ('builder, 'patch) Logs.t -> (unit -> 'a io) -> 'a io
+  (** Bind an existing wide log for scoped point-log correlation only. This
+      catches nothing and emits nothing. *)
+
+  val manage :
+    t ->
+    ('builder, 'patch) Logs.t ->
+    error:exn Error.t ->
+    (unit -> 'a io) ->
+    'a io
+  (** Run work inside the wide-log scope, contribute an escaping ordinary
+      exception through [error], emit once, and preserve the original runtime
+      outcome. Native cancellation completes without inferred error meaning. *)
+
+  val fork :
+    t ->
+    parent:('parent_builder, 'parent_patch) Logs.t ->
+    name:string ->
+    error:exn Error.t ->
+    ((Logs.open_builder, Logs.open_patch) Logs.t -> 'a io) ->
+    'a io
+
+  val fork_typed :
+    t ->
+    parent:('parent_builder, 'parent_patch) Logs.t ->
+    name:string ->
+    ('record, 'builder) Schema.t ->
+    error:exn Error.t ->
+    (('builder, 'record Schema.patch) Logs.t -> 'a io) ->
+    'a io
 end

@@ -28,46 +28,108 @@ type builder = Message.builder = {
 
 type author = builder -> message
 
-let log ~level author = Observer.emit_point ~level author
-let debug author = log ~level:Level.Debug author
-let info author = log ~level:Level.Info author
-let warn author = log ~level:Level.Warn author
-let error author = log ~level:Level.Error author
-let ( |+ ) = Message.( |+ )
-
 type ('builder, 'patch) t = {
   wide : Engine.wide;
   builder : 'builder;
-  materialize : 'patch -> (Engine.contribution, Snapshot.error) result;
+  materialize : 'patch -> Engine.contribution;
+  error_materialize :
+    'error.
+    'error Error.t ->
+    ?backtrace:Printexc.raw_backtrace ->
+    'error ->
+    Engine.contribution;
 }
 
-let create ~name () =
+let engine_wide handle = handle.wide
+let operation_id handle = Engine.wide_id handle.wide
+
+let log ?operation ~level author =
+  let correlation_id = Option.bind operation operation_id in
+  Observer.emit_point ?correlation_id ~level author
+
+let debug ?operation author = log ?operation ~level:Level.Debug author
+let info ?operation author = log ?operation ~level:Level.Info author
+let warn ?operation author = log ?operation ~level:Level.Warn author
+let error ?operation author = log ?operation ~level:Level.Error author
+let ( |+ ) = Message.( |+ )
+
+let materialize_error interpretation ?backtrace error =
+  match Error.freeze interpretation ?backtrace error with
+  | Ok body -> Engine.Contribution (body, true)
+  | Error error -> Engine.Invalid_contribution error
+
+let create ?parent ~name () =
   {
-    wide = Observer.create_wide ~name ~origin:Log.Open;
+    wide =
+      Observer.create_wide
+        ?parent:(Option.map engine_wide parent)
+        ~name ~origin:Log.Open ();
     builder = Message.open_builder;
     materialize =
       (fun patch ->
-        Result.map
-          (fun body ->
-            { Engine.body; has_error = Message.open_patch_has_error patch })
-          (Message.open_patch_value patch |> Value.freeze));
+        match Message.open_patch_fragment patch with
+        | Ok body ->
+            Engine.Contribution (body, Message.open_patch_has_error patch)
+        | Error error -> Engine.Invalid_contribution error);
+    error_materialize = materialize_error;
   }
 
-let create_typed ~name schema =
+let create_typed ?parent ~name schema =
   {
     wide =
-      Observer.create_wide ~name ~origin:(Log.Declared (Schema.name schema));
+      Observer.create_wide
+        ?parent:(Option.map engine_wide parent)
+        ~name
+        ~origin:(Log.Declared (Schema.name schema))
+        ();
     builder = Schema.builder schema;
     materialize =
       (fun patch ->
-        Result.map
-          (fun body -> { Engine.body; has_error = Schema.has_error patch })
-          (Schema.body schema patch));
+        match Schema.body schema patch with
+        | Ok body -> Engine.Contribution (body, Schema.has_error patch)
+        | Error error -> Engine.Invalid_contribution error);
+    error_materialize = materialize_error;
   }
 
 let set handle author =
   Engine.contribute_wide handle.wide (fun () ->
       handle.materialize (author handle.builder))
 
+let contribute_error handle interpretation ?backtrace error =
+  Engine.contribute_wide handle.wide (fun () ->
+      handle.error_materialize interpretation ?backtrace error)
+
 let set_level handle = Engine.set_wide_level handle.wide
 let emit handle = Engine.emit_wide handle.wide
+
+module Terminal = struct
+  type ('builder, 'patch) log = ('builder, 'patch) t
+
+  type ('builder, 'patch) t = {
+    error : exn Error.t;
+    log : ('builder, 'patch) log;
+    claimed : bool Atomic.t;
+  }
+
+  let create ~error log = { error; log; claimed = Atomic.make false }
+
+  let claim terminal complete =
+    if Atomic.compare_and_set terminal.claimed false true then complete ()
+
+  let contribute_final terminal = function
+    | None -> ()
+    | Some author -> set terminal.log author
+
+  let complete terminal ?set:final () =
+    claim terminal (fun () ->
+        contribute_final terminal final;
+        emit terminal.log)
+
+  let fail terminal ?set:final ?backtrace raised =
+    claim terminal (fun () ->
+        contribute_final terminal final;
+        contribute_error terminal.log terminal.error ?backtrace raised;
+        emit terminal.log)
+
+  let cancel terminal ?set () = complete terminal ?set ()
+end

@@ -107,24 +107,7 @@ let int64 buffer value =
   then decimal_int64 buffer value
   else float buffer (Int64.to_float value)
 
-let string buffer value =
-  let length = String.length value in
-  let rec scan index first_escape has_non_ascii =
-    if index = length then (first_escape, has_non_ascii)
-    else
-      let character = String.unsafe_get value index in
-      let code = Char.code character in
-      let first_escape =
-        if
-          first_escape < 0
-          && (character = '"' || character = '\\' || code < 0x20)
-        then index
-        else first_escape
-      in
-      scan (index + 1) first_escape (has_non_ascii || code >= 0x80)
-  in
-  let first_escape, has_non_ascii = scan 0 (-1) false in
-  if has_non_ascii && not (Utf8.is_valid value) then raise Invalid_utf8;
+let append_string buffer value length first_escape =
   Buffer.add_char buffer '"';
   (if first_escape < 0 then Buffer.add_string buffer value
    else
@@ -145,11 +128,51 @@ let string buffer value =
      escaped 0 first_escape);
   Buffer.add_char buffer '"'
 
+let string buffer value =
+  let length = String.length value in
+  let rec scan index first_escape has_non_ascii =
+    if index = length then (first_escape, has_non_ascii)
+    else
+      let character = String.unsafe_get value index in
+      let code = Char.code character in
+      let first_escape =
+        if
+          first_escape < 0
+          && (character = '"' || character = '\\' || code < 0x20)
+        then index
+        else first_escape
+      in
+      scan (index + 1) first_escape (has_non_ascii || code >= 0x80)
+  in
+  let first_escape, has_non_ascii = scan 0 (-1) false in
+  if has_non_ascii && not (Utf8.is_valid value) then raise Invalid_utf8;
+  append_string buffer value length first_escape
+
+let trusted_string buffer value =
+  let length = String.length value in
+  let rec scan index first_escape =
+    if index = length then first_escape
+    else
+      let character = String.unsafe_get value index in
+      let code = Char.code character in
+      scan (index + 1)
+        (if
+           first_escape < 0
+           && (character = '"' || character = '\\' || code < 0x20)
+         then index
+         else first_escape)
+  in
+  append_string buffer value length (scan 0 (-1))
+
 let char buffer value = string buffer (String.make 1 value)
 let bytes buffer value = string buffer (Bytes.unsafe_to_string value)
 
 let name buffer value =
   string buffer value;
+  Buffer.add_char buffer ':'
+
+let trusted_name buffer value =
+  trusted_string buffer value;
   Buffer.add_char buffer ':'
 
 let array encode buffer values =

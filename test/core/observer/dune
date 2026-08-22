@@ -11,6 +11,10 @@
   (progn
    (run %{exe:observer_scenario.exe} not-initialized)
    (run %{exe:observer_scenario.exe} wide-lifecycle)
+   (run %{exe:observer_scenario.exe} causal-correlation)
+   (run %{exe:observer_scenario.exe} managed-execution)
+   (run %{exe:observer_scenario.exe} terminal-completion)
+   (run %{exe:observer_scenario.exe} operation-lookup-failure)
    (run %{exe:observer_scenario.exe} wide-inert-laziness)
    (run %{exe:observer_scenario.exe} wide-merge-and-seal)
    (run %{exe:observer_scenario.exe} wide-final-admission)
@@ -31,6 +35,7 @@
    (run %{exe:observer_scenario.exe} formatting-failed)
    (run %{exe:observer_scenario.exe} callback-containment)
    (run %{exe:observer_scenario.exe} console-and-drains)
+   (run %{exe:observer_scenario.exe} wide-console-and-drains)
    (run %{exe:observer_scenario.exe} ANSI-console)
    (run %{exe:observer_scenario.exe} console-raised)
    (run %{exe:observer_scenario.exe} disabled)

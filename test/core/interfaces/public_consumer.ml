@@ -5,6 +5,16 @@ module IO = struct
 
   let return value = value
   let bind value callback = callback value
+
+  let observe callback =
+    match callback () with
+    | value -> Observe.IO.Returned value
+    | exception raised ->
+        Observe.IO.Raised (raised, Printexc.get_raw_backtrace ())
+
+  let repropagate raised backtrace =
+    Printexc.raise_with_backtrace raised backtrace
+
   let create_key () = { value = None }
   let get () key = key.value
 
@@ -55,4 +65,65 @@ let text = fun (m : Observe.Logs.builder) -> m.text ~tag:"consumer" "message"
 let untyped = fun (m : Observe.Logs.builder) -> m.value (Observe.Value.int 1)
 let typed = fun (m : Observe.Logs.builder) -> m.typed event_schema { value = 1 }
 let pretty = Observe.Formatter.pretty Observe.Formatter.Plain
-let _ = (config, observer, text, untyped, typed, pretty)
+let wide = Observe.Logs.create_typed ~name:"consumer" event_schema
+let correlated () = Observe.Logs.info ~operation:wide text
+let scoped callback = Observer.with_wide observer wide callback
+
+let managed callback =
+  Observer.manage observer wide ~error:Observe.Error.exn callback
+
+let typed_child callback =
+  Observer.fork_typed observer ~parent:wide ~name:"child" event_schema
+    ~error:Observe.Error.exn callback
+
+let inspect log =
+  let body =
+    match Observe.Log.body log with
+    | Observe.Log.Text { tag; message } -> `Text (tag, message)
+    | Observe.Log.Structured { origin; value } ->
+        let origin =
+          match origin with
+          | Observe.Log.Open -> `Open
+          | Observe.Log.Declared name -> `Declared name
+        in
+        `Structured (origin, Observe.Value.frozen_to_json_string value)
+  in
+  let operation =
+    Option.map
+      (fun operation ->
+        ( Observe.Log.operation_name operation,
+          Observe.Log.operation_id operation,
+          Observe.Log.operation_parent_id operation,
+          Observe.Log.operation_duration_ns operation ))
+      (Observe.Log.operation log)
+  in
+  ( Observe.Log.kind log,
+    Observe.Log.correlation_id log,
+    operation,
+    Observe.Log.timestamp log,
+    Observe.Log.level log,
+    body )
+
+let extension_formatter =
+  Observe.Formatter.create (fun log ->
+      ignore (inspect log);
+      Observe.Formatter.format Observe.Formatter.json log)
+
+let extension_drain =
+  Observe.Drain.create (fun log ->
+      ignore (inspect log);
+      Observe.Drain.Accepted)
+
+let _ =
+  ( config,
+    observer,
+    text,
+    untyped,
+    typed,
+    pretty,
+    correlated,
+    scoped,
+    managed,
+    typed_child,
+    extension_formatter,
+    extension_drain )

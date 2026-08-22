@@ -9,4 +9,8 @@ val boundary : t -> string
 val payload : t -> string
 val logical_operations : t -> int
 val find : string -> t option
-val with_operation : t -> ((unit -> unit) -> (unit -> float option) -> 'a) -> 'a
+
+val with_operation :
+  t ->
+  ((unit -> unit) -> (unit -> float option) -> (unit -> float option) -> 'a) ->
+  'a

@@ -1,6 +1,21 @@
 module Observer = Observe.Make (Test_io.IO)
 
-let observer = Observer.create (Test_io.Host.create ())
+let take label values =
+  match !values with
+  | value :: rest ->
+      values := rest;
+      value
+  | [] -> Alcotest.failf "%s fixture was exhausted" label
+
+let monotonic = ref []
+let identities = ref []
+
+let observer =
+  Observer.create
+    (Test_io.Host.create
+       ~monotonic_now:(fun () -> Ok (take "monotonic" monotonic))
+       ~next_id:(fun () -> Ok (take "identity" identities))
+       ())
 
 type int_event = { value : int }
 
@@ -17,6 +32,16 @@ type int_event_builder = {
 let int_event_schema =
   Observe.Generated_runtime.record_schema int_event_t ~builder:(fun _ ->
       { typed = Fun.id })
+
+let int_event_patch ?value () =
+  Observe.Generated_runtime.record_patch int_event_schema
+    [
+      Option.map
+        (fun value ->
+          Observe.Generated_runtime.patch_field "value"
+            (Observe.Generated_runtime.fragment Observe.Type.int value))
+        value;
+    ]
 
 type reference_event = { reference : int ref }
 
@@ -198,6 +223,91 @@ let test_typed_values_are_frozen () =
     "later mutation cannot change the snapshot" "{\"reference\":3}"
     (structured_json log)
 
+let test_point_and_wide_semantic_capture () =
+  monotonic := [ 0L; 10L; 71_000_010L; 184_000_000L ];
+  identities := [ "op_parent"; "op_child" ];
+  let logs =
+    capture (Test_io.config ~environment:"test" ~version:"2" "capture-wide")
+      (fun capture ->
+        Observe.Logs.info (Test_io.text ~tag:"point" "ordinary");
+        let parent = Observe.Logs.create ~name:"checkout" () in
+        let child =
+          Observe.Logs.create_typed ~parent ~name:"validate-cart"
+            int_event_schema
+        in
+        Observe.Logs.info ~operation:parent
+          (Test_io.text ~tag:"correlated" "waiting");
+        Observe.Logs.set parent (fun m ->
+            let open Observe.Logs in
+            m.untyped
+            |+ m.field "cart_id" Observe.Type.string "cart-1"
+            |> m.seal);
+        Observe.Logs.set child (fun m -> m.typed (int_event_patch ~value:7 ()));
+        Observe.Logs.emit child;
+        Observe.Logs.emit parent;
+        Observe.Capture.logs capture)
+  in
+  match logs with
+  | [ point; correlated; child; parent ] ->
+      Alcotest.(check bool)
+        "point kind" true
+        (Observe.Log.kind point = Observe.Log.Point);
+      Alcotest.(check (option string))
+        "ordinary point has no correlation" None
+        (Observe.Log.correlation_id point);
+      Alcotest.(check (option string))
+        "correlated point identity" (Some "op_parent")
+        (Observe.Log.correlation_id correlated);
+      Alcotest.(check bool)
+        "correlated observation remains a point" true
+        (Observe.Log.kind correlated = Observe.Log.Point);
+      let child_operation = Option.get (Observe.Log.operation child) in
+      Alcotest.(check string)
+        "child name" "validate-cart"
+        (Observe.Log.operation_name child_operation);
+      Alcotest.(check string)
+        "child identity" "op_child"
+        (Observe.Log.operation_id child_operation);
+      Alcotest.(check (option string))
+        "child parent" (Some "op_parent")
+        (Observe.Log.operation_parent_id child_operation);
+      Alcotest.(check int64)
+        "child duration" 71_000_000L
+        (Observe.Log.operation_duration_ns child_operation);
+      (match Observe.Log.body child with
+      | Observe.Log.Structured
+          { origin = Observe.Log.Declared "int_event"; value } ->
+          Alcotest.(check string)
+            "sparse declared snapshot" "{\"value\":7}"
+            (Observe.Value.frozen_to_json_string value)
+      | Observe.Log.Text _ | Observe.Log.Structured _ ->
+          Alcotest.fail "expected declared child body");
+      let parent_operation = Option.get (Observe.Log.operation parent) in
+      Alcotest.(check string)
+        "parent name" "checkout"
+        (Observe.Log.operation_name parent_operation);
+      Alcotest.(check string)
+        "parent identity" "op_parent"
+        (Observe.Log.operation_id parent_operation);
+      Alcotest.(check (option string))
+        "parent has no parent" None
+        (Observe.Log.operation_parent_id parent_operation);
+      Alcotest.(check int64)
+        "parent duration" 184_000_000L
+        (Observe.Log.operation_duration_ns parent_operation);
+      Alcotest.(check string)
+        "independent parent body" "{\"cart_id\":\"cart-1\"}"
+        (structured_json parent);
+      List.iter
+        (fun log ->
+          Alcotest.(check int64)
+            "controlled completion timestamp" 42L
+            (Observe.Log.timestamp log |> Observe.Timestamp.to_unix_ns))
+        logs
+  | logs ->
+      Alcotest.failf "expected four captured observations, received %d"
+        (List.length logs)
+
 let () =
   Alcotest.run "observe-capture-contracts"
     [
@@ -211,5 +321,7 @@ let () =
             test_admission_and_diagnostics;
           Alcotest.test_case "typed snapshot semantics" `Quick
             test_typed_values_are_frozen;
+          Alcotest.test_case "point and wide semantic inspection" `Quick
+            test_point_and_wide_semantic_capture;
         ] );
     ]

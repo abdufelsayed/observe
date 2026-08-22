@@ -29,25 +29,34 @@ type builder = private {
 }
 
 type author = builder -> message
-
-val log : level:Level.t -> author -> unit
-(** Auto-emit one point log at a computed level. The active route and level are
-    checked before [author] runs. *)
-
-val debug : author -> unit
-val info : author -> unit
-val warn : author -> unit
-val error : author -> unit
-val ( |+ ) : object_ -> field -> object_
-
 type ('builder, 'patch) t
 
-val create : name:string -> unit -> (open_builder, open_patch) t
+val log :
+  ?operation:('operation_builder, 'operation_patch) t ->
+  level:Level.t ->
+  author ->
+  unit
+(** Auto-emit one point log at a computed level. The active route and level are
+    checked before [author] runs. [operation] explicitly associates the separate
+    point observation with that wide-log occurrence. *)
+
+val debug : ?operation:('builder, 'patch) t -> author -> unit
+val info : ?operation:('builder, 'patch) t -> author -> unit
+val warn : ?operation:('builder, 'patch) t -> author -> unit
+val error : ?operation:('builder, 'patch) t -> author -> unit
+val ( |+ ) : object_ -> field -> object_
+
+val create :
+  ?parent:('parent_builder, 'parent_patch) t ->
+  name:string ->
+  unit ->
+  (open_builder, open_patch) t
 (** Start an empty open wide log at [Info]. [name] must be non-empty. When no
     route can accept observations, or a required runtime capability is
     unavailable, the returned handle is inert. *)
 
 val create_typed :
+  ?parent:('parent_builder, 'parent_patch) t ->
   name:string ->
   ('record, 'builder) Schema.t ->
   ('builder, 'record Schema.patch) t
@@ -67,3 +76,39 @@ val set_level : ('builder, 'patch) t -> Level.t -> unit
 val emit : ('builder, 'patch) t -> unit
 (** Seal and attempt to publish the wide log exactly once. Admission uses the
     final level. Completion failures remain sealed and are diagnosed. *)
+
+module Terminal : sig
+  type ('builder, 'patch) log = ('builder, 'patch) t
+  type ('builder, 'patch) t
+
+  val create :
+    error:exn Error.t -> ('builder, 'patch) log -> ('builder, 'patch) t
+  (** Create a single-use terminal owner for an existing wide log. *)
+
+  val complete :
+    ('builder, 'patch) t -> ?set:('builder -> 'patch) -> unit -> unit
+
+  val fail :
+    ('builder, 'patch) t ->
+    ?set:('builder -> 'patch) ->
+    ?backtrace:Printexc.raw_backtrace ->
+    exn ->
+    unit
+
+  val cancel : ('builder, 'patch) t -> ?set:('builder -> 'patch) -> unit -> unit
+  (** The first terminal action wins and emits the same ordinary lifecycle. Its
+      optional [set] contribution is authored only by that winner and before
+      emission. [fail] then contributes the selected safe error interpretation;
+      cancellation contributes no inferred fields or level. *)
+end
+
+val engine_wide : ('builder, 'patch) t -> Engine.wide
+(** Internal bridge used by runtime compositions. *)
+
+val contribute_error :
+  ('builder, 'patch) t ->
+  'error Error.t ->
+  ?backtrace:Printexc.raw_backtrace ->
+  'error ->
+  unit
+(** Internal schema-independent error contribution used by managed runtimes. *)

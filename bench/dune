@@ -6,7 +6,9 @@
   observe-lwt-unix
   observe-fs-lwt-unix
   bechamel
+  lwt
   lwt.unix
+  threads.posix
   unix)
  (preprocess
   (pps observe.ppx)))

@@ -30,6 +30,17 @@ let contains text fragment =
   in
   fragment_length = 0 || search 0
 
+let occurrences text fragment =
+  let text_length = String.length text in
+  let fragment_length = String.length fragment in
+  let rec count offset total =
+    if offset + fragment_length > text_length then total
+    else if String.equal (String.sub text offset fragment_length) fragment then
+      count (offset + fragment_length) (total + 1)
+    else count (offset + 1) total
+  in
+  if fragment_length = 0 then 0 else count 0 0
+
 let init_race participants =
   let participants = max 2 participants in
   let observer = Observer.create (Test_io.Host.create ()) in
@@ -283,6 +294,63 @@ let wide_set_level_emit_race work =
           (Observe.Level.equal Observe.Level.Error (Observe.Log.level log))
   | _ -> Alcotest.fail "full wide race did not publish exactly once"
 
+let terminal_race work =
+  let work = max 3 work in
+  let observer = Observer.create (Test_io.Host.create ()) in
+  let result =
+    Observer.with_capture observer (config ()) (fun capture ->
+        let wide = Observe.Logs.create ~name:"terminal-race" () in
+        let terminal =
+          Observe.Logs.Terminal.create ~error:Observe.Error.exn wide
+        in
+        let await_start = barrier work in
+        let threads =
+          Array.init work (fun index ->
+              Thread.create
+                (fun () ->
+                  await_start ();
+                  let set (m : Observe.Logs.open_builder) =
+                    let open Observe.Logs in
+                    m.untyped
+                    |+ m.field
+                         ("terminal_" ^ string_of_int index)
+                         Observe.Type.int index
+                    |> m.seal
+                  in
+                  match index mod 3 with
+                  | 0 -> Observe.Logs.Terminal.complete terminal ~set ()
+                  | 1 ->
+                      Observe.Logs.Terminal.fail terminal ~set
+                        (Failure "terminal-race")
+                  | _ -> Observe.Logs.Terminal.cancel terminal ~set ())
+                ())
+        in
+        Array.iter Thread.join threads;
+        Test_io.Direct.return capture)
+  in
+  let capture =
+    match result with
+    | Ok capture -> capture
+    | Error _ -> Alcotest.fail "terminal race capture was rejected"
+  in
+  match Observe.Capture.logs capture with
+  | [ log ] ->
+      Alcotest.(check int)
+        "terminal race bypasses repeated emit misuse" 0
+        (Test_io.diagnostic_count
+           (Observe.Capture.diagnostics capture)
+           Observe.Diagnostics.Post_seal_emit);
+      let json =
+        match Observe.Log.body log with
+        | Observe.Log.Text _ -> Alcotest.fail "terminal body was text"
+        | Observe.Log.Structured { value; _ } ->
+            Observe.Value.frozen_to_json_string value
+      in
+      Alcotest.(check int)
+        "only winning terminal callback authors final facts" 1
+        (occurrences json "\"terminal_")
+  | _ -> Alcotest.fail "terminal race did not publish exactly once"
+
 let () =
   let mode = if Array.length Sys.argv > 1 then Sys.argv.(1) else "missing" in
   let argument index ~default =
@@ -298,4 +366,5 @@ let () =
   | "diagnostic-counting" -> diagnostic_counting work
   | "wide-contribution-and-seal" -> wide_contribution_and_seal work
   | "wide-set-level-emit-race" -> wide_set_level_emit_race work
+  | "terminal-race" -> terminal_race work
   | _ -> Alcotest.failf "unknown concurrency scenario: %s" mode

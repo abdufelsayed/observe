@@ -3,6 +3,7 @@ type suite = Component | Core | Lwt_unix | Fs_lwt_unix
 type prepared = {
   operation : unit -> unit;
   retained_bytes : unit -> float option;
+  encoded_bytes : unit -> float option;
   cleanup : unit -> unit;
 }
 
@@ -30,10 +31,10 @@ let payload scenario = scenario.payload
 let logical_operations scenario = scenario.logical_operations
 let consume value = ignore (Sys.opaque_identity value)
 let no_cleanup () = ()
-let no_retained_size () = None
+let no_size () = None
 
-let prepared ?(retained_bytes = no_retained_size) operation =
-  { operation; retained_bytes; cleanup = no_cleanup }
+let prepared ?(retained_bytes = no_size) ?(encoded_bytes = no_size) operation =
+  { operation; retained_bytes; encoded_bytes; cleanup = no_cleanup }
 
 let config ?(environment = "production") ?(console = Observe.Config.Auto)
     ?(min_level = Observe.Level.Debug) ?(drains = []) () =
@@ -74,12 +75,12 @@ let retained_core_operation operation =
     (config ~console:Observe.Config.Silent ~drains:[ drain ] ());
   prepared ~retained_bytes operation
 
-let captured_log make_message =
+let captured_observation emit =
   let observer = Observer.create (Benchmark_io.create ()) in
   match
     Observer.with_capture observer (config ~console:Observe.Config.Silent ())
       ~capacity:1 (fun capture ->
-        Observe.Logs.info (make_message ());
+        emit ();
         match Observe.Capture.logs capture with
         | [ log ] -> log
         | _ -> failwith "benchmark capture did not retain exactly one log")
@@ -87,12 +88,36 @@ let captured_log make_message =
   | Ok log -> log
   | Error _ -> failwith "benchmark capture could not register its I/O"
 
-let formatter_operation formatter make_message =
-  let log = captured_log make_message in
-  prepared (fun () ->
+let captured_log make_message =
+  captured_observation (fun () -> Observe.Logs.info (make_message ()))
+
+let formatter_observation formatter emit =
+  let log = captured_observation emit in
+  let encoded_bytes () =
+    match Observe.Formatter.format formatter log with
+    | Ok output -> Some (float_of_int (String.length output))
+    | Error _ -> None
+  in
+  prepared ~encoded_bytes (fun () ->
       match Observe.Formatter.format formatter log with
       | Ok output -> consume output
       | Error _ -> failwith "benchmark formatter rejected its fixture")
+
+let formatter_operation formatter make_message =
+  formatter_observation formatter (fun () ->
+      Observe.Logs.info (make_message ()))
+
+let capture_operation emit =
+  let observer = Observer.create (Benchmark_io.create ()) in
+  prepared (fun () ->
+      match
+        Observer.with_capture observer
+          (config ~console:Observe.Config.Silent ()) ~capacity:1 (fun capture ->
+            emit ();
+            consume (Observe.Capture.logs capture))
+      with
+      | Ok () -> ()
+      | Error _ -> failwith "benchmark capture could not register its I/O")
 
 let redirect_standard_error () =
   let saved = Unix.dup Unix.stderr in
@@ -106,16 +131,17 @@ let redirect_standard_error () =
       Unix.dup2 saved Unix.stderr;
       Unix.close saved)
 
-let lwt_unix_operation config make_message =
+let lwt_unix_emit config emit =
   let restore = redirect_standard_error () in
   try
     Observe_lwt_unix.init_exn config;
     {
       operation =
         (fun () ->
-          Observe.Logs.info (make_message ());
+          emit ();
           Lwt_main.run (Observe_lwt_unix.flush ()));
-      retained_bytes = no_retained_size;
+      retained_bytes = no_size;
+      encoded_bytes = no_size;
       cleanup =
         (fun () ->
           Fun.protect ~finally:restore (fun () ->
@@ -125,6 +151,9 @@ let lwt_unix_operation config make_message =
     let backtrace = Printexc.get_raw_backtrace () in
     restore ();
     Printexc.raise_with_backtrace exception_raised backtrace
+
+let lwt_unix_operation config make_message =
+  lwt_unix_emit config (fun () -> Observe.Logs.info (make_message ()))
 
 let temporary_directory () =
   let path = Filename.temp_file "observe-bench-fs" ".dir" in
@@ -143,7 +172,7 @@ let rec remove_tree path =
       Sys.remove path
   | exception Unix.Unix_error (Unix.ENOENT, _, _) -> ()
 
-let fs_lwt_unix_operation ~batch_size make_message =
+let fs_lwt_unix_emit ~batch_size emit =
   let directory = temporary_directory () in
   try
     let drain =
@@ -155,10 +184,11 @@ let fs_lwt_unix_operation ~batch_size make_message =
       operation =
         (fun () ->
           for _ = 1 to batch_size do
-            Observe.Logs.info (make_message ())
+            emit ()
           done;
           Lwt_main.run (Observe_lwt_unix.flush ()));
-      retained_bytes = no_retained_size;
+      retained_bytes = no_size;
+      encoded_bytes = no_size;
       cleanup =
         (fun () ->
           Fun.protect
@@ -169,6 +199,9 @@ let fs_lwt_unix_operation ~batch_size make_message =
     let backtrace = Printexc.get_raw_backtrace () in
     remove_tree directory;
     Printexc.raise_with_backtrace exception_raised backtrace
+
+let fs_lwt_unix_operation ~batch_size make_message =
+  fs_lwt_unix_emit ~batch_size (fun () -> Observe.Logs.info (make_message ()))
 
 let make ?(logical_operations = 1) ~name ~suite ~boundary ~payload prepare =
   { name; suite; boundary; payload; logical_operations; prepare }
@@ -201,6 +234,268 @@ let opaque () (m : Observe.Logs.builder) =
 
 let retained_wide_operation operation = retained_core_operation operation
 
+let contended_wide_operation mode =
+  let workers = 4 in
+  let contributions_per_worker = 16 in
+  let drain = accepted_drain () in
+  let state = Benchmark_io.create () in
+  let observer = Observer.create state in
+  Observer.init_exn observer
+    (config ~console:Observe.Config.Silent ~drains:[ drain ] ());
+  let mutex = Mutex.create () in
+  let ready = Condition.create () in
+  let completed = Condition.create () in
+  let generation = ref 0 in
+  let finished = ref 0 in
+  let stopping = ref false in
+  let current :
+      (Observe.Logs.open_builder, Observe.Logs.open_patch) Observe.Logs.t option
+      ref =
+    ref None
+  in
+  let field_names =
+    Array.init (workers * contributions_per_worker) (fun index ->
+        "field_" ^ string_of_int index)
+  in
+  let threads =
+    Array.init workers (fun worker ->
+        Thread.create
+          (fun () ->
+            let observed = ref 0 in
+            let rec work () =
+              Mutex.lock mutex;
+              while (not !stopping) && !generation = !observed do
+                Condition.wait ready mutex
+              done;
+              if !stopping then Mutex.unlock mutex
+              else
+                let wide = Option.get !current in
+                let assigned = !generation in
+                Mutex.unlock mutex;
+                for offset = 0 to contributions_per_worker - 1 do
+                  let index = (worker * contributions_per_worker) + offset in
+                  Observe.Logs.set wide (fun m ->
+                      let open Observe.Logs in
+                      m.untyped
+                      |+ m.field
+                           (match mode with
+                           | `Accumulate -> field_names.(index)
+                           | `Replace -> "value")
+                           Observe.Type.int index
+                      |> m.seal)
+                done;
+                Mutex.lock mutex;
+                observed := assigned;
+                incr finished;
+                if !finished = workers then Condition.signal completed;
+                Mutex.unlock mutex;
+                work ()
+            in
+            work ())
+          ())
+  in
+  {
+    operation =
+      (fun () ->
+        let wide = Observe.Logs.create ~name:"contended-wide" () in
+        Mutex.lock mutex;
+        current := Some wide;
+        finished := 0;
+        incr generation;
+        Condition.broadcast ready;
+        while !finished < workers do
+          Condition.wait completed mutex
+        done;
+        current := None;
+        Mutex.unlock mutex;
+        Observe.Logs.emit wide);
+    retained_bytes = no_size;
+    encoded_bytes = no_size;
+    cleanup =
+      (fun () ->
+        Mutex.lock mutex;
+        stopping := true;
+        Condition.broadcast ready;
+        Mutex.unlock mutex;
+        Array.iter Thread.join threads);
+  }
+
+let retained_core_with_observer make_operation =
+  let drain, retained_bytes = retained_log_probe () in
+  let state = Benchmark_io.create () in
+  let observer = Observer.create state in
+  Observer.init_exn observer
+    (config ~console:Observe.Config.Silent ~drains:[ drain ] ());
+  prepared ~retained_bytes (make_operation observer)
+
+let open_wide_create () = Observe.Logs.create ~name:"open-wide" () |> consume
+
+let open_wide_create_set () =
+  let wide = Observe.Logs.create ~name:"open-wide" () in
+  Observe.Logs.set wide (fun m ->
+      let open Observe.Logs in
+      m.untyped
+      |+ m.field "action" Observe.Type.string "user_login"
+      |+ m.field "user_id" Observe.Type.int 42
+      |> m.seal);
+  consume wide
+
+let open_wide_create_emit () =
+  let wide = Observe.Logs.create ~name:"open-wide" () in
+  Observe.Logs.emit wide
+
+let open_wide_repeated () =
+  let wide = Observe.Logs.create ~name:"open-wide" () in
+  for value = 1 to 4 do
+    Observe.Logs.set wide (fun m ->
+        let open Observe.Logs in
+        m.untyped |+ m.field "value" Observe.Type.int value |> m.seal)
+  done;
+  Observe.Logs.emit wide
+
+let typed_wide_create () =
+  Observe.Logs.create_typed ~name:"typed-wide" Payload.small_schema |> consume
+
+let typed_wide_create_set () =
+  let wide =
+    Observe.Logs.create_typed ~name:"typed-wide" Payload.small_schema
+  in
+  Observe.Logs.set wide (fun m ->
+      m.typed
+        (Payload.small_patch ~action:"user_login" ~user_id:42 ~remembered:true
+           ()));
+  consume wide
+
+let typed_wide_repeated () =
+  let wide =
+    Observe.Logs.create_typed ~name:"typed-wide" Payload.small_schema
+  in
+  for user_id = 1 to 4 do
+    Observe.Logs.set wide (fun m -> m.typed (Payload.small_patch ~user_id ()))
+  done;
+  Observe.Logs.emit wide
+
+let field_names = Array.init 64 (fun index -> "field-" ^ string_of_int index)
+
+let open_wide_accumulate count () =
+  let wide = Observe.Logs.create ~name:"open-wide-accumulate" () in
+  for index = 0 to count - 1 do
+    Observe.Logs.set wide (fun m ->
+        let open Observe.Logs in
+        m.untyped
+        |+ m.field field_names.(index) Observe.Type.int index
+        |> m.seal)
+  done;
+  Observe.Logs.emit wide
+
+let open_wide_replace count () =
+  let wide = Observe.Logs.create ~name:"open-wide-replace" () in
+  for value = 1 to count do
+    Observe.Logs.set wide (fun m ->
+        let open Observe.Logs in
+        m.untyped |+ m.field "value" Observe.Type.int value |> m.seal)
+  done;
+  Observe.Logs.emit wide
+
+let typed_wide_replace count () =
+  let wide =
+    Observe.Logs.create_typed ~name:"typed-wide-replace" Payload.small_schema
+  in
+  for user_id = 1 to count do
+    Observe.Logs.set wide (fun m -> m.typed (Payload.small_patch ~user_id ()))
+  done;
+  Observe.Logs.emit wide
+
+let open_wide_error () =
+  let wide = Observe.Logs.create ~name:"open-wide" () in
+  Observe.Logs.set wide (fun m ->
+      m.error Observe.Error.exn (Failure "benchmark failure"));
+  Observe.Logs.emit wide
+
+let open_wide_set_level () =
+  let wide = Observe.Logs.create ~name:"open-wide" () in
+  Observe.Logs.set_level wide Observe.Level.Warn;
+  Observe.Logs.emit wide
+
+let explicit_correlated_point wide () =
+  Observe.Logs.info ~operation:wide (text ())
+
+let ambient_correlated_point observer wide () =
+  Observer.with_wide observer wide (fun () -> Observe.Logs.info (text ()))
+
+let managed_success observer () =
+  let wide = Observe.Logs.create ~name:"managed-success" () in
+  consume
+    (Observer.manage observer wide ~error:Observe.Error.exn (fun () -> 42))
+
+let managed_failure observer () =
+  let wide = Observe.Logs.create ~name:"managed-failure" () in
+  match
+    Observer.manage observer wide ~error:Observe.Error.exn (fun () ->
+        raise (Failure "managed benchmark"))
+  with
+  | _ -> ()
+  | exception Failure _ -> ()
+
+let managed_child observer () =
+  let parent = Observe.Logs.create ~name:"managed-parent" () in
+  consume
+    (Observer.fork observer ~parent ~name:"managed-child"
+       ~error:Observe.Error.exn (fun _child -> 42))
+
+let lwt_managed_prepare mode =
+  let restore = redirect_standard_error () in
+  let drain = accepted_drain () in
+  try
+    Observe_lwt_unix.init_exn
+      (config ~console:Observe.Config.Silent ~drains:[ drain ] ());
+    let operation () =
+      match mode with
+      | `Success ->
+          let wide = Observe.Logs.create ~name:"lwt-managed-success" () in
+          consume
+            (Lwt_main.run
+               (Observe_lwt_unix.manage wide ~error:Observe.Error.exn (fun () ->
+                    Lwt.return 42)))
+      | `Failure ->
+          let wide = Observe.Logs.create ~name:"lwt-managed-failure" () in
+          Lwt_main.run
+            (Lwt.catch
+               (fun () ->
+                 Observe_lwt_unix.manage wide ~error:Observe.Error.exn
+                   (fun () -> Lwt.fail (Failure "managed benchmark")))
+               (fun _ -> Lwt.return_unit))
+      | `Cancellation ->
+          let wide = Observe.Logs.create ~name:"lwt-managed-cancel" () in
+          let pending, _resolver = Lwt.task () in
+          let managed =
+            Observe_lwt_unix.manage wide ~error:Observe.Error.exn (fun () ->
+                pending)
+          in
+          Lwt.cancel managed;
+          Lwt_main.run
+            (Lwt.catch (fun () -> managed) (fun _ -> Lwt.return_unit))
+      | `Child ->
+          let parent = Observe.Logs.create ~name:"lwt-parent" () in
+          consume
+            (Lwt_main.run
+               (Observe_lwt_unix.fork ~parent ~name:"lwt-child"
+                  ~error:Observe.Error.exn (fun _child -> Lwt.return 42)))
+    in
+    {
+      operation;
+      retained_bytes = no_size;
+      encoded_bytes = no_size;
+      cleanup =
+        (fun () ->
+          Fun.protect ~finally:restore (fun () ->
+              Lwt_main.run (Observe_lwt_unix.shutdown ())));
+    }
+  with exception_raised ->
+    let backtrace = Printexc.get_raw_backtrace () in
+    restore ();
+    Printexc.raise_with_backtrace exception_raised backtrace
+
 let open_wide () =
   let wide = Observe.Logs.create ~name:"open-wide" () in
   Observe.Logs.set wide (fun m ->
@@ -210,6 +505,17 @@ let open_wide () =
       |+ m.field "user_id" Observe.Type.int 42
       |> m.seal);
   Observe.Logs.emit wide
+
+let child_wide () =
+  let parent = Observe.Logs.create ~name:"parent-wide" () in
+  let child = Observe.Logs.create ~parent ~name:"child-wide" () in
+  Observe.Logs.set child (fun m ->
+      let open Observe.Logs in
+      m.untyped
+      |+ m.field "action" Observe.Type.string "authorize"
+      |+ m.field "result" Observe.Type.string "accepted"
+      |> m.seal);
+  Observe.Logs.emit child
 
 let typed_wide () =
   let wide =
@@ -257,6 +563,9 @@ let component_scenarios =
     make ~name:"component/formatter-json/typed-small" ~suite:Component
       ~boundary:"formatter-json" ~payload:"typed-small" (fun () ->
         formatter_operation Observe.Formatter.json typed_small);
+    make ~name:"component/formatter-ndjson/untyped-small" ~suite:Component
+      ~boundary:"formatter-ndjson" ~payload:"untyped-small" (fun () ->
+        formatter_operation Observe.Formatter.ndjson untyped_small);
     make ~name:"component/formatter-json/untyped-nested" ~suite:Component
       ~boundary:"formatter-json" ~payload:"untyped-nested" (fun () ->
         formatter_operation Observe.Formatter.json untyped_nested);
@@ -273,6 +582,26 @@ let component_scenarios =
         formatter_operation
           (Observe.Formatter.pretty Observe.Formatter.Truecolor)
           typed_nested);
+    make ~name:"component/capture/point-open" ~suite:Component
+      ~boundary:"capture-point" ~payload:"open-small" (fun () ->
+        capture_operation (fun () -> Observe.Logs.info (open_small ())));
+    make ~name:"component/capture/wide-open" ~suite:Component
+      ~boundary:"capture-wide" ~payload:"open-wide" (fun () ->
+        capture_operation open_wide);
+    make ~name:"component/formatter-json/wide-parent" ~suite:Component
+      ~boundary:"formatter-json" ~payload:"wide-parent" (fun () ->
+        formatter_observation Observe.Formatter.json open_wide);
+    make ~name:"component/formatter-ndjson/wide-parent" ~suite:Component
+      ~boundary:"formatter-ndjson" ~payload:"wide-parent" (fun () ->
+        formatter_observation Observe.Formatter.ndjson open_wide);
+    make ~name:"component/formatter-pretty/wide-parent" ~suite:Component
+      ~boundary:"formatter-pretty" ~payload:"wide-parent" (fun () ->
+        formatter_observation
+          (Observe.Formatter.pretty Observe.Formatter.Truecolor)
+          open_wide);
+    make ~name:"component/formatter-json/wide-child" ~suite:Component
+      ~boundary:"formatter-json" ~payload:"wide-child" (fun () ->
+        formatter_observation Observe.Formatter.json child_wide);
   ]
 
 let core_scenarios =
@@ -312,8 +641,94 @@ let core_scenarios =
     make ~name:"core/wide/open-fragment" ~suite:Core
       ~boundary:"open-wide-fragment" ~payload:"open-small" (fun () ->
         retained_wide_operation open_wide);
+    make ~name:"core/wide-stage/open-create" ~suite:Core ~boundary:"wide-create"
+      ~payload:"open-empty" (fun () -> retained_wide_operation open_wide_create);
+    make ~name:"core/wide-stage/open-create-set" ~suite:Core
+      ~boundary:"wide-create-set" ~payload:"open-small" (fun () ->
+        retained_wide_operation open_wide_create_set);
+    make ~name:"core/wide-stage/open-create-emit" ~suite:Core
+      ~boundary:"wide-create-emit" ~payload:"open-empty" (fun () ->
+        retained_wide_operation open_wide_create_emit);
+    make ~name:"core/wide-stage/open-repeated" ~suite:Core
+      ~boundary:"wide-repeated" ~payload:"open-four-updates" (fun () ->
+        retained_wide_operation open_wide_repeated);
     make ~name:"core/wide/typed-patch" ~suite:Core ~boundary:"typed-wide-patch"
       ~payload:"typed-small" (fun () -> retained_wide_operation typed_wide);
+    make ~name:"core/wide-stage/typed-create" ~suite:Core
+      ~boundary:"wide-create" ~payload:"typed-empty" (fun () ->
+        retained_wide_operation typed_wide_create);
+    make ~name:"core/wide-stage/typed-create-set" ~suite:Core
+      ~boundary:"wide-create-set" ~payload:"typed-small" (fun () ->
+        retained_wide_operation typed_wide_create_set);
+    make ~name:"core/wide-stage/typed-repeated" ~suite:Core
+      ~boundary:"wide-repeated" ~payload:"typed-four-updates" (fun () ->
+        retained_wide_operation typed_wide_repeated);
+    make ~name:"core/wide-scale/open-accumulate-1" ~suite:Core
+      ~boundary:"wide-scale" ~payload:"open-1-field" (fun () ->
+        retained_wide_operation (open_wide_accumulate 1));
+    make ~name:"core/wide-scale/open-accumulate-4" ~suite:Core
+      ~boundary:"wide-scale" ~payload:"open-4-fields" (fun () ->
+        retained_wide_operation (open_wide_accumulate 4));
+    make ~name:"core/wide-scale/open-accumulate-16" ~suite:Core
+      ~boundary:"wide-scale" ~payload:"open-16-fields" (fun () ->
+        retained_wide_operation (open_wide_accumulate 16));
+    make ~name:"core/wide-scale/open-accumulate-64" ~suite:Core
+      ~boundary:"wide-scale" ~payload:"open-64-fields" (fun () ->
+        retained_wide_operation (open_wide_accumulate 64));
+    make ~name:"core/wide-scale/open-replace-1" ~suite:Core
+      ~boundary:"wide-scale" ~payload:"open-1-replacement" (fun () ->
+        retained_wide_operation (open_wide_replace 1));
+    make ~name:"core/wide-scale/open-replace-4" ~suite:Core
+      ~boundary:"wide-scale" ~payload:"open-4-replacements" (fun () ->
+        retained_wide_operation (open_wide_replace 4));
+    make ~name:"core/wide-scale/open-replace-16" ~suite:Core
+      ~boundary:"wide-scale" ~payload:"open-16-replacements" (fun () ->
+        retained_wide_operation (open_wide_replace 16));
+    make ~name:"core/wide-scale/open-replace-64" ~suite:Core
+      ~boundary:"wide-scale" ~payload:"open-64-replacements" (fun () ->
+        retained_wide_operation (open_wide_replace 64));
+    make ~name:"core/wide-scale/typed-replace-1" ~suite:Core
+      ~boundary:"wide-scale" ~payload:"typed-1-replacement" (fun () ->
+        retained_wide_operation (typed_wide_replace 1));
+    make ~name:"core/wide-scale/typed-replace-4" ~suite:Core
+      ~boundary:"wide-scale" ~payload:"typed-4-replacements" (fun () ->
+        retained_wide_operation (typed_wide_replace 4));
+    make ~name:"core/wide-scale/typed-replace-16" ~suite:Core
+      ~boundary:"wide-scale" ~payload:"typed-16-replacements" (fun () ->
+        retained_wide_operation (typed_wide_replace 16));
+    make ~name:"core/wide-scale/typed-replace-64" ~suite:Core
+      ~boundary:"wide-scale" ~payload:"typed-64-replacements" (fun () ->
+        retained_wide_operation (typed_wide_replace 64));
+    make ~logical_operations:64
+      ~name:"core/wide-contention/open-accumulate-4x16" ~suite:Core
+      ~boundary:"wide-contention" ~payload:"open-64-fields" (fun () ->
+        contended_wide_operation `Accumulate);
+    make ~logical_operations:64 ~name:"core/wide-contention/open-replace-4x16"
+      ~suite:Core ~boundary:"wide-contention" ~payload:"open-64-replacements"
+      (fun () -> contended_wide_operation `Replace);
+    make ~name:"core/wide-stage/open-error" ~suite:Core ~boundary:"wide-error"
+      ~payload:"open-error" (fun () -> retained_wide_operation open_wide_error);
+    make ~name:"core/wide-stage/open-set-level" ~suite:Core
+      ~boundary:"wide-level" ~payload:"open-empty" (fun () ->
+        retained_wide_operation open_wide_set_level);
+    make ~name:"core/correlation/explicit-point" ~suite:Core
+      ~boundary:"correlated-point" ~payload:"tagged-text" (fun () ->
+        let wide = Observe.Logs.create ~name:"point-parent" () in
+        retained_core_operation (explicit_correlated_point wide));
+    make ~name:"core/correlation/ambient-point" ~suite:Core
+      ~boundary:"correlated-point" ~payload:"tagged-text" (fun () ->
+        retained_core_with_observer (fun observer ->
+            let wide = Observe.Logs.create ~name:"point-parent" () in
+            ambient_correlated_point observer wide));
+    make ~name:"core/managed/success" ~suite:Core ~boundary:"managed-success"
+      ~payload:"open-empty" (fun () ->
+        retained_core_with_observer (fun observer -> managed_success observer));
+    make ~name:"core/managed/failure" ~suite:Core ~boundary:"managed-failure"
+      ~payload:"open-error" (fun () ->
+        retained_core_with_observer (fun observer -> managed_failure observer));
+    make ~name:"core/managed/child" ~suite:Core ~boundary:"managed-child"
+      ~payload:"open-empty" (fun () ->
+        retained_core_with_observer (fun observer -> managed_child observer));
     make ~name:"core/wide/nested-patch" ~suite:Core
       ~boundary:"nested-wide-patch" ~payload:"typed-nested" (fun () ->
         retained_wide_operation nested_typed_wide);
@@ -374,6 +789,26 @@ let lwt_unix_scenarios =
         lwt_unix_operation
           (config ~environment:"development" ~console:Observe.Config.Pretty ())
           typed_nested);
+    make ~name:"lwt-unix/json/wide-parent" ~suite:Lwt_unix ~boundary:"json"
+      ~payload:"wide-parent" (fun () ->
+        lwt_unix_emit (config ~console:Observe.Config.Ndjson ()) open_wide);
+    make ~name:"lwt-unix/pretty/wide-child" ~suite:Lwt_unix ~boundary:"pretty"
+      ~payload:"wide-child" (fun () ->
+        lwt_unix_emit
+          (config ~environment:"development" ~console:Observe.Config.Pretty ())
+          child_wide);
+    make ~name:"lwt-unix/managed/success" ~suite:Lwt_unix
+      ~boundary:"managed-success" ~payload:"open-empty" (fun () ->
+        lwt_managed_prepare `Success);
+    make ~name:"lwt-unix/managed/failure" ~suite:Lwt_unix
+      ~boundary:"managed-failure" ~payload:"open-error" (fun () ->
+        lwt_managed_prepare `Failure);
+    make ~name:"lwt-unix/managed/cancellation" ~suite:Lwt_unix
+      ~boundary:"managed-cancellation" ~payload:"open-empty" (fun () ->
+        lwt_managed_prepare `Cancellation);
+    make ~name:"lwt-unix/managed/child" ~suite:Lwt_unix
+      ~boundary:"managed-child" ~payload:"open-empty" (fun () ->
+        lwt_managed_prepare `Child);
   ]
 
 let fs_lwt_unix_scenarios =
@@ -384,6 +819,9 @@ let fs_lwt_unix_scenarios =
     make ~name:"fs-lwt-unix/completed/typed-small" ~suite:Fs_lwt_unix
       ~boundary:"completed-write" ~payload:"typed-small" (fun () ->
         fs_lwt_unix_operation ~batch_size:1 typed_small);
+    make ~name:"fs-lwt-unix/completed/wide-parent" ~suite:Fs_lwt_unix
+      ~boundary:"completed-write" ~payload:"wide-parent" (fun () ->
+        fs_lwt_unix_emit ~batch_size:1 open_wide);
     make ~logical_operations:100 ~name:"fs-lwt-unix/batch-100/tagged-text"
       ~suite:Fs_lwt_unix ~boundary:"amortized-write" ~payload:"tagged-text"
       (fun () -> fs_lwt_unix_operation ~batch_size:100 text);
@@ -409,4 +847,4 @@ let find wanted = List.find_opt (fun scenario -> scenario.name = wanted) all
 let with_operation scenario callback =
   let prepared = scenario.prepare () in
   Fun.protect ~finally:prepared.cleanup (fun () ->
-      callback prepared.operation prepared.retained_bytes)
+      callback prepared.operation prepared.retained_bytes prepared.encoded_bytes)

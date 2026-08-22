@@ -34,7 +34,7 @@ val append_json : Buffer.t -> t -> (unit, json_error) result
     its length at entry. *)
 
 val append_pretty : Pretty.t -> Pretty.placement -> t -> unit
-val freeze : t -> (Snapshot.t, Snapshot.error) result
+val freeze : t -> (Snapshot.fragment, Snapshot.error) result
 val append_frozen_json : Buffer.t -> frozen -> unit
 val append_frozen_pretty : Pretty.t -> Pretty.placement -> frozen -> unit
 val frozen_to_json_string : frozen -> string

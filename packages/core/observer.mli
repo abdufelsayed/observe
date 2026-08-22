@@ -19,9 +19,17 @@ module Make (IO : Io.S) : sig
     ?capacity:int ->
     (Capture.t -> 'a io) ->
     ('a, capture_error) result io
+
+  val with_wide : t -> Engine.wide -> (unit -> 'a io) -> 'a io
 end
 
-val emit_point : level:Level.t -> Message.author -> unit
+val emit_point :
+  ?correlation_id:string -> level:Level.t -> Message.author -> unit
 (** Internal entry point for the static [Logs] API. *)
 
-val create_wide : name:string -> origin:Log.structured_origin -> Engine.wide
+val create_wide :
+  ?parent:Engine.wide ->
+  name:string ->
+  origin:Log.structured_origin ->
+  unit ->
+  Engine.wide

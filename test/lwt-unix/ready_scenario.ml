@@ -80,6 +80,20 @@ let diagnostic_count capture kind =
     0
     (Observe.Capture.diagnostics capture)
 
+let operation_id log =
+  match Observe.Log.operation log with
+  | Some operation -> Observe.Log.operation_id operation
+  | None -> fail "expected a wide operation"
+
+let correlation_by_tag capture tag =
+  Observe.Capture.logs capture
+  |> List.find_map (fun log ->
+      match Observe.Log.body log with
+      | Observe.Log.Text { tag = actual; _ } when String.equal actual tag ->
+          Some (Observe.Log.correlation_id log)
+      | Observe.Log.Text _ | Observe.Log.Structured _ -> None)
+  |> Option.value ~default:None
+
 let process_diagnostic_count kind =
   List.fold_left
     (fun total (entry : Observe.Diagnostics.entry) ->
@@ -139,6 +153,41 @@ let json_console () =
     (contains output "\"service\":\"ready-json\"")
     "service missing from JSON";
   check (contains output "\"level\":\"info\"") "level missing from JSON"
+
+let wide_json_console () =
+  let (), output =
+    capture_stderr (fun () ->
+        Observe_lwt_unix.init_exn
+          (config ~environment:"production" ~console:Observe.Config.Ndjson
+             "ready-wide-json");
+        let wide = Observe.Logs.create ~name:"checkout" () in
+        Observe.Logs.set wide (fun m ->
+            let open Observe.Logs in
+            m.untyped
+            |+ m.field "cart_id" Observe.Type.string "cart-1"
+            |> m.seal);
+        Observe.Logs.emit wide)
+  in
+  check
+    (contains output "\"operation\":{\"name\":\"checkout\",\"id\":")
+    "wide operation envelope missing from ready JSON: %S" output;
+  check
+    (contains output "\"duration_ns\":\"")
+    "wide duration missing from ready JSON: %S" output;
+  check
+    (contains output "\"body\":{\"cart_id\":\"cart-1\"}")
+    "wide body missing from ready JSON: %S" output;
+  check
+    ((not (contains output "\"status\":"))
+    && (not (contains output "\"outcome\":"))
+    && not (contains output "\"requestLogs\":"))
+    "ready JSON invented wide meaning: %S" output;
+  check
+    (String.fold_left
+       (fun count character -> if character = '\n' then count + 1 else count)
+       0 output
+    = 1)
+    "wide ready console emitted more than one NDJSON record: %S" output
 
 let production_json_console () =
   let (), output =
@@ -304,6 +353,216 @@ let basic_capture () =
   in
   check (capture_tags capture = [ "captured" ]) "capture missed the log"
 
+let wide_scope () =
+  let capture =
+    Lwt_main.run
+      (Observe_lwt_unix.Test.with_capture_exn (config "wide-scope")
+         (fun capture ->
+           let parent = Observe.Logs.create ~name:"parent" () in
+           let child = Observe.Logs.create ~parent ~name:"child" () in
+           let left = Observe.Logs.create ~name:"left" () in
+           let right = Observe.Logs.create ~name:"right" () in
+           Lwt.bind
+             (Observe_lwt_unix.with_wide parent (fun () ->
+                  Observe.Logs.info (text ~tag:"parent-before" "message");
+                  Lwt.bind
+                    (Observe_lwt_unix.with_wide child (fun () ->
+                         Lwt.bind (Lwt.pause ()) (fun () ->
+                             Observe.Logs.info
+                               (text ~tag:"child-inside" "message");
+                             Lwt.return_unit)))
+                    (fun () ->
+                      Observe.Logs.info (text ~tag:"parent-after" "message");
+                      Lwt.return_unit)))
+             (fun () ->
+               Lwt.bind
+                 (Lwt.both
+                    (Observe_lwt_unix.with_wide left (fun () ->
+                         Lwt.bind (Lwt.pause ()) (fun () ->
+                             Observe.Logs.info (text ~tag:"left" "message");
+                             Lwt.return_unit)))
+                    (Observe_lwt_unix.with_wide right (fun () ->
+                         Lwt.bind (Lwt.pause ()) (fun () ->
+                             Observe.Logs.info (text ~tag:"right" "message");
+                             Lwt.return_unit))))
+                 (fun _ ->
+                   Observe.Logs.info (text ~tag:"outside" "message");
+                   List.iter Observe.Logs.emit [ child; parent; left; right ];
+                   Lwt.return capture))))
+  in
+  check
+    (correlation_by_tag capture "parent-before" = Some "operation-1")
+    "parent scope did not correlate";
+  check
+    (correlation_by_tag capture "child-inside" = Some "operation-2")
+    "nested child scope did not override parent";
+  check
+    (correlation_by_tag capture "parent-after" = Some "operation-1")
+    "nested child did not restore parent";
+  check
+    (correlation_by_tag capture "left" = Some "operation-3")
+    "left concurrent scope leaked";
+  check
+    (correlation_by_tag capture "right" = Some "operation-4")
+    "right concurrent scope leaked";
+  check
+    (correlation_by_tag capture "outside" = None)
+    "scope installed a fallback operation";
+  let wide_logs =
+    Observe.Capture.logs capture
+    |> List.filter (fun log -> Observe.Log.kind log = Observe.Log.Wide)
+  in
+  match wide_logs with
+  | child :: parent :: _ ->
+      let child_operation = Option.get (Observe.Log.operation child) in
+      check
+        (Observe.Log.operation_parent_id child_operation = Some "operation-1")
+        "child lost its parent reference";
+      check (operation_id parent = "operation-1") "parent identity changed"
+  | _ -> fail "expected completed wide logs"
+
+let managed_wide () =
+  Printexc.record_backtrace true;
+  let escaped = Failure "managed-lwt" in
+  let original =
+    try failwith "managed-lwt-origin"
+    with Failure _ -> Printexc.get_raw_backtrace ()
+  in
+  let caught = ref None in
+  let capture =
+    Lwt_main.run
+      (Observe_lwt_unix.Test.with_capture_exn (config "managed-wide")
+         (fun capture ->
+           let success = Observe.Logs.create ~name:"success" () in
+           let marker = ref 9 in
+           Lwt.bind
+             (Observe_lwt_unix.manage success ~error:Observe.Error.exn
+                (fun () ->
+                  Lwt.bind (Lwt.pause ()) (fun () -> Lwt.return marker)))
+             (fun returned ->
+               check (returned == marker) "managed Lwt result was replaced";
+               let failure = Observe.Logs.create ~name:"failure" () in
+               Lwt.bind
+                 (Lwt.catch
+                    (fun () ->
+                      Observe_lwt_unix.manage failure ~error:Observe.Error.exn
+                        (fun () ->
+                          Lwt.bind (Lwt.pause ()) (fun () ->
+                              Printexc.raise_with_backtrace escaped original)))
+                    (fun raised ->
+                      caught := Some (raised, Printexc.get_raw_backtrace ());
+                      Lwt.return_unit))
+                 (fun () ->
+                   let cancelled = Observe.Logs.create ~name:"cancelled" () in
+                   let pending, _ = Lwt.task () in
+                   let managed =
+                     Observe_lwt_unix.manage cancelled ~error:Observe.Error.exn
+                       (fun () -> pending)
+                   in
+                   Lwt.cancel managed;
+                   Lwt.bind
+                     (Lwt.catch
+                        (fun () -> managed)
+                        (function
+                          | Lwt.Canceled -> Lwt.return_unit
+                          | raised -> Lwt.fail raised))
+                     (fun () ->
+                       let parent = Observe.Logs.create ~name:"parent" () in
+                       Lwt.bind
+                         (Observe_lwt_unix.with_wide parent (fun () ->
+                              Lwt.bind
+                                (Observe_lwt_unix.fork ~parent ~name:"child"
+                                   ~error:Observe.Error.exn (fun _child ->
+                                     Observe.Logs.info
+                                       (text ~tag:"fork-child" "message");
+                                     Lwt.return 42))
+                                (fun result ->
+                                  check (result = 42)
+                                    "managed child result was replaced";
+                                  Observe.Logs.info
+                                    (text ~tag:"fork-parent" "message");
+                                  Lwt.return_unit)))
+                         (fun () ->
+                           Observe.Logs.emit parent;
+                           Lwt.return capture))))))
+  in
+  (match !caught with
+  | Some (raised, backtrace) ->
+      check (raised == escaped) "managed Lwt exception identity changed";
+      let original = Printexc.raw_backtrace_to_string original in
+      let propagated = Printexc.raw_backtrace_to_string backtrace in
+      check
+        (String.length propagated >= String.length original
+        && String.sub propagated 0 (String.length original) = original)
+        "managed Lwt backtrace origin changed"
+  | None -> fail "managed Lwt failure was swallowed");
+  let wide_logs =
+    Observe.Capture.logs capture
+    |> List.filter (fun log -> Observe.Log.kind log = Observe.Log.Wide)
+  in
+  check (List.length wide_logs = 5) "managed boundaries did not emit once";
+  let by_name name =
+    List.find
+      (fun log ->
+        match Observe.Log.operation log with
+        | Some operation ->
+            String.equal (Observe.Log.operation_name operation) name
+        | None -> false)
+      wide_logs
+  in
+  check
+    (Observe.Level.equal Observe.Level.Error
+       (Observe.Log.level (by_name "failure")))
+    "managed ordinary failure did not derive Error";
+  check
+    (Observe.Level.equal Observe.Level.Info
+       (Observe.Log.level (by_name "cancelled")))
+    "managed cancellation inferred Error";
+  check
+    (correlation_by_tag capture "fork-child" = Some "operation-5")
+    "managed child was not current";
+  check
+    (correlation_by_tag capture "fork-parent" = Some "operation-4")
+    "managed child did not restore parent"
+
+let managed_late_callback () =
+  let capture =
+    Lwt_main.run
+      (Observe_lwt_unix.Test.with_capture_exn (config "managed-late")
+         (fun capture ->
+           let wide = Observe.Logs.create ~name:"cancelled" () in
+           let trigger, wake_trigger = Lwt.wait () in
+           let late = ref Lwt.return_unit in
+           let pending, _ = Lwt.task () in
+           let managed =
+             Observe_lwt_unix.manage wide ~error:Observe.Error.exn (fun () ->
+                 late :=
+                   Lwt.bind trigger (fun () ->
+                       Observe.Logs.info (text ~tag:"late-operation" "message");
+                       Lwt.return_unit);
+                 pending)
+           in
+           Lwt.cancel managed;
+           Lwt.bind
+             (Lwt.catch
+                (fun () -> managed)
+                (function
+                  | Lwt.Canceled -> Lwt.return_unit | raised -> Lwt.fail raised))
+             (fun () ->
+               Lwt.wakeup wake_trigger ();
+               Lwt.bind !late (fun () -> Lwt.return capture))))
+  in
+  check
+    (correlation_by_tag capture "late-operation" = None)
+    "late callback retained a closed operation scope";
+  check
+    (List.length
+       (List.filter
+          (fun log -> Observe.Log.kind log = Observe.Log.Wide)
+          (Observe.Capture.logs capture))
+    = 1)
+    "cancelled managed wide did not complete exactly once"
+
 let capture_then_init () =
   let capture =
     Lwt_main.run
@@ -453,6 +712,7 @@ let scenarios =
     ("clock", clock);
     ("console", console);
     ("json-console", json_console);
+    ("wide-json-console", wide_json_console);
     ("production-json-console", production_json_console);
     ("repeated-init", repeated_init);
     ("silent-drain", silent_drain);
@@ -463,6 +723,9 @@ let scenarios =
     ("lifecycle-flush", lifecycle_flush);
     ("lifecycle-failure", lifecycle_failure);
     ("basic-capture", basic_capture);
+    ("wide-scope", wide_scope);
+    ("managed-wide", managed_wide);
+    ("managed-late", managed_late_callback);
     ("capture-then-init", capture_then_init);
     ("concurrent-capture", concurrent_capture);
     ("nested-capture", nested_capture);

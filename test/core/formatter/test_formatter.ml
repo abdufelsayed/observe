@@ -21,11 +21,27 @@ type rich_event =
 
 type tree = Leaf of string | Branch of tree list [@@deriving observe]
 type unsafe_variant = Unsafe
+type child_event = { result : string } [@@deriving observe]
+
+let take label values =
+  match !values with
+  | value :: rest ->
+      values := rest;
+      value
+  | [] -> Alcotest.failf "%s fixture was exhausted" label
 
 let timestamp = ref (Observe.Timestamp.of_unix_ns 37_425_612_000_000L)
+let monotonic = ref []
+let identities = ref []
 
 let observer =
-  let host = Test_io.Host.create ~now:(fun () -> Ok !timestamp) () in
+  let host =
+    Test_io.Host.create
+      ~now:(fun () -> Ok !timestamp)
+      ~monotonic_now:(fun () -> Ok (take "monotonic" monotonic))
+      ~next_id:(fun () -> Ok (take "identity" identities))
+      ()
+  in
   Observer.create host
 
 let capture_outcome level message =
@@ -77,6 +93,72 @@ let format_pretty style log =
 
 let pretty log = format_pretty Observe.Formatter.Plain log
 let ansi_16 log = format_pretty Observe.Formatter.Ansi_16 log
+
+let format_json formatter log =
+  match Observe.Formatter.format formatter log with
+  | Ok output -> output
+  | Error _ -> Alcotest.fail "JSON formatter rejected a valid log"
+
+type wide_fixtures = {
+  correlated : Observe.Log.t;
+  child : Observe.Log.t;
+  parent : Observe.Log.t;
+}
+
+let wide_fixtures () =
+  timestamp := Observe.Timestamp.of_unix_ns 37_425_612_000_000L;
+  monotonic := [ 0L; 10L; 71_000_010L; 184_000_000L ];
+  identities := [ "op_parent"; "op_child" ];
+  let outcome =
+    Observer.with_capture observer
+      (Test_io.config ~min_level:Observe.Level.Debug "example") (fun capture ->
+        let parent = Observe.Logs.create ~name:"checkout" () in
+        let child =
+          Observe.Logs.create_typed ~parent ~name:"charge-card"
+            child_event_schema
+        in
+        Observe.Logs.info ~operation:parent
+          (Test_io.text ~tag:"inventory" "waiting");
+        Observe.Logs.set parent (fun m ->
+            let open Observe.Logs in
+            m.untyped
+            |+ m.field "cart_id" Observe.Type.string "cart-1"
+            |+ m.field "operation" Observe.Type.string "consumer"
+            |+ m.field "service" Observe.Type.string "body"
+            |> m.seal);
+        Observe.Logs.set child (fun m ->
+            m.typed (child_event_patch ~result:"authorized" ()));
+        Observe.Logs.emit child;
+        Observe.Logs.emit parent;
+        Observe.Capture.logs capture)
+  in
+  match outcome with
+  | Ok [ correlated; child; parent ] -> { correlated; child; parent }
+  | Ok logs ->
+      Alcotest.failf "expected three wide fixtures, received %d"
+        (List.length logs)
+  | Error Observe.IO_already_registered ->
+      Alcotest.fail "I/O implementation unexpectedly conflicted"
+  | Error (Observe.Invalid_capacity capacity) ->
+      Alcotest.failf "unexpected invalid capacity: %d" capacity
+
+let strip_ansi value =
+  let buffer = Buffer.create (String.length value) in
+  let length = String.length value in
+  let rec copy index =
+    if index = length then Buffer.contents buffer
+    else if
+      index + 1 < length && value.[index] = '\027' && value.[index + 1] = '['
+    then skip (index + 2)
+    else (
+      Buffer.add_char buffer value.[index];
+      copy (index + 1))
+  and skip index =
+    if index = length then Buffer.contents buffer
+    else if value.[index] = 'm' then copy (index + 1)
+    else skip (index + 1)
+  in
+  copy 0
 
 let test_compact_information_text () =
   timestamp := Observe.Timestamp.of_unix_ns 37_425_612_000_000L;
@@ -428,6 +510,88 @@ let test_ansi_16_typed_structure () =
      \027[92m\"oauth\"\027[0m"
     (ansi_16 log)
 
+let test_wide_pretty_layout () =
+  let fixtures = wide_fixtures () in
+  Alcotest.(check string)
+    "correlated point" "10:23:45.612 INFO [inventory] (op_parent) waiting"
+    (pretty fixtures.correlated);
+  Alcotest.(check string)
+    "child wide"
+    "10:23:45.612 INFO [charge-card] 71ms (op_child <- op_parent)\n\
+    \  └─ result: \"authorized\""
+    (pretty fixtures.child);
+  Alcotest.(check string)
+    "parent wide"
+    "10:23:45.612 INFO [checkout] 184ms (op_parent)\n\
+    \  ├─ cart_id: \"cart-1\"\n\
+    \  ├─ operation: \"consumer\"\n\
+    \  └─ service: \"body\""
+    (pretty fixtures.parent);
+  List.iter
+    (fun style ->
+      Alcotest.(check string)
+        "style changes color only" (pretty fixtures.child)
+        (format_pretty style fixtures.child |> strip_ansi))
+    [
+      Observe.Formatter.Ansi_16;
+      Observe.Formatter.Ansi_256;
+      Observe.Formatter.Truecolor;
+    ]
+
+let test_wide_json_envelopes () =
+  let fixtures = wide_fixtures () in
+  let correlated =
+    "{\"service\":\"example\",\"timestamp\":\"37425612000000\",\"level\":\"info\",\"operation_id\":\"op_parent\",\"body\":{\"kind\":\"text\",\"tag\":\"inventory\",\"message\":\"waiting\"}}"
+  in
+  let child =
+    "{\"service\":\"example\",\"timestamp\":\"37425612000000\",\"level\":\"info\",\"operation\":{\"name\":\"charge-card\",\"id\":\"op_child\",\"parent_id\":\"op_parent\",\"duration_ns\":\"71000000\"},\"body\":{\"result\":\"authorized\"}}"
+  in
+  let parent =
+    "{\"service\":\"example\",\"timestamp\":\"37425612000000\",\"level\":\"info\",\"operation\":{\"name\":\"checkout\",\"id\":\"op_parent\",\"duration_ns\":\"184000000\"},\"body\":{\"cart_id\":\"cart-1\",\"operation\":\"consumer\",\"service\":\"body\"}}"
+  in
+  List.iter
+    (fun (name, log, expected) ->
+      let json = format_json Observe.Formatter.json log in
+      let ndjson = format_json Observe.Formatter.ndjson log in
+      Alcotest.(check string) name expected json;
+      Alcotest.(check string) (name ^ " NDJSON") (json ^ "\n") ndjson)
+    [
+      ("correlated point", fixtures.correlated, correlated);
+      ("child wide", fixtures.child, child);
+      ("parent collision boundary", fixtures.parent, parent);
+    ]
+
+let test_wide_metadata_escaping () =
+  timestamp := Observe.Timestamp.of_unix_ns 37_425_612_000_000L;
+  monotonic := [ 0L; 1_000L ];
+  identities := [ "op\nid" ];
+  let outcome =
+    Observer.with_capture observer
+      (Test_io.config ~min_level:Observe.Level.Debug "example") (fun capture ->
+        let wide = Observe.Logs.create ~name:"checkout\027[31m" () in
+        Observe.Logs.emit wide;
+        Observe.Capture.logs capture)
+  in
+  let log =
+    match outcome with
+    | Ok [ log ] -> log
+    | Ok logs ->
+        Alcotest.failf "expected one escaped fixture, received %d"
+          (List.length logs)
+    | Error Observe.IO_already_registered ->
+        Alcotest.fail "I/O implementation unexpectedly conflicted"
+    | Error (Observe.Invalid_capacity capacity) ->
+        Alcotest.failf "unexpected invalid capacity: %d" capacity
+  in
+  Alcotest.(check string)
+    "pretty metadata is terminal safe"
+    "10:23:45.612 INFO [checkout\\u001b[31m] 1us (op\\nid)\n  └─ {}"
+    (pretty log);
+  Alcotest.(check string)
+    "JSON metadata is escaped"
+    "{\"service\":\"example\",\"timestamp\":\"37425612000000\",\"level\":\"info\",\"operation\":{\"name\":\"checkout\\u001b[31m\",\"id\":\"op\\nid\",\"duration_ns\":\"1000\"},\"body\":{}}"
+    (format_json Observe.Formatter.json log)
+
 let () =
   Alcotest.run "observe-formatter"
     [
@@ -472,5 +636,14 @@ let () =
         [
           Alcotest.test_case "unsafe values are withheld" `Quick
             test_canonical_failures_are_withheld;
+        ] );
+      ( "wide observations",
+        [
+          Alcotest.test_case "pretty layout and style parity" `Quick
+            test_wide_pretty_layout;
+          Alcotest.test_case "JSON and NDJSON envelopes" `Quick
+            test_wide_json_envelopes;
+          Alcotest.test_case "metadata escaping" `Quick
+            test_wide_metadata_escaping;
         ] );
     ]

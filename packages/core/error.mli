@@ -28,4 +28,4 @@ val freeze :
   'error t ->
   ?backtrace:Printexc.raw_backtrace ->
   'error ->
-  (Snapshot.t, Snapshot.error) result
+  (Snapshot.fragment, Snapshot.error) result

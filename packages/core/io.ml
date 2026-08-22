@@ -1,5 +1,6 @@
 type clock_error = Unavailable
 type console_acceptance = Accepted | Rejected
+type 'a outcome = Returned of 'a | Raised of exn * Printexc.raw_backtrace
 
 module type S = sig
   type +'a t
@@ -8,6 +9,8 @@ module type S = sig
 
   val return : 'a -> 'a t
   val bind : 'a t -> ('a -> 'b t) -> 'b t
+  val observe : (unit -> 'a t) -> 'a outcome t
+  val repropagate : exn -> Printexc.raw_backtrace -> 'a t
   val create_key : unit -> 'a key
   val get : state -> 'a key -> 'a option
   val with_binding : state -> 'a key -> 'a -> (unit -> 'b t) -> 'b t

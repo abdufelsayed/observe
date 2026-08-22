@@ -11,6 +11,37 @@ val init : Observe.Config.t -> (unit, Observe.init_error) result
 val init_exn : Observe.Config.t -> unit
 (** Like {!init}, but raises [Observe.Init_error] on failure. *)
 
+val with_wide :
+  ('builder, 'patch) Observe.Logs.t -> (unit -> 'a Lwt.t) -> 'a Lwt.t
+(** Bind an existing wide log for scoped point-log correlation. This does not
+    catch errors or emit the wide log. *)
+
+val manage :
+  ('builder, 'patch) Observe.Logs.t ->
+  error:exn Observe.Error.t ->
+  (unit -> 'a Lwt.t) ->
+  'a Lwt.t
+(** Run and complete one existing wide log while preserving the exact Lwt
+    result, exception, backtrace, or cancellation. *)
+
+val fork :
+  parent:('parent_builder, 'parent_patch) Observe.Logs.t ->
+  name:string ->
+  error:exn Observe.Error.t ->
+  ((Observe.Logs.open_builder, Observe.Logs.open_patch) Observe.Logs.t ->
+  'a Lwt.t) ->
+  'a Lwt.t
+(** Run one managed independent open child and restore the parent scope. *)
+
+val fork_typed :
+  parent:('parent_builder, 'parent_patch) Observe.Logs.t ->
+  name:string ->
+  ('record, 'builder) Observe.Schema.t ->
+  error:exn Observe.Error.t ->
+  (('builder, 'record Observe.Schema.patch) Observe.Logs.t -> 'a Lwt.t) ->
+  'a Lwt.t
+(** Run one managed independent schema-locked child. *)
+
 val flush : unit -> unit Lwt.t
 (** Resolve when all console and registered output records accepted before the
     call have reached their effect boundary. Ordinary application-defined drains

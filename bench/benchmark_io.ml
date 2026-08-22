@@ -27,6 +27,16 @@ module IO = struct
 
   let return value = value
   let bind value callback = callback value
+
+  let observe callback =
+    match callback () with
+    | value -> Observe.IO.Returned value
+    | exception raised ->
+        Observe.IO.Raised (raised, Printexc.get_raw_backtrace ())
+
+  let repropagate raised backtrace =
+    Printexc.raise_with_backtrace raised backtrace
+
   let create_key () = { value = None }
   let get _state key = key.value
 

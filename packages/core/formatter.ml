@@ -34,6 +34,28 @@ let pretty_capacity = function
   | Ansi_256 -> 1_280
   | Truecolor -> 1_792
 
+let add_point_correlation renderer log =
+  match Log.correlation_id log with
+  | None -> ()
+  | Some id ->
+      Pretty.space renderer;
+      Pretty.trusted_text renderer "(";
+      Pretty.trusted_text renderer id;
+      Pretty.trusted_text renderer ")"
+
+let add_operation_context renderer operation =
+  Pretty.space renderer;
+  Pretty.duration renderer (Log.operation_duration_ns operation);
+  Pretty.space renderer;
+  Pretty.trusted_text renderer "(";
+  Pretty.trusted_text renderer (Log.operation_id operation);
+  Option.iter
+    (fun parent_id ->
+      Pretty.trusted_text renderer " <- ";
+      Pretty.trusted_text renderer parent_id)
+    (Log.operation_parent_id operation);
+  Pretty.trusted_text renderer ")"
+
 let pretty_with_line_feed line_feed style =
   create (fun log ->
       try
@@ -43,13 +65,25 @@ let pretty_with_line_feed line_feed style =
           | Structured _ ->
               Pretty.create ~capacity:(pretty_capacity style) style
         in
-        (match Log.body log with
-        | Text { tag; message } ->
+        (match (Log.operation log, Log.body log) with
+        | None, Text { tag; message } ->
             add_header renderer ~scope:tag log;
+            add_point_correlation renderer log;
             Pretty.space renderer;
-            Pretty.text renderer message
-        | Structured { value; _ } ->
+            Pretty.trusted_text renderer message
+        | None, Structured { value; _ } ->
             add_header renderer ~scope:(Log.service log) log;
+            add_point_correlation renderer log;
+            Pretty.newline renderer;
+            Value.append_frozen_pretty renderer Pretty.Root value
+        | Some operation, Text { message; _ } ->
+            add_header renderer ~scope:(Log.operation_name operation) log;
+            add_operation_context renderer operation;
+            Pretty.space renderer;
+            Pretty.trusted_text renderer message
+        | Some operation, Structured { value; _ } ->
+            add_header renderer ~scope:(Log.operation_name operation) log;
+            add_operation_context renderer operation;
             Pretty.newline renderer;
             Value.append_frozen_pretty renderer Pretty.Root value);
         if line_feed then Pretty.newline renderer;
@@ -63,34 +97,62 @@ let append_body_json buffer log =
   match Log.body log with
   | Text { tag; message } ->
       Buffer.add_string buffer "{\"kind\":\"text\",\"tag\":";
-      Json_writer.string buffer tag;
+      Json_writer.trusted_string buffer tag;
       Buffer.add_string buffer ",\"message\":";
-      Json_writer.string buffer message;
+      Json_writer.trusted_string buffer message;
       Buffer.add_char buffer '}'
   | Structured { value; _ } -> Value.append_frozen_json buffer value
+
+let append_correlation_json buffer log =
+  match Log.correlation_id log with
+  | None -> ()
+  | Some id ->
+      Buffer.add_string buffer ",\"operation_id\":";
+      Json_writer.trusted_string buffer id
+
+let append_operation_json buffer operation =
+  Buffer.add_string buffer ",\"operation\":{\"name\":";
+  Json_writer.trusted_string buffer (Log.operation_name operation);
+  Buffer.add_string buffer ",\"id\":";
+  Json_writer.trusted_string buffer (Log.operation_id operation);
+  (match Log.operation_parent_id operation with
+  | None -> ()
+  | Some parent_id ->
+      Buffer.add_string buffer ",\"parent_id\":";
+      Json_writer.trusted_string buffer parent_id);
+  Buffer.add_string buffer ",\"duration_ns\":\"";
+  Json_writer.decimal_int64 buffer (Log.operation_duration_ns operation);
+  Buffer.add_string buffer "\"}"
+
+let append_json_object buffer log =
+  Buffer.add_string buffer "{\"service\":";
+  Json_writer.trusted_string buffer (Log.service log);
+  (match Log.environment log with
+  | None -> ()
+  | Some environment ->
+      Buffer.add_string buffer ",\"environment\":";
+      Json_writer.trusted_string buffer environment);
+  (match Log.version log with
+  | None -> ()
+  | Some version ->
+      Buffer.add_string buffer ",\"version\":";
+      Json_writer.trusted_string buffer version);
+  Buffer.add_string buffer ",\"timestamp\":\"";
+  Json_writer.decimal_int64 buffer (Timestamp.to_unix_ns (Log.timestamp log));
+  Buffer.add_string buffer "\",\"level\":\"";
+  Buffer.add_string buffer (Level.to_string (Log.level log));
+  Buffer.add_char buffer '"';
+  (match Log.operation log with
+  | None -> append_correlation_json buffer log
+  | Some operation -> append_operation_json buffer operation);
+  Buffer.add_string buffer ",\"body\":";
+  append_body_json buffer log;
+  Buffer.add_char buffer '}'
 
 let encode_json ~line_feed log =
   try
     let buffer = Buffer.create 512 in
-    Buffer.add_string buffer "{\"service\":";
-    Json_writer.string buffer (Log.service log);
-    (match Log.environment log with
-    | None -> ()
-    | Some environment ->
-        Buffer.add_string buffer ",\"environment\":";
-        Json_writer.string buffer environment);
-    (match Log.version log with
-    | None -> ()
-    | Some version ->
-        Buffer.add_string buffer ",\"version\":";
-        Json_writer.string buffer version);
-    Buffer.add_string buffer ",\"timestamp\":\"";
-    Json_writer.decimal_int64 buffer (Timestamp.to_unix_ns (Log.timestamp log));
-    Buffer.add_string buffer "\",\"level\":\"";
-    Buffer.add_string buffer (Level.to_string (Log.level log));
-    Buffer.add_string buffer "\",\"body\":";
-    append_body_json buffer log;
-    Buffer.add_char buffer '}';
+    append_json_object buffer log;
     if line_feed then Buffer.add_char buffer '\n';
     Ok (Buffer.contents buffer)
   with

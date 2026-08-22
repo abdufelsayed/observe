@@ -7,14 +7,14 @@ val plan : 'a t -> 'a -> Pretty.rendered
     the value's placement. *)
 
 val pretty : 'a t -> Pretty.t -> Pretty.placement -> 'a -> unit
-val freeze : 'a t -> 'a -> (Snapshot.t, Snapshot.error) result
+val freeze : 'a t -> 'a -> (Snapshot.fragment, Snapshot.error) result
 
 val freeze_into :
   'a t ->
   Snapshot.context ->
   depth:int ->
   'a ->
-  (Snapshot.t, Snapshot.error) result
+  (Snapshot.value, Snapshot.error) result
 
 val record_name : 'a t -> string option
 
@@ -199,7 +199,10 @@ module Generated_runtime : sig
 
   val with_freeze :
     'a t ->
-    (Snapshot.context -> depth:int -> 'a -> (Snapshot.t, Snapshot.error) result) ->
+    (Snapshot.context ->
+    depth:int ->
+    'a ->
+    (Snapshot.value, Snapshot.error) result) ->
     'a t
 
   val with_recursive_plan : 'a t -> ('a t -> 'a -> rendered) -> 'a t
@@ -210,11 +213,11 @@ module Generated_runtime : sig
     Snapshot.context ->
     depth:int ->
     'a ->
-    (Snapshot.t, Snapshot.error) result) ->
+    (Snapshot.value, Snapshot.error) result) ->
     'a t
 
   type freeze_context = Snapshot.context
-  type frozen = Snapshot.t
+  type frozen = Snapshot.value
   type freeze_error = Snapshot.error
 
   val freeze :

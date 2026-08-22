@@ -157,7 +157,7 @@ let projection () =
             Buffer.add_string expected bytes;
             Observe.Drain.Accepted)
   in
-  install ~extra_drains:[ witness ] [ 0L; 1L; 2L ] (Writer.drain writer);
+  install ~extra_drains:[ witness ] [ 0L; 1L; 2L; 3L; 4L ] (Writer.drain writer);
   emit "text" "text payload";
   Observe.Logs.info (fun m ->
       m.value
@@ -167,6 +167,13 @@ let projection () =
              ("count", Observe.Value.int 2);
            ]));
   Observe.Logs.info (fun m -> m.typed sample_schema { value = "typed payload" });
+  let wide = Observe.Logs.create ~name:"filesystem-wide" () in
+  Observe.Logs.info ~operation:wide (fun m ->
+      m.text ~tag:"correlated" "%s" "point payload");
+  Observe.Logs.set wide (fun m ->
+      let open Observe.Logs in
+      m.untyped |+ m.field "result" Observe.Type.string "completed" |> m.seal);
+  Observe.Logs.emit wide;
   Lwt_main.run (Writer.shutdown writer) |> Result.get_ok;
   let actual =
     Observe_fs_test_support.Fs_fixture.contents "/logs/1970-01-01.jsonl"
@@ -174,7 +181,15 @@ let projection () =
   check
     (String.equal actual (Buffer.contents expected))
     "filesystem changed semantic NDJSON:\nexpected %S\nactual   %S"
-    (Buffer.contents expected) actual
+    (Buffer.contents expected) actual;
+  check (line_count actual = 5) "filesystem lost an observation: %S" actual;
+  check
+    (contains actual "\"operation_id\":\"filesystem-operation\"")
+    "filesystem lost point correlation: %S" actual;
+  check
+    (contains actual
+       "\"operation\":{\"name\":\"filesystem-wide\",\"id\":\"filesystem-operation\",\"duration_ns\":\"0\"}")
+    "filesystem lost the wide operation envelope: %S" actual
 
 let capacity () =
   let writer = create ~capacity:1 () in

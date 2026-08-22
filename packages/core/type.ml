@@ -4,8 +4,12 @@ type 'a t = {
   repr : 'a Repr.t;
   json : Buffer.t -> 'a -> unit;
   plan : 'a -> Pretty.rendered;
+  freeze_supported : bool;
   freeze :
-    Snapshot.context -> depth:int -> 'a -> (Snapshot.t, Snapshot.error) result;
+    Snapshot.context ->
+    depth:int ->
+    'a ->
+    (Snapshot.value, Snapshot.error) result;
   record_name : string option;
   field_policy : 'a field_policy;
 }
@@ -31,12 +35,24 @@ let guard_freeze freeze context ~depth value =
   | Error _ as error -> error
   | Ok () -> freeze context ~depth value
 
-let make ?omit_field ?(freeze = unsupported_freeze) ?record_name ~plan repr json
-    =
+let make ?omit_field ?freeze ?record_name ~plan repr json =
   let field_policy =
     match omit_field with None -> Required | Some omit -> Omit_if omit
   in
-  { repr; json; plan; freeze = guard_freeze freeze; record_name; field_policy }
+  let freeze_supported, freeze =
+    match freeze with
+    | Some freeze -> (true, freeze)
+    | None -> (false, unsupported_freeze)
+  in
+  {
+    repr;
+    json;
+    plan;
+    freeze_supported;
+    freeze = guard_freeze freeze;
+    record_name;
+    field_policy;
+  }
 
 let compatibility ?omit_field repr json =
   make ?omit_field
@@ -56,7 +72,7 @@ let with_json description json = { description with json }
 let with_plan description plan = { description with plan }
 
 let with_freeze description freeze =
-  { description with freeze = guard_freeze freeze }
+  { description with freeze_supported = true; freeze = guard_freeze freeze }
 
 let with_repr description repr = { description with repr }
 
@@ -64,8 +80,12 @@ let freeze_into description context ~depth value =
   description.freeze context ~depth value
 
 let freeze description value =
-  let context = Snapshot.create_context () in
-  description.freeze context ~depth:0 value
+  if not description.freeze_supported then Error Snapshot.Unsupported
+  else
+    let context = Snapshot.create_context () in
+    match description.freeze context ~depth:0 value with
+    | Ok value -> Ok (Snapshot.seal context value)
+    | Error _ as error -> error
 
 let record_name description = description.record_name
 
@@ -105,33 +125,25 @@ let char =
 
 let int =
   scalar_description
-    ~freeze:(fun context ~depth value ->
-      let buffer = Buffer.create 24 in
-      Json_writer.int buffer value;
-      Snapshot.integer context ~depth (Buffer.contents buffer))
+    ~freeze:(fun context ~depth value -> Snapshot.int context ~depth value)
     Repr.int Json_writer.int int
 
 let int32 =
   scalar_description
-    ~freeze:(fun context ~depth value ->
-      Snapshot.integer context ~depth (Int32.to_string value))
+    ~freeze:(fun context ~depth value -> Snapshot.int32 context ~depth value)
     Repr.int32 Json_writer.int32 int32
 
 let int63 =
   scalar_description
     ~freeze:(fun context ~depth value ->
-      Snapshot.integer context ~depth
-        (Int64.to_string (Optint.Int63.to_int64 value)))
+      Snapshot.int64 context ~depth (Optint.Int63.to_int64 value))
     Repr.int63
     (fun buffer value -> Json_writer.int64 buffer (Optint.Int63.to_int64 value))
     (fun renderer value -> number renderer (Repr.to_string Repr.int63 value))
 
 let int64 =
   scalar_description
-    ~freeze:(fun context ~depth value ->
-      let buffer = Buffer.create 24 in
-      Json_writer.int64 buffer value;
-      Snapshot.integer context ~depth (Buffer.contents buffer))
+    ~freeze:(fun context ~depth value -> Snapshot.int64 context ~depth value)
     Repr.int64 Json_writer.int64 int64
 
 let float =
@@ -564,7 +576,7 @@ type ('a, 'b, 'c) open_record = {
     (Snapshot.context ->
     depth:int ->
     'a ->
-    ((string * Snapshot.t) option, Snapshot.error) result)
+    ((string * Snapshot.value) option, Snapshot.error) result)
     list;
 }
 
@@ -576,7 +588,7 @@ type ('a, 'b) field = {
     Snapshot.context ->
     depth:int ->
     'a ->
-    ((string * Snapshot.t) option, Snapshot.error) result;
+    ((string * Snapshot.value) option, Snapshot.error) result;
 }
 
 let record name constructor =
@@ -589,6 +601,7 @@ let record name constructor =
   }
 
 let field name description getter =
+  let owned_name = Snapshot.own_text name in
   {
     repr_field = Repr.field name description.repr getter;
     json_record_field =
@@ -597,13 +610,16 @@ let field name description getter =
     plan_record_field = (fun record -> (name, description.plan (getter record)));
     freeze_record_field =
       (fun context ~depth record ->
-        let value = getter record in
-        match description.field_policy with
-        | Omit_if omit when omit value -> Ok None
-        | Required | Omit_if _ ->
-            Result.map
-              (fun value -> Some (name, value))
-              (description.freeze context ~depth value));
+        match owned_name with
+        | Error _ as error -> error
+        | Ok name -> (
+            let value = getter record in
+            match description.field_policy with
+            | Omit_if omit when omit value -> Ok None
+            | Required | Omit_if _ ->
+                Result.map
+                  (fun value -> Some (name, value))
+                  (description.freeze context ~depth value)));
   }
 
 let ( |+ ) record field =
@@ -652,7 +668,7 @@ let sealr record =
   let freeze context ~depth value =
     let rec collect fields frozen =
       match fields with
-      | [] -> Snapshot.object_ context ~depth (List.rev frozen)
+      | [] -> Snapshot.object_with_owned_names context ~depth (List.rev frozen)
       | field :: rest -> (
           match field context ~depth:(depth + 1) value with
           | Result.Error _ as error -> error
@@ -844,6 +860,7 @@ let mu (type value) (make_description : value description -> value description)
             repr = machine;
             json = forward_json;
             plan = forward_plan;
+            freeze_supported = true;
             freeze = forward_freeze;
             record_name = None;
             field_policy = Required;
@@ -857,6 +874,7 @@ let mu (type value) (make_description : value description -> value description)
     repr;
     json = forward_json;
     plan = forward_plan;
+    freeze_supported = true;
     freeze = forward_freeze;
     record_name =
       (match !cell with
@@ -912,6 +930,7 @@ let mu2 (type left right)
             repr = left_machine;
             json = forward_json_left;
             plan = forward_plan_left;
+            freeze_supported = true;
             freeze = forward_freeze_left;
             record_name = None;
             field_policy = Required;
@@ -922,6 +941,7 @@ let mu2 (type left right)
             repr = right_machine;
             json = forward_json_right;
             plan = forward_plan_right;
+            freeze_supported = true;
             freeze = forward_freeze_right;
             record_name = None;
             field_policy = Required;
@@ -939,6 +959,7 @@ let mu2 (type left right)
       repr = left_repr;
       json = forward_json_left;
       plan = forward_plan_left;
+      freeze_supported = true;
       freeze = forward_freeze_left;
       record_name =
         (match !cell with
@@ -950,6 +971,7 @@ let mu2 (type left right)
       repr = right_repr;
       json = forward_json_right;
       plan = forward_plan_right;
+      freeze_supported = true;
       freeze = forward_freeze_right;
       record_name =
         (match !cell with
@@ -1087,7 +1109,7 @@ module Generated_runtime = struct
     description
 
   type freeze_context = Snapshot.context
-  type frozen = Snapshot.t
+  type frozen = Snapshot.value
   type freeze_error = Snapshot.error
 
   let freeze description context ~depth value =

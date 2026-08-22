@@ -19,7 +19,9 @@ module Generated_runtime = struct
   let patch_fragment = Schema.patch_fragment
   let patch_field = Schema.field
   let record_patch = Schema.make_patch
+  let record_patch_fields = Schema.make_patch_fields
   let named_record_patch = Schema.make_named_patch
+  let named_record_patch_fields = Schema.make_named_patch_fields
   let named_error_patch = Schema.make_named_error_patch
   let combine_named_patches = Schema.combine_named_patches
   let record_schema = Schema.record
@@ -49,4 +51,45 @@ type capture_error = Observer.capture_error =
 
 exception Init_error = Observer.Init_error
 
-module Make = Observer.Make
+module Make (IO : Io.S) = struct
+  module Runtime = Observer.Make (IO)
+
+  type +'a io = 'a IO.t
+  type t = { runtime : Runtime.t; state : IO.state }
+
+  let create state = { runtime = Runtime.create state; state }
+  let init t = Runtime.init t.runtime
+  let init_exn t = Runtime.init_exn t.runtime
+  let with_capture t = Runtime.with_capture t.runtime
+
+  let with_wide t wide callback =
+    Runtime.with_wide t.runtime (Logs.engine_wide wide) callback
+
+  let is_control_exception t raised =
+    match raised with
+    | Out_of_memory | Stack_overflow | Sys.Break -> true
+    | _ -> (
+        match IO.is_control_exception t.state raised with
+        | control -> control
+        | exception _ -> true)
+
+  let manage t wide ~error callback =
+    with_wide t wide (fun () ->
+        IO.bind (IO.observe callback) (function
+          | Io.Returned value ->
+              Logs.emit wide;
+              IO.return value
+          | Io.Raised (raised, backtrace) ->
+              if not (is_control_exception t raised) then
+                Logs.contribute_error wide error ~backtrace raised;
+              Logs.emit wide;
+              IO.repropagate raised backtrace))
+
+  let fork t ~parent ~name ~error callback =
+    let child = Logs.create ~parent ~name () in
+    manage t child ~error (fun () -> callback child)
+
+  let fork_typed t ~parent ~name schema ~error callback =
+    let child = Logs.create_typed ~parent ~name schema in
+    manage t child ~error (fun () -> callback child)
+end

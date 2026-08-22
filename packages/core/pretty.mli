@@ -19,6 +19,8 @@ val header : t -> unix_ns:int64 -> severity:severity -> scope:string -> unit
 val space : t -> unit
 val newline : t -> unit
 val text : t -> string -> unit
+val trusted_text : t -> string -> unit
+val duration : t -> int64 -> unit
 
 val place : t -> placement -> scalar:bool -> bool
 (** Write a placement prefix and return [true] when the value's children were
@@ -36,9 +38,11 @@ val int64 : t -> int64 -> unit
 val number : t -> string -> unit
 val float : t -> float -> unit
 val string : t -> string -> unit
+val trusted_string : t -> string -> unit
 val empty_record : t -> unit
 val empty_list : t -> unit
 val variant : t -> polymorphic:bool -> string -> unit
+val trusted_variant : t -> polymorphic:bool -> string -> unit
 val list_start : t -> unit
 val list_separator : t -> unit
 val list_end : t -> unit

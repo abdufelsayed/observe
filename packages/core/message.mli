@@ -1,6 +1,7 @@
 type t =
   | Text of { tag : string; message : string }
   | Untyped of Value.t
+  | Open of (Snapshot.fragment, Snapshot.error) result
   | Typed : ('a, 'builder) Schema.t * 'a -> t
 
 type object_
@@ -36,6 +37,9 @@ type author = builder -> t
 val ( |+ ) : object_ -> field -> object_
 val open_builder : open_builder
 val open_patch_of_value : Value.t -> open_patch
-val open_patch_value : open_patch -> Value.t
+
+val open_patch_fragment :
+  open_patch -> (Snapshot.fragment, Snapshot.error) result
+
 val open_patch_has_error : open_patch -> bool
 val builder : builder

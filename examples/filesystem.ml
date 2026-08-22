@@ -14,6 +14,16 @@ let main () =
   [%observe.info text ~tag:"startup" "filesystem delivery is ready"];
   [%observe.info
     untyped { action = "order_created"; order_id = "ord_01JQ9"; items = 3 }];
+  let order = Observe.Logs.create ~name:"fulfill-order" () in
+  Observe.Logs.info ~operation:order (fun m ->
+      m.text ~tag:"fulfillment" "reserving inventory");
+  [%observe.set
+    order untyped
+      {
+        order_id = "ord_01JQ9";
+        inventory = { status = "reserved"; warehouse = "cairo-1" };
+      }];
+  Observe.Logs.emit order;
   let* () = Observe_lwt_unix.shutdown () in
   Format.printf "daily NDJSON appended under %s@." directory;
   Lwt.return_unit

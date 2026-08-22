@@ -7,6 +7,17 @@ module Direct = struct
 
   let return value = value
   let bind value callback = callback value
+
+  let observe callback =
+    match callback () with
+    | value -> Observe.IO.Returned value
+    | exception raised ->
+        let backtrace = Printexc.get_raw_backtrace () in
+        Observe.IO.Raised (raised, backtrace)
+
+  let repropagate raised backtrace =
+    Printexc.raise_with_backtrace raised backtrace
+
   let create_key () = { value = None }
   let get () key = key.value
 
@@ -54,6 +65,16 @@ module Inherited = struct
   let finally_calls context = context.protect_finally_calls
   let return value = value
   let bind value callback = callback value
+
+  let observe callback =
+    match callback () with
+    | value -> Observe.IO.Returned value
+    | exception raised ->
+        let backtrace = Printexc.get_raw_backtrace () in
+        Observe.IO.Raised (raised, backtrace)
+
+  let repropagate raised backtrace =
+    Printexc.raise_with_backtrace raised backtrace
 
   let create_key () =
     let id = !next_key in
@@ -133,6 +154,8 @@ module IO = struct
 
   let return = Direct.return
   let bind = Direct.bind
+  let observe = Direct.observe
+  let repropagate = Direct.repropagate
   let create_key = Direct.create_key
   let get _state key = Direct.get () key
 
@@ -165,6 +188,8 @@ module Inherited_io = struct
   let create ~context ~host = { context; host }
   let return = Inherited.return
   let bind = Inherited.bind
+  let observe = Inherited.observe
+  let repropagate = Inherited.repropagate
   let create_key = Inherited.create_key
   let get state key = Inherited.get state.context key
 

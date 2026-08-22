@@ -70,6 +70,28 @@ let main () =
   [%observe.set
     typed_checkout { payment = Authorized { authorization_id = "auth-7" } }];
   Observe.Logs.emit typed_checkout;
-  Lwt.return_unit
+
+  (* Managed Lwt work uses the same wide-log lifecycle. Point logs inside the
+     boundary correlate automatically, and an escaping exception would be
+     contributed with its original backtrace before being re-propagated. *)
+  let managed_checkout = Observe.Logs.create ~name:"managed-checkout" () in
+  Observe_lwt_unix.manage managed_checkout ~error:Observe.Error.exn (fun () ->
+      [%observe.set
+        managed_checkout untyped { cart_id = "cart-42"; phase = "authorizing" }];
+      [%observe.info text ~tag:"checkout" "starting payment child"];
+      let open Lwt.Syntax in
+      let* authorization_id =
+        Observe_lwt_unix.fork ~parent:managed_checkout ~name:"capture-payment"
+          ~error:Observe.Error.exn (fun payment ->
+            [%observe.set
+              payment untyped
+                { payment = { status = "authorized"; id = "auth-8" } }];
+            [%observe.info text ~tag:"payment" "payment captured"];
+            Lwt.return "auth-8")
+      in
+      [%observe.set
+        managed_checkout untyped
+          { phase = "completed"; authorization_id = string authorization_id }];
+      Lwt.return_unit)
 
 let () = Lwt_main.run (Lwt.finalize main Observe_lwt_unix.shutdown)
