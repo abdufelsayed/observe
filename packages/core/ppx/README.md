@@ -112,6 +112,10 @@ syntax.
 The deriver emits an Observe description named after every declared type. For
 a record it additionally emits a schema witness, an abstract sparse patch, a
 patch constructor, and the builder used by one-layer wide-log PPX authoring.
+For a module-local `type t`, the constructor remains the idiomatic `patch`,
+while its generated support types are named `t_patch`, `t_patch_author`, and
+`t_patch_builder` so they do not claim the consumer's general `patch` type
+name.
 
 For example, deriving this record:
 

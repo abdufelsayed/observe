@@ -28,10 +28,10 @@ val fork :
   parent:('parent_builder, 'parent_patch) Observe.Logs.t ->
   name:string ->
   error:exn Observe.Error.t ->
-  ((Observe.Logs.open_builder, Observe.Logs.open_patch) Observe.Logs.t ->
+  ((Observe.Logs.untyped_builder, Observe.Logs.untyped_patch) Observe.Logs.t ->
   'a Lwt.t) ->
   'a Lwt.t
-(** Run one managed independent open child and restore the parent scope. *)
+(** Run one managed independent untyped child and restore the parent scope. *)
 
 val fork_typed :
   parent:('parent_builder, 'parent_patch) Observe.Logs.t ->

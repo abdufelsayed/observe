@@ -3,32 +3,35 @@
 
 type t =
   | Text of { tag : string; message : string }
-  | Untyped of Value.t
-  | Open of (Snapshot.fragment, Snapshot.error) result
+  | Value of Value.t
+  | Untyped of (Snapshot.fragment, Snapshot.error) result
   | Typed : ('a, 'builder) Schema.t * 'a -> t
 
 type fragment = (Snapshot.fragment, Snapshot.error) result
 type object_ = { fields : (string * fragment) list; has_error : bool }
 type field = { name : string; fragment : fragment; has_error : bool }
-type open_patch = { fragment : fragment; has_error : bool }
+type untyped_patch = { fragment : fragment; has_error : bool }
 
-type open_builder = {
+type untyped_builder = {
   untyped : object_;
   field : 'a. string -> 'a Type.t -> 'a -> field;
-  object_ : string -> open_author -> field;
+  object_ : string -> untyped_author -> field;
   error :
     'error.
-    'error Error.t -> ?backtrace:Printexc.raw_backtrace -> 'error -> open_patch;
-  seal : object_ -> open_patch;
+    'error Error.t ->
+    ?backtrace:Printexc.raw_backtrace ->
+    'error ->
+    untyped_patch;
+  seal : object_ -> untyped_patch;
 }
 
-and open_author = open_builder -> open_patch
+and untyped_author = untyped_builder -> untyped_patch
 
 type builder = {
   text : 'a. tag:string -> ('a, Format.formatter, unit, t) format4 -> 'a;
   untyped : object_;
   field : 'a. string -> 'a Type.t -> 'a -> field;
-  object_ : string -> open_author -> field;
+  object_ : string -> untyped_author -> field;
   seal : object_ -> t;
   value : Value.t -> t;
   error :
@@ -44,7 +47,7 @@ let ( |+ ) object_ field =
     has_error = object_.has_error || field.has_error;
   }
 
-let rec open_builder =
+let rec untyped_builder =
   {
     untyped = { fields = []; has_error = false };
     field =
@@ -52,7 +55,7 @@ let rec open_builder =
         { name; fragment = Type.freeze description value; has_error = false });
     object_ =
       (fun name author ->
-        let patch = author open_builder in
+        let patch = author untyped_builder in
         { name; fragment = patch.fragment; has_error = patch.has_error });
     error =
       (fun interpretation ?backtrace error ->
@@ -84,27 +87,28 @@ let rec open_builder =
         });
   }
 
-let open_patch_fragment (patch : open_patch) = patch.fragment
-let open_patch_has_error (patch : open_patch) = patch.has_error
+let untyped_patch_fragment (patch : untyped_patch) = patch.fragment
+let untyped_patch_has_error (patch : untyped_patch) = patch.has_error
 
-let open_patch_of_value = function
+let untyped_patch_of_value = function
   | Value.Object _ as value ->
       { fragment = Value.freeze value; has_error = false }
   | _ ->
-      invalid_arg "Observe.Generated_runtime.open_value_patch: expected object"
+      invalid_arg
+        "Observe.Generated_runtime.untyped_value_patch: expected object"
 
 let builder =
   {
     text =
       (fun ~tag format ->
         Format.kasprintf (fun message -> Text { tag; message }) format);
-    untyped = open_builder.untyped;
-    field = open_builder.field;
-    object_ = open_builder.object_;
-    seal = (fun object_ -> Open (open_builder.seal object_).fragment);
-    value = (fun value -> Untyped value);
+    untyped = untyped_builder.untyped;
+    field = untyped_builder.field;
+    object_ = untyped_builder.object_;
+    seal = (fun object_ -> Untyped (untyped_builder.seal object_).fragment);
+    value = (fun value -> Value value);
     error =
       (fun interpretation ?backtrace error ->
-        Open (Error.freeze interpretation ?backtrace error));
+        Untyped (Error.freeze interpretation ?backtrace error));
     typed = (fun description value -> Typed (description, value));
   }

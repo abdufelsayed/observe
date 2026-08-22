@@ -391,7 +391,7 @@ let terminal_race work =
               Thread.create
                 (fun () ->
                   await_start ();
-                  let set (m : Observe.Logs.open_builder) =
+                  let set (m : Observe.Logs.untyped_builder) =
                     let open Observe.Logs in
                     m.untyped
                     |+ m.field

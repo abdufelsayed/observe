@@ -737,16 +737,9 @@ let with_generated (module Engine : Ppx_repr_lib.Engine.S) ~library ~recursive
   in
   pexp_let ~loc recursive_flag [ encoder_binding ] generated
 
-let patch_type_name = function "t" -> "patch" | name -> name ^ "_patch"
-
-let patch_author_type_name = function
-  | "t" -> "patch_author"
-  | name -> name ^ "_patch_author"
-
-let patch_builder_type_name = function
-  | "t" -> "patch_builder"
-  | name -> name ^ "_patch_builder"
-
+let patch_type_name name = name ^ "_patch"
+let patch_author_type_name name = name ^ "_patch_author"
+let patch_builder_type_name name = name ^ "_patch_builder"
 let schema_value_name = function "t" -> "schema" | name -> name ^ "_schema"
 
 let declared_identity ~path type_name =

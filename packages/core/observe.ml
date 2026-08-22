@@ -9,7 +9,7 @@ module Generated_runtime = struct
 
   type fragment = Schema.fragment
   type patch_field = Schema.field
-  type open_patch = Message.open_patch
+  type untyped_patch = Message.untyped_patch
 
   let fragment = Schema.fragment
 
@@ -26,7 +26,7 @@ module Generated_runtime = struct
   let combine_named_patches = Schema.combine_named_patches
   let record_schema = Schema.record
   let schema_builder = Schema.builder
-  let open_value_patch = Message.open_patch_of_value
+  let untyped_value_patch = Message.untyped_patch_of_value
 end
 
 module Level = Level

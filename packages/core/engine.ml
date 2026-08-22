@@ -103,12 +103,12 @@ let evaluate_author t author =
         match author Message.builder with
         | Message.Text { tag; message } ->
             Ok (Log.Producer.Text { tag; message })
-        | Message.Untyped value ->
+        | Message.Value value ->
             Result.map
               (fun value ->
                 Log.Producer.Structured { origin = Log.Open; value })
               (Value.freeze value)
-        | Message.Open value ->
+        | Message.Untyped value ->
             Result.map
               (fun value ->
                 Log.Producer.Structured { origin = Log.Open; value })

@@ -170,7 +170,7 @@ let expand_set ~loc ~path:_ expression =
       | Pexp_apply
           ( { pexp_desc = Pexp_ident { txt = Lident "untyped"; _ }; _ },
             [ (Nolabel, object_) ] ) ->
-          eapply ~loc "Observe.Generated_runtime.open_value_patch"
+          eapply ~loc "Observe.Generated_runtime.untyped_value_patch"
             [ (Nolabel, anonymous_value ~extension object_) ]
       | Pexp_record _ ->
           pexp_apply ~loc

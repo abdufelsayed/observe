@@ -41,6 +41,14 @@ module Recursive_record = struct
   let schema = node_schema
 end
 
+module Patch_type_name_collision = struct
+  type patch = Keep
+  type t = { value : int } [@@deriving observe]
+
+  let authored = patch ~value:1 ()
+  let domain = Keep
+end
+
 let manual () =
   let checkout =
     Observe.Logs.create_typed ~name:"checkout" checkout_event_schema
@@ -80,6 +88,8 @@ let () =
   ignore External_description.patch;
   ignore Hygienic_patch_binders.patch;
   ignore Recursive_record.schema;
+  ignore Patch_type_name_collision.authored;
+  ignore Patch_type_name_collision.domain;
   ignore manual;
   ignore open_wide;
   ignore anonymous_point

@@ -3,23 +3,26 @@
 type message
 type object_ = Message.object_
 type field = Message.field
-type open_patch = Message.open_patch
+type untyped_patch = Message.untyped_patch
 
-type open_builder = Message.open_builder = {
+type untyped_builder = Message.untyped_builder = {
   untyped : object_;
   field : 'a. string -> 'a Type.t -> 'a -> field;
-  object_ : string -> (open_builder -> open_patch) -> field;
+  object_ : string -> (untyped_builder -> untyped_patch) -> field;
   error :
     'error.
-    'error Error.t -> ?backtrace:Printexc.raw_backtrace -> 'error -> open_patch;
-  seal : object_ -> open_patch;
+    'error Error.t ->
+    ?backtrace:Printexc.raw_backtrace ->
+    'error ->
+    untyped_patch;
+  seal : object_ -> untyped_patch;
 }
 
 type builder = private {
   text : 'a. tag:string -> ('a, Format.formatter, unit, message) format4 -> 'a;
   untyped : object_;
   field : 'a. string -> 'a Type.t -> 'a -> field;
-  object_ : string -> (open_builder -> open_patch) -> field;
+  object_ : string -> (untyped_builder -> untyped_patch) -> field;
   seal : object_ -> message;
   value : Value.t -> message;
   error :
@@ -50,8 +53,8 @@ val create :
   ?parent:('parent_builder, 'parent_patch) t ->
   name:string ->
   unit ->
-  (open_builder, open_patch) t
-(** Start an empty open wide log at [Info]. [name] must be non-empty. When no
+  (untyped_builder, untyped_patch) t
+(** Start an empty untyped wide log at [Info]. [name] must be non-empty. When no
     route can accept observations, or a required runtime capability is
     unavailable, the returned handle is inert. *)
 

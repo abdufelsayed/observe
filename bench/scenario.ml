@@ -289,7 +289,8 @@ let contended_wide_operation mode =
   let finished = ref 0 in
   let stopping = ref false in
   let current :
-      (Observe.Logs.open_builder, Observe.Logs.open_patch) Observe.Logs.t option
+      (Observe.Logs.untyped_builder, Observe.Logs.untyped_patch) Observe.Logs.t
+      option
       ref =
     ref None
   in

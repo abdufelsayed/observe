@@ -279,7 +279,7 @@ module Generated_runtime : sig
 
   type fragment
   type patch_field
-  type open_patch
+  type untyped_patch
 
   val fragment : 'a description -> 'a -> fragment
 
@@ -316,7 +316,7 @@ module Generated_runtime : sig
 
   val schema_builder : ('record, 'builder) Schema.t -> 'builder
 
-  val open_value_patch : Value.t -> open_patch
+  val untyped_value_patch : Value.t -> untyped_patch
   (** PPX runtime bridge for an annotation-free anonymous object. *)
 end
 
@@ -550,19 +550,19 @@ module Logs : sig
 
   type object_
   type field
-  type open_patch = Generated_runtime.open_patch
+  type untyped_patch = Generated_runtime.untyped_patch
 
-  type open_builder = private {
+  type untyped_builder = private {
     untyped : object_;
     field : 'a. string -> 'a Type.t -> 'a -> field;
-    object_ : string -> (open_builder -> open_patch) -> field;
+    object_ : string -> (untyped_builder -> untyped_patch) -> field;
     error :
       'error.
       'error Error.t ->
       ?backtrace:Printexc.raw_backtrace ->
       'error ->
-      open_patch;
-    seal : object_ -> open_patch;
+      untyped_patch;
+    seal : object_ -> untyped_patch;
   }
 
   type builder = private {
@@ -570,7 +570,7 @@ module Logs : sig
       'a. tag:string -> ('a, Format.formatter, unit, message) format4 -> 'a;
     untyped : object_;
     field : 'a. string -> 'a Type.t -> 'a -> field;
-    object_ : string -> (open_builder -> open_patch) -> field;
+    object_ : string -> (untyped_builder -> untyped_patch) -> field;
     seal : object_ -> message;
     value : Value.t -> message;
     error :
@@ -611,9 +611,9 @@ module Logs : sig
     ?parent:('parent_builder, 'parent_patch) t ->
     name:string ->
     unit ->
-    (open_builder, open_patch) t
-  (** Start an empty open wide log at [Info]. An unavailable route or required
-      runtime capability produces an inert handle. *)
+    (untyped_builder, untyped_patch) t
+  (** Start an empty untyped wide log at [Info]. An unavailable route or
+      required runtime capability produces an inert handle. *)
 
   val create_typed :
     ?parent:('parent_builder, 'parent_patch) t ->
@@ -782,7 +782,7 @@ module Make (IO : IO.S) : sig
     parent:('parent_builder, 'parent_patch) Logs.t ->
     name:string ->
     error:exn Error.t ->
-    ((Logs.open_builder, Logs.open_patch) Logs.t -> 'a io) ->
+    ((Logs.untyped_builder, Logs.untyped_patch) Logs.t -> 'a io) ->
     'a io
 
   val fork_typed :
