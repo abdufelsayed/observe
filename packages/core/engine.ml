@@ -337,9 +337,7 @@ let release_authoring wide =
 
 let rec acquire_writer wide =
   if Atomic.compare_and_set wide.writer false true then ()
-  else (
-    Domain.cpu_relax ();
-    acquire_writer wide)
+  else acquire_writer wide
 
 let release_writer wide = Atomic.set wide.writer false
 
@@ -445,9 +443,8 @@ let rec close_lifecycle wide =
   else close_lifecycle wide
 
 let rec wait_for_authors wide =
-  if lifecycle_has_authors (Atomic.get wide.lifecycle) then (
-    Domain.cpu_relax ();
-    wait_for_authors wide)
+  if lifecycle_has_authors (Atomic.get wide.lifecycle) then
+    wait_for_authors wide
 
 let emit_wide wide =
   match wide.engine with

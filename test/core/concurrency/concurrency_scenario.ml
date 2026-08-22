@@ -397,7 +397,7 @@ let capture_parallel_wide_authors ~name first_author second_author =
               Observe.Logs.set wide (fun m ->
                   Atomic.set entered true;
                   while not (Atomic.get release) do
-                    Domain.cpu_relax ()
+                    Thread.yield ()
                   done;
                   author m))
             ()
