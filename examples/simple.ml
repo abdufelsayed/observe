@@ -14,11 +14,25 @@ type checkout = {
 }
 [@@deriving observe]
 
+exception Payment_declined of { code : string; reason : string }
+
+let payment_error =
+  Observe.Error.create (function
+    | Payment_declined { code; reason } ->
+        Observe.Error.roles ~kind:"payment_declined" ~code ~message:reason
+          ~remediation:"ask the customer to use another payment method" ()
+    | error ->
+        Observe.Error.roles
+          ~kind:(Printexc.exn_slot_name error)
+          ~message:(Printexc.to_string error) ())
+
 let config =
   Observe.Config.create_exn ~service:"checkout-example"
     ~environment:"development" ~min_level:Observe.Level.Debug ()
 
-let () = Observe_lwt_unix.init_exn config
+let () =
+  Printexc.record_backtrace true;
+  Observe_lwt_unix.init_exn config
 
 let main () =
   (* Text point log. *)
@@ -71,27 +85,61 @@ let main () =
     typed_checkout { payment = Authorized { authorization_id = "auth-7" } }];
   Observe.Logs.emit typed_checkout;
 
-  (* Managed Lwt work uses the same wide-log lifecycle. Point logs inside the
-     boundary correlate automatically, and an escaping exception would be
-     contributed with its original backtrace before being re-propagated. *)
+  (* Managed Lwt work uses the same wide-log lifecycle. The payment child below
+     fails after an asynchronous boundary. Observe records the escaping error
+     on that child, emits it at [Error], restores the checkout scope, and
+     re-propagates the same exception and backtrace. The checkout deliberately
+     handles that domain failure and completes independently at [Warn]. *)
   let managed_checkout = Observe.Logs.create ~name:"managed-checkout" () in
-  Observe_lwt_unix.manage managed_checkout ~error:Observe.Error.exn (fun () ->
-      [%observe.set
-        managed_checkout untyped { cart_id = "cart-42"; phase = "authorizing" }];
-      [%observe.info text ~tag:"checkout" "starting payment child"];
-      let open Lwt.Syntax in
-      let* authorization_id =
-        Observe_lwt_unix.fork ~parent:managed_checkout ~name:"capture-payment"
-          ~error:Observe.Error.exn (fun payment ->
-            [%observe.set
-              payment untyped
-                { payment = { status = "authorized"; id = "auth-8" } }];
-            [%observe.info text ~tag:"payment" "payment captured"];
-            Lwt.return "auth-8")
-      in
+  Observe_lwt_unix.manage managed_checkout ~error:payment_error (fun () ->
       [%observe.set
         managed_checkout untyped
-          { phase = "completed"; authorization_id = string authorization_id }];
+          {
+            cart_id = "cart-42";
+            phase = "authorizing";
+            customer = { plan = "team"; returning = true };
+          }];
+      [%observe.info text ~tag:"checkout" "starting payment attempt"];
+      let open Lwt.Syntax in
+      let* () =
+        Lwt.catch
+          (fun () ->
+            Observe_lwt_unix.fork ~parent:managed_checkout
+              ~name:"capture-payment" ~error:payment_error (fun payment ->
+                [%observe.set
+                  payment untyped
+                    {
+                      provider = "example-pay";
+                      amount = 42.50;
+                      currency = "USD";
+                      status = "authorizing";
+                    }];
+                [%observe.info text ~tag:"payment" "calling payment provider"];
+                let* () = Lwt.pause () in
+                raise
+                  (Payment_declined
+                     {
+                       code = "insufficient_funds";
+                       reason = "the payment provider declined the card";
+                     })))
+          (function
+            | Payment_declined { code; _ } ->
+                (* [fork] has restored the parent scope before this handler.
+                   This point log therefore correlates with [managed_checkout],
+                   not with the completed payment child. *)
+                [%observe.warn
+                  text ~tag:"checkout"
+                    "payment declined; keeping the checkout open"];
+                [%observe.set
+                  managed_checkout untyped
+                    {
+                      phase = "payment_declined";
+                      payment = { status = "declined"; code = string code };
+                    }];
+                Observe.Logs.set_level managed_checkout Observe.Level.Warn;
+                Lwt.return_unit
+            | error -> Lwt.fail error)
+      in
       Lwt.return_unit)
 
 let () = Lwt_main.run (Lwt.finalize main Observe_lwt_unix.shutdown)
