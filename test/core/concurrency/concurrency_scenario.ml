@@ -376,11 +376,11 @@ let wide_authoring_linearization () =
         (contains json "\"reserved\":true")
   | _ -> Alcotest.fail "authoring linearization did not publish exactly once"
 
-let wide_parallel_materialization () =
+let capture_parallel_wide_authors ~name first_author second_author =
   let observer = Observer.create (Test_io.Host.create ()) in
   let result =
     Observer.with_capture observer (config ()) (fun capture ->
-        let wide = Observe.Logs.create ~name:"parallel-materialization" () in
+        let wide = Observe.Logs.create ~name () in
         let first_entered = Atomic.make false in
         let second_entered = Atomic.make false in
         let release = Atomic.make false in
@@ -391,7 +391,7 @@ let wide_parallel_materialization () =
             Thread.yield ();
             wait_for entered (attempts - 1))
         in
-        let setter name entered =
+        let setter entered author =
           Thread.create
             (fun () ->
               Observe.Logs.set wide (fun m ->
@@ -399,16 +399,15 @@ let wide_parallel_materialization () =
                   while not (Atomic.get release) do
                     Domain.cpu_relax ()
                   done;
-                  let open Observe.Logs in
-                  m.untyped |+ m.field name Observe.Type.bool true |> m.seal))
+                  author m))
             ()
         in
-        let first = setter "first" first_entered in
+        let first = setter first_entered first_author in
         if not (wait_for first_entered 1_000_000) then (
           Atomic.set release true;
           Thread.join first;
           Alcotest.fail "first wide author did not start");
-        let second = setter "second" second_entered in
+        let second = setter second_entered second_author in
         let parallel = wait_for second_entered 1_000_000 in
         Atomic.set release true;
         Thread.join first;
@@ -418,10 +417,18 @@ let wide_parallel_materialization () =
         Observe.Logs.emit wide;
         Test_io.Direct.return capture)
   in
+  match result with
+  | Ok capture -> capture
+  | Error _ -> Alcotest.fail "parallel wide capture was rejected"
+
+let wide_parallel_materialization () =
+  let field name (m : Observe.Logs.untyped_builder) =
+    let open Observe.Logs in
+    m.untyped |+ m.field name Observe.Type.bool true |> m.seal
+  in
   let capture =
-    match result with
-    | Ok capture -> capture
-    | Error _ -> Alcotest.fail "parallel materialization capture was rejected"
+    capture_parallel_wide_authors ~name:"parallel-materialization"
+      (field "first") (field "second")
   in
   match Observe.Capture.logs capture with
   | [ log ] ->
@@ -437,53 +444,12 @@ let wide_parallel_materialization () =
   | _ -> Alcotest.fail "parallel materialization did not publish exactly once"
 
 let wide_parallel_failure_linearization () =
-  let observer = Observer.create (Test_io.Host.create ()) in
-  let result =
-    Observer.with_capture observer (config ()) (fun capture ->
-        let wide = Observe.Logs.create ~name:"parallel-failure" () in
-        let first_entered = Atomic.make false in
-        let second_entered = Atomic.make false in
-        let release = Atomic.make false in
-        let rec wait_for entered attempts =
-          if Atomic.get entered then true
-          else if attempts = 0 then false
-          else (
-            Thread.yield ();
-            wait_for entered (attempts - 1))
-        in
-        let setter entered =
-          Thread.create
-            (fun () ->
-              Observe.Logs.set wide (fun m ->
-                  Atomic.set entered true;
-                  while not (Atomic.get release) do
-                    Domain.cpu_relax ()
-                  done;
-                  let open Observe.Logs in
-                  m.untyped
-                  |+ m.field "invalid" Observe.Type.float Float.nan
-                  |> m.seal))
-            ()
-        in
-        let first = setter first_entered in
-        if not (wait_for first_entered 1_000_000) then (
-          Atomic.set release true;
-          Thread.join first;
-          Alcotest.fail "first failing wide author did not start");
-        let second = setter second_entered in
-        let parallel = wait_for second_entered 1_000_000 in
-        Atomic.set release true;
-        Thread.join first;
-        Thread.join second;
-        Alcotest.(check bool)
-          "failing wide callbacks materialize concurrently" true parallel;
-        Observe.Logs.emit wide;
-        Test_io.Direct.return capture)
+  let fail (m : Observe.Logs.untyped_builder) =
+    let open Observe.Logs in
+    m.untyped |+ m.field "invalid" Observe.Type.float Float.nan |> m.seal
   in
   let capture =
-    match result with
-    | Ok capture -> capture
-    | Error _ -> Alcotest.fail "parallel failure capture was rejected"
+    capture_parallel_wide_authors ~name:"parallel-failure" fail fail
   in
   Alcotest.(check int)
     "one lifecycle failure is diagnosed" 1
