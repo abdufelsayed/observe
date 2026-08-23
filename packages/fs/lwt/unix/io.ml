@@ -83,7 +83,7 @@ let dispose notifier =
   in
   if should_send then send notifier
 
-let child = Filename.concat
+let child ~dir ~name = Filename.concat dir name
 
 let operation_name = function
   | Inspect -> "inspect"

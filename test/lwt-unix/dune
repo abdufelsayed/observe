@@ -1,7 +1,7 @@
 (executable
  (name ready_scenario)
  (modules ready_scenario)
- (libraries observe-lwt-unix observe lwt lwt.unix unix))
+ (libraries observe-lwt-unix observe lwt lwt.unix threads unix uuidm))
 
 (rule
  (alias observe-lwt-unix-contracts)
@@ -10,6 +10,9 @@
  (action
   (progn
    (run %{exe:ready_scenario.exe} clock)
+   (run %{exe:ready_scenario.exe} default-identity)
+   (run %{exe:ready_scenario.exe} custom-identity)
+   (run %{exe:ready_scenario.exe} failing-identity)
    (run %{exe:ready_scenario.exe} console)
    (run %{exe:ready_scenario.exe} json-console)
    (run %{exe:ready_scenario.exe} wide-json-console)
@@ -23,9 +26,10 @@
    (run %{exe:ready_scenario.exe} lifecycle-flush)
    (run %{exe:ready_scenario.exe} lifecycle-failure)
    (run %{exe:ready_scenario.exe} basic-capture)
-   (run %{exe:ready_scenario.exe} wide-scope)
-   (run %{exe:ready_scenario.exe} managed-wide)
-   (run %{exe:ready_scenario.exe} managed-late)
+   (run %{exe:ready_scenario.exe} operation-scope)
+   (run %{exe:ready_scenario.exe} operation-lifecycle)
+   (run %{exe:ready_scenario.exe} operation-late)
+   (run %{exe:ready_scenario.exe} operation-foreign)
    (run %{exe:ready_scenario.exe} capture-then-init)
    (run %{exe:ready_scenario.exe} concurrent-capture)
    (run %{exe:ready_scenario.exe} nested-capture)

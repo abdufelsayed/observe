@@ -27,6 +27,18 @@ type sample =
   | List of sample list
   | Object of (string * sample) list
 
+module String_set = Set.Make (String)
+
+let unique_fields fields =
+  let rec collect seen unique = function
+    | [] -> List.rev unique
+    | (name, _) :: rest when String_set.mem name seen ->
+        collect seen unique rest
+    | ((name, _) as field) :: rest ->
+        collect (String_set.add name seen) (field :: unique) rest
+  in
+  collect String_set.empty [] fields
+
 let rec value_of_sample = function
   | Null -> Observe.Value.null
   | Bool value -> Observe.Value.bool value
@@ -36,7 +48,9 @@ let rec value_of_sample = function
   | List values -> Observe.Value.list (List.map value_of_sample values)
   | Object fields ->
       Observe.Value.object_
-        (List.map (fun (name, value) -> (name, value_of_sample value)) fields)
+        (List.map
+           (fun (name, value) -> (name, value_of_sample value))
+           (unique_fields fields))
 
 let scalar_sample =
   let open QCheck.Gen in
@@ -99,7 +113,7 @@ let sample =
 let capture_outcome message =
   let config = Test_io.config "property" in
   match
-    Observer.with_capture observer config (fun capture ->
+    Observer.with_capture observer ~config (fun capture ->
         Observe.Logs.info message;
         (Observe.Capture.logs capture, Observe.Capture.diagnostics capture))
   with
@@ -112,7 +126,10 @@ let capture message =
   | _ -> failwith "expected one captured log"
 
 let capture_text tag message = capture (Test_io.text ~tag message)
-let capture_value value = capture (fun m -> m.value value)
+
+let capture_value value =
+  capture (fun m -> m.value (Observe.Value.object_ [ ("value", value) ]))
+
 let format formatter log = Observe.Formatter.format formatter log
 let pretty style log = format (Observe.Formatter.pretty style) log
 
@@ -239,7 +256,7 @@ let test_non_finite_floats_are_withheld () =
 let test_finite_float_matches_repr_precision () =
   let value = 1.2345678901234567 in
   let expected =
-    "{\"service\":\"property\",\"timestamp\":\"42\",\"level\":\"info\",\"body\":"
+    "{\"service\":\"property\",\"timestamp\":\"1970-01-01T00:00:00.000000042Z\",\"level\":\"info\",\"value\":"
     ^ Repr.to_json_string ~minify:true Repr.float value
     ^ "}"
   in

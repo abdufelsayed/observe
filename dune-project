@@ -89,6 +89,8 @@
   lwt
   ptime
   mtime
+  uuidm
+  mirage-crypto-rng
   (ocamlfind :with-test)))
 
 (package

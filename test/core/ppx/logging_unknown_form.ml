@@ -1,1 +1,1 @@
-let _ = [%observe.info value 1]
+let _ = [%observe.info unknown 1 2]

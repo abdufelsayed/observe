@@ -1,3 +1,3 @@
 type phase = Started | Finished [@@deriving observe]
 
-let _ = Observe.Logs.create_typed ~name:"phase" phase_t
+let _ = Observe.Logs.create_typed ~name:"phase" ~using:phase_t ()

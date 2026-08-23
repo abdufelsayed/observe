@@ -822,6 +822,11 @@ let fragment_core_type ~loc =
     (Ldot (Ldot (Lident "Observe", "Generated_runtime"), "fragment"))
     []
 
+let patch_field_core_type ~loc =
+  type_path ~loc
+    (Ldot (Ldot (Lident "Observe", "Generated_runtime"), "patch_field"))
+    []
+
 let patch_declaration declaration =
   let loc = declaration.ptype_loc in
   type_declaration ~loc
@@ -923,6 +928,7 @@ let arrow_chain ~loc arguments result =
 let patch_builder_declaration ~private_ ~atomic_type_names declaration fields =
   let loc = declaration.ptype_loc in
   let patch = patch_core_type declaration in
+  let patch_field = patch_field_core_type ~loc in
   let arrow argument result = ptyp_arrow ~loc Nolabel argument result in
   let list type_ = type_path ~loc (Lident "list") [ type_ ] in
   let labels =
@@ -938,7 +944,7 @@ let patch_builder_declaration ~private_ ~atomic_type_names declaration fields =
     let error_function =
       arrow_chain ~loc
         [
-          (Nolabel, interpretation);
+          (Labelled "using", interpretation);
           (Optional "backtrace", backtrace);
           (Nolabel, error_type);
         ]
@@ -954,6 +960,10 @@ let patch_builder_declaration ~private_ ~atomic_type_names declaration fields =
         ~name:(Located.mk ~loc "__observe_combine")
         ~mutable_:Immutable
         ~type_:(arrow (list patch) patch);
+      label_declaration ~loc
+        ~name:(Located.mk ~loc "__observe_make_patch_fields")
+        ~mutable_:Immutable
+        ~type_:(arrow (list patch_field) patch);
     ]
     @ List.map
         (fun field ->
@@ -966,6 +976,18 @@ let patch_builder_declaration ~private_ ~atomic_type_names declaration fields =
               (arrow
                  (patch_author_input_type ~atomic_type_names field.pld_type)
                  patch))
+        fields
+    @ List.map
+        (fun field ->
+          label_declaration ~loc:field.pld_loc
+            ~name:
+              (Located.mk ~loc:field.pld_loc
+                 ("__observe_patch_field_" ^ field.pld_name.txt))
+            ~mutable_:Immutable
+            ~type_:
+              (arrow
+                 (patch_input_type ~atomic_type_names field.pld_type)
+                 patch_field))
         fields
   in
   type_declaration ~loc
@@ -1060,12 +1082,17 @@ let patch_signature_items ~atomic_type_names declaration =
               patch_input_type ~atomic_type_names field.pld_type ))
           fields
       in
+      let patch_schema_arguments =
+        match declaration.ptype_params with
+        | [] -> []
+        | _ -> [ (Labelled "using", schema_core_type declaration) ]
+      in
       let patch_description =
         value_description ~loc
           ~name:(Located.mk ~loc (patch_value_name declaration.ptype_name.txt))
           ~type_:
             (arrow_chain ~loc
-               (parameter_arguments
+               (patch_schema_arguments
                @ patch_arguments
                @ [ (Nolabel, ptyp_constr ~loc (lident ~loc "unit") []) ])
                (patch_core_type declaration))
@@ -1177,10 +1204,10 @@ let patch_structure_items (module Engine : Ppx_repr_lib.Engine.S) ~library ~path
   match declaration.ptype_kind with
   | Ptype_record fields ->
       let schema_name = schema_value_name declaration.ptype_name.txt in
-      let schema_name_parameter = "__observe_schema_name" in
-      let named_patch field_fragment =
-        for_ppx_call ~loc "named_record_patch_fields"
-          [ evar ~loc schema_name_parameter; elist ~loc [ field_fragment ] ]
+      let schema_identity_parameter = "__observe_schema_identity" in
+      let identified_patch field_fragment =
+        for_ppx_call ~loc "identified_record_patch_fields"
+          [ evar ~loc schema_identity_parameter; elist ~loc [ field_fragment ] ]
       in
       let builder_field field =
         let field_loc = field.pld_loc in
@@ -1199,7 +1226,26 @@ let patch_structure_items (module Engine : Ppx_repr_lib.Engine.S) ~library ~path
             (Lident ("__observe_field_" ^ field.pld_name.txt)),
           pexp_fun ~loc:field_loc Nolabel None
             (pvar ~loc:field_loc value_name)
-            (named_patch field_fragment) )
+            (identified_patch field_fragment) )
+      in
+      let patch_builder_field field =
+        let field_loc = field.pld_loc in
+        let value_name = "__observe_patch_builder_" ^ field.pld_name.txt in
+        let fragment =
+          fragment_expression
+            (module Engine)
+            ~library ~atomic_type_names ~local_descriptions field.pld_type
+            (evar ~loc:field_loc value_name)
+        in
+        let field_fragment =
+          for_ppx_call ~loc:field_loc "patch_field"
+            [ estr ~loc:field_loc field.pld_name.txt; fragment ]
+        in
+        ( Located.mk ~loc:field_loc
+            (Lident ("__observe_patch_field_" ^ field.pld_name.txt)),
+          pexp_fun ~loc:field_loc Nolabel None
+            (pvar ~loc:field_loc value_name)
+            field_fragment )
       in
       let typed_value = "__observe_typed_patch" in
       let patches_value = "__observe_patches" in
@@ -1217,11 +1263,11 @@ let patch_structure_items (module Engine : Ppx_repr_lib.Engine.S) ~library ~path
             ]
         in
         let error_function =
-          pexp_fun ~loc Nolabel None (pvar ~loc interpretation)
+          pexp_fun ~loc (Labelled "using") None (pvar ~loc interpretation)
             (pexp_fun ~loc (Optional "backtrace") None (pvar ~loc backtrace)
                (pexp_fun ~loc Nolabel None (pvar ~loc error_value)
-                  (for_ppx_call ~loc "named_error_patch"
-                     [ evar ~loc schema_name_parameter; error_fragment ])))
+                  (for_ppx_call ~loc "identified_error_patch"
+                     [ evar ~loc schema_identity_parameter; error_fragment ])))
         in
         pexp_record ~loc
           (( Located.mk ~loc (Lident "typed"),
@@ -1230,15 +1276,25 @@ let patch_structure_items (module Engine : Ppx_repr_lib.Engine.S) ~library ~path
           :: (Located.mk ~loc (Lident "error"), error_function)
           :: ( Located.mk ~loc (Lident "__observe_combine"),
                pexp_fun ~loc Nolabel None (pvar ~loc patches_value)
-                 (for_ppx_call ~loc "combine_named_patches"
-                    [ evar ~loc schema_name_parameter; evar ~loc patches_value ])
-             )
-          :: List.map builder_field fields)
+                 (for_ppx_call ~loc "combine_identified_patches"
+                    [
+                      evar ~loc schema_identity_parameter;
+                      evar ~loc patches_value;
+                    ]) )
+          :: ( Located.mk ~loc (Lident "__observe_make_patch_fields"),
+               pexp_fun ~loc Nolabel None (pvar ~loc patches_value)
+                 (for_ppx_call ~loc "identified_record_patch_fields"
+                    [
+                      evar ~loc schema_identity_parameter;
+                      evar ~loc patches_value;
+                    ]) )
+          :: (List.map builder_field fields
+             @ List.map patch_builder_field fields))
           None
       in
       let builder_factory =
         pexp_fun ~loc Nolabel None
-          (pvar ~loc schema_name_parameter)
+          (pvar ~loc schema_identity_parameter)
           builder_record
       in
       let schema_expression =
@@ -1255,16 +1311,16 @@ let patch_structure_items (module Engine : Ppx_repr_lib.Engine.S) ~library ~path
         value_binding ~loc ~pat:(pvar ~loc schema_name)
           ~expr:(lambda ~loc parameter_patterns schema_expression)
       in
+      let patch_schema_parameter = "__observe_patch_schema" in
+      let patch_builder_value = "__observe_patch_builder" in
       let present_field_expression field value_name =
         let field_loc = field.pld_loc in
-        let fragment =
-          fragment_expression
-            (module Engine)
-            ~library ~atomic_type_names ~local_descriptions field.pld_type
-            (evar ~loc:field_loc value_name)
-        in
-        for_ppx_call ~loc:field_loc "patch_field"
-          [ estr ~loc:field_loc field.pld_name.txt; fragment ]
+        pexp_apply ~loc:field_loc
+          (pexp_field ~loc:field_loc
+             (evar ~loc:field_loc patch_builder_value)
+             (Located.mk ~loc:field_loc
+                (Lident ("__observe_patch_field_" ^ field.pld_name.txt))))
+          [ (Nolabel, evar ~loc:field_loc value_name) ]
       in
       let indexed_fields =
         List.mapi (fun index field -> (index, field)) fields
@@ -1300,11 +1356,25 @@ let patch_structure_items (module Engine : Ppx_repr_lib.Engine.S) ~library ~path
           indexed_fields (elist ~loc [])
       in
       let patch_body =
-        for_ppx_call ~loc "record_patch_fields"
+        pexp_apply ~loc
+          (pexp_field ~loc
+             (evar ~loc patch_builder_value)
+             (Located.mk ~loc (Lident "__observe_make_patch_fields")))
+          [ (Nolabel, fields_expression) ]
+      in
+      let patch_schema =
+        match parameter_patterns with
+        | [] -> evar ~loc schema_name
+        | _ -> evar ~loc patch_schema_parameter
+      in
+      let patch_body =
+        pexp_let ~loc Nonrecursive
           [
-            apply ~loc (evar ~loc schema_name) parameter_values;
-            fields_expression;
+            value_binding ~loc
+              ~pat:(pvar ~loc patch_builder_value)
+              ~expr:(for_ppx_call ~loc "schema_builder" [ patch_schema ]);
           ]
+          patch_body
       in
       let patch_body = pexp_fun ~loc Nolabel None (punit ~loc) patch_body in
       let patch_body =
@@ -1316,7 +1386,14 @@ let patch_structure_items (module Engine : Ppx_repr_lib.Engine.S) ~library ~path
               body)
           indexed_fields patch_body
       in
-      let patch_body = lambda ~loc parameter_patterns patch_body in
+      let patch_body =
+        match parameter_patterns with
+        | [] -> patch_body
+        | _ ->
+            pexp_fun ~loc (Labelled "using") None
+              (pvar ~loc patch_schema_parameter)
+              patch_body
+      in
       let patch_binding =
         value_binding ~loc
           ~pat:(pvar ~loc (patch_value_name declaration.ptype_name.txt))

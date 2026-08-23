@@ -69,7 +69,7 @@ let check_capture_tags name expected capture =
     (String.concat "," (capture_tags capture))
 
 let structured_json log =
-  match Observe.Log.body log with
+  match Observe.Log.event log with
   | Observe.Log.Text _ -> Alcotest.fail "expected a structured body"
   | Observe.Log.Structured { value; _ } ->
       Observe.Value.frozen_to_json_string value
@@ -123,7 +123,7 @@ let wide_lifecycle () =
   let observer = make_observer () in
   let captured = ref None in
   ignore
-    (Observer.with_capture observer (config ()) (fun capture ->
+    (Observer.with_capture observer ~config:(config ()) (fun capture ->
          let wide = Observe.Logs.create ~name:"checkout" () in
          Observe.Logs.set wide (fun m ->
              let open Observe.Logs in
@@ -131,7 +131,7 @@ let wide_lifecycle () =
              |+ m.field "cart_id" Observe.Type.string "cart-1"
              |+ m.field "attempt" Observe.Type.int 2
              |> m.seal);
-         Observe.Logs.set_level wide Observe.Level.Warn;
+         Observe.Logs.set_level wide ~level:Observe.Level.Warn;
          Observe.Logs.emit wide;
          captured := Some capture));
   let capture = Option.get !captured in
@@ -161,35 +161,34 @@ let causal_children_and_correlation () =
   let observer = make_observer () in
   let captured = ref None in
   ignore
-    (Observer.with_capture observer (config ()) (fun capture ->
-         let parent = Observe.Logs.create ~name:"parent" () in
-         Observe.Logs.set parent (fun m ->
-             let open Observe.Logs in
-             m.untyped
-             |+ m.field "parent_only" Observe.Type.string "parent"
-             |> m.seal);
-         let child =
-           Observe.Logs.create_typed ~parent ~name:"typed-child"
-             mutable_event_schema
-         in
-         Observe.Logs.info ~operation:child
-           (Test_io.text ~tag:"explicit" "child");
-         Observer.with_wide observer parent (fun () ->
+    (Observer.with_capture observer ~config:(config ()) (fun capture ->
+         Observer.with_operation observer ~name:"parent" (fun () ->
+             let parent = Observe.Logs.current () in
+             Observe.Logs.set parent (fun m ->
+                 let open Observe.Logs in
+                 m.untyped
+                 |+ m.field "parent_only" Observe.Type.string "parent"
+                 |> m.seal);
              Observe.Logs.info (Test_io.text ~tag:"parent" "before");
-             Observer.with_wide observer child (fun () ->
+             Observer.fork observer ~parent ~name:"typed-child"
+               ~using:mutable_event_schema (fun () ->
+                 let child =
+                   Observe.Logs.current_typed ~using:mutable_event_schema
+                 in
+                 Observe.Logs.info ~operation:child
+                   (Test_io.text ~tag:"explicit" "child");
                  Observe.Logs.info (Test_io.text ~tag:"child" "inside"));
              Observe.Logs.info (Test_io.text ~tag:"parent" "after"));
-         Observe.Logs.emit child;
-         Observe.Logs.emit parent;
          captured := Some capture));
   let logs = Observe.Capture.logs (Option.get !captured) in
   match logs with
-  | [ explicit; parent_before; child_inside; parent_after; child; parent ] ->
+  | [ parent_before; explicit; child_inside; child; parent_after; parent ] ->
       List.iter
         (fun (log, expected) ->
           Alcotest.(check (option string))
             "point correlation" (Some expected)
-            (Observe.Log.correlation_id log))
+            (Option.map Observe.Log.operation_reference_id
+               (Observe.Log.correlation log)))
         [
           (explicit, "operation-2");
           (parent_before, "operation-1");
@@ -202,45 +201,103 @@ let causal_children_and_correlation () =
         (Observe.Log.operation_id child_operation);
       Alcotest.(check (option string))
         "child references parent only" (Some "operation-1")
-        (Observe.Log.operation_parent_id child_operation);
+        (Option.map Observe.Log.operation_reference_id
+           (Observe.Log.operation_parent child_operation));
       Alcotest.(check string)
         "typed child starts without copied parent fields" "{}"
         (structured_json child);
       let parent_operation = Option.get (Observe.Log.operation parent) in
       Alcotest.(check (option string))
         "parent has no parent" None
-        (Observe.Log.operation_parent_id parent_operation);
+        (Option.map Observe.Log.operation_reference_id
+           (Observe.Log.operation_parent parent_operation));
       Alcotest.(check string)
         "parent payload remains independent" "{\"parent_only\":\"parent\"}"
         (structured_json parent)
   | _ -> Alcotest.fail "expected four point logs and two wide logs"
 
-let managed_execution () =
+let current_operation_contract () =
+  let observer = make_observer () in
+  let not_bound = Observe.Logs.Current_error Observe.Logs.Not_bound in
+  let expected_open = Observe.Logs.Current_error Observe.Logs.Expected_open in
+  let expected_typed = Observe.Logs.Current_error Observe.Logs.Expected_typed in
+  let schema_mismatch =
+    Observe.Logs.Current_error Observe.Logs.Schema_mismatch
+  in
+  Alcotest.check_raises "no ambient fallback outside an operation" not_bound
+    (fun () -> ignore (Observe.Logs.current ()));
+  let other_schema =
+    Observe.Generated_runtime.record_schema mutable_event_t ~builder:(fun _ ->
+        { typed = Fun.id })
+  in
+  ignore
+    (Observer.with_capture observer ~config:(config ()) (fun _ ->
+         let manual = Observe.Logs.create ~name:"manual" () in
+         Alcotest.check_raises "manual creation does not bind" not_bound
+           (fun () -> ignore (Observe.Logs.current ()));
+         Observe.Logs.emit manual;
+         Observer.with_operation observer ~name:"open" (fun () ->
+             let parent = Observe.Logs.current () in
+             Alcotest.check_raises "open current rejects typed retrieval"
+               expected_typed (fun () ->
+                 ignore (Observe.Logs.current_typed ~using:mutable_event_schema));
+             Observer.fork observer ~parent ~name:"typed-child"
+               ~using:mutable_event_schema (fun () ->
+                 Alcotest.check_raises "typed current rejects open retrieval"
+                   expected_open (fun () -> ignore (Observe.Logs.current ()));
+                 Alcotest.check_raises "typed current checks schema identity"
+                   schema_mismatch (fun () ->
+                     ignore (Observe.Logs.current_typed ~using:other_schema));
+                 ignore (Observe.Logs.current_typed ~using:mutable_event_schema));
+             ignore (Observe.Logs.current ()));
+         Observer.with_operation observer ~name:"typed"
+           ~using:mutable_event_schema (fun () ->
+             ignore (Observe.Logs.current_typed ~using:mutable_event_schema));
+         Test_io.Direct.return ()));
+  Alcotest.check_raises "operation scope is removed after completion" not_bound
+    (fun () -> ignore (Observe.Logs.current ()));
+  let authored = ref 0 in
+  ignore
+    (Observer.with_capture observer ~config:(config ~enabled:false ()) (fun _ ->
+         Observer.with_operation observer ~name:"disabled" (fun () ->
+             let current = Observe.Logs.current () in
+             Observe.Logs.set current (fun m ->
+                 incr authored;
+                 m.seal m.untyped);
+             Test_io.Direct.return ())));
+  Alcotest.(check int)
+    "disabled admission keeps current without authoring" 0 !authored
+
+let operation_execution () =
   Printexc.record_backtrace true;
   let observer = make_observer () in
   let captured = ref None in
-  let escaped = Failure "managed" in
+  let escaped = Failure "operation" in
   let original_backtrace =
-    try failwith "managed-origin"
+    try failwith "operation-origin"
     with Failure _ -> Printexc.get_raw_backtrace ()
   in
   ignore
-    (Observer.with_capture observer (config ()) (fun capture ->
-         let success = Observe.Logs.create ~name:"success" () in
+    (Observer.with_capture observer ~config:(config ()) (fun capture ->
          let marker = ref 7 in
          let returned =
-           Observer.manage observer success ~error:Observe.Error.exn (fun () ->
-               Observe.Logs.info (Test_io.text ~tag:"managed" "success");
+           Observer.with_operation observer ~name:"success" (fun () ->
+               Observe.Logs.info (Test_io.text ~tag:"operation" "success");
                marker)
          in
          Alcotest.(check bool)
-           "managed success returns the exact value" true (returned == marker);
-         let failure = Observe.Logs.create ~name:"failure" () in
+           "operation success returns the exact value" true (returned == marker);
+         let returned_error =
+           Observer.with_operation observer ~name:"result-error" (fun () ->
+               Error "ordinary-result")
+         in
+         Alcotest.(check (result unit string))
+           "Result.Error remains an ordinary return" (Error "ordinary-result")
+           returned_error;
          let caught =
            try
              ignore
-               (Observer.manage observer failure ~error:Observe.Error.exn
-                  (fun () ->
+               (Observer.with_operation observer ~name:"failure" (fun () ->
                     Printexc.raise_with_backtrace escaped original_backtrace));
              None
            with raised -> Some (raised, Printexc.get_raw_backtrace ())
@@ -248,7 +305,7 @@ let managed_execution () =
          (match caught with
          | Some (raised, backtrace) ->
              Alcotest.(check bool)
-               "managed failure preserves exception identity" true
+               "operation failure preserves exception identity" true
                (raised == escaped);
              let original =
                Printexc.raw_backtrace_to_string original_backtrace
@@ -259,18 +316,14 @@ let managed_execution () =
                && String.sub propagated 0 (String.length original) = original
              in
              Alcotest.(check bool)
-               "managed failure preserves raw backtrace origin" true
+               "operation failure preserves raw backtrace origin" true
                preserves_origin
-         | None -> Alcotest.fail "managed failure was swallowed");
-         let cancelled = Observe.Logs.create ~name:"cancelled" () in
-         Alcotest.check_raises "managed cancellation is preserved"
+         | None -> Alcotest.fail "operation failure was swallowed");
+         Alcotest.check_raises "operation cancellation is preserved"
            Test_io.Direct.Control (fun () ->
              ignore
-               (Observer.manage observer cancelled ~error:Observe.Error.exn
-                  (fun () -> raise Test_io.Direct.Control)));
-         let interpreter_failure =
-           Observe.Logs.create ~name:"interpreter-failure" ()
-         in
+               (Observer.with_operation observer ~name:"cancelled" (fun () ->
+                    raise Test_io.Direct.Control)));
          let original = Failure "application-failure" in
          let raising_interpreter =
            Observe.Error.create (fun _ -> raise Test_io.Direct.Control)
@@ -278,7 +331,7 @@ let managed_execution () =
          let propagated =
            try
              ignore
-               (Observer.manage observer interpreter_failure
+               (Observer.with_operation observer ~name:"interpreter-failure"
                   ~error:raising_interpreter (fun () -> raise original));
              None
            with raised -> Some raised
@@ -290,19 +343,27 @@ let managed_execution () =
            | None -> false);
          captured := Some capture));
   match Observe.Capture.logs (Option.get !captured) with
-  | [ point; success; failure; cancelled ] ->
+  | [ point; success; result_error; failure; cancelled ] ->
       Alcotest.(check (option string))
-        "managed point uses current identity" (Some "operation-1")
-        (Observe.Log.correlation_id point);
+        "point uses current operation identity" (Some "operation-1")
+        (Option.map Observe.Log.operation_reference_id
+           (Observe.Log.correlation point));
       Alcotest.(check bool)
         "success remains info" true
         (Observe.Level.equal Observe.Level.Info (Observe.Log.level success));
+      Alcotest.(check bool)
+        "Result.Error infers no error level" true
+        (Observe.Level.equal Observe.Level.Info
+           (Observe.Log.level result_error));
+      Alcotest.(check string)
+        "Result.Error adds no fields" "{}"
+        (structured_json result_error);
       Alcotest.(check bool)
         "ordinary failure derives error" true
         (Observe.Level.equal Observe.Level.Error (Observe.Log.level failure));
       Alcotest.(check bool)
         "failure contains interpreted error" true
-        (contains (structured_json failure) "managed");
+        (contains (structured_json failure) "operation");
       Alcotest.(check bool)
         "cancellation infers no error level" true
         (Observe.Level.equal Observe.Level.Info (Observe.Log.level cancelled));
@@ -310,43 +371,11 @@ let managed_execution () =
         "cancellation adds no fields" "{}"
         (structured_json cancelled);
       Alcotest.(check int)
-        "interpreter failure withholds the managed observation" 1
+        "interpreter failure withholds the operation observation" 1
         (Test_io.diagnostic_count
            (Observe.Capture.diagnostics (Option.get !captured))
            Observe.Diagnostics.Message_evaluation_raised)
-  | _ -> Alcotest.fail "expected managed point and three completed wide logs"
-
-let terminal_completion () =
-  let observer = make_observer () in
-  let captured = ref None in
-  ignore
-    (Observer.with_capture observer (config ()) (fun capture ->
-         let wide = Observe.Logs.create ~name:"stream" () in
-         let terminal =
-           Observe.Logs.Terminal.create ~error:Observe.Error.exn wide
-         in
-         Observe.Logs.Terminal.fail terminal
-           ~set:(fun m ->
-             let open Observe.Logs in
-             m.untyped
-             |+ m.field "terminal" Observe.Type.string "failure"
-             |> m.seal)
-           (Failure "stream-failed");
-         Observe.Logs.Terminal.complete terminal ();
-         Observe.Logs.Terminal.cancel terminal ();
-         captured := Some capture));
-  match Observe.Capture.logs (Option.get !captured) with
-  | [ log ] ->
-      Alcotest.(check bool)
-        "first terminal action publishes once" true
-        (Observe.Level.equal Observe.Level.Error (Observe.Log.level log));
-      Alcotest.(check bool)
-        "terminal failure is structured" true
-        (contains (structured_json log) "stream-failed");
-      Alcotest.(check bool)
-        "winning terminal facts precede completion" true
-        (contains (structured_json log) "\"terminal\":\"failure\"")
-  | _ -> Alcotest.fail "terminal actions published more than once"
+  | _ -> Alcotest.fail "expected operation point and four completed wide logs"
 
 let operation_lookup_failure () =
   let observer =
@@ -354,9 +383,17 @@ let operation_lookup_failure () =
   in
   let capture =
     match
-      Raising_operation_get_observer.with_capture observer (config ())
+      Raising_operation_get_observer.with_capture observer ~config:(config ())
         (fun capture ->
           Observe.Logs.info (Test_io.text ~tag:"lookup" "survives");
+          let expect_not_bound () =
+            match Observe.Logs.current () with
+            | _ -> Alcotest.fail "expected no current operation"
+            | exception Observe.Logs.Current_error Observe.Logs.Not_bound -> ()
+            | exception _ -> Alcotest.fail "unexpected current lookup failure"
+          in
+          expect_not_bound ();
+          expect_not_bound ();
           capture)
     with
     | Ok capture -> capture
@@ -366,7 +403,7 @@ let operation_lookup_failure () =
     "operation lookup failure does not withhold point log" 1
     (List.length (Observe.Capture.logs capture));
   Alcotest.(check int)
-    "operation lookup failure is captured" 1
+    "point and direct operation lookup failures are captured" 2
     (Test_io.diagnostic_count
        (Observe.Capture.diagnostics capture)
        Observe.Diagnostics.Operation_lookup_raised)
@@ -389,7 +426,7 @@ let wide_inert_laziness () =
   Observe.Logs.set wide (fun m ->
       incr authored;
       m.seal m.untyped);
-  Observe.Logs.set_level wide Observe.Level.Error;
+  Observe.Logs.set_level wide ~level:Observe.Level.Error;
   Observe.Logs.emit wide;
   Alcotest.(check int) "inert creation requests no identifier" 0 !identifiers;
   Alcotest.(check int) "inert creation reads no clock" 0 !monotonic;
@@ -399,7 +436,7 @@ let wide_merge_and_seal () =
   let observer = make_observer () in
   let captured = ref None in
   ignore
-    (Observer.with_capture observer (config ()) (fun capture ->
+    (Observer.with_capture observer ~config:(config ()) (fun capture ->
          let wide = Observe.Logs.create ~name:"merge" () in
          Observe.Logs.set wide (fun m ->
              let open Observe.Logs in
@@ -424,7 +461,7 @@ let wide_merge_and_seal () =
          Observe.Logs.set wide (fun m ->
              incr authored_after_seal;
              m.seal m.untyped);
-         Observe.Logs.set_level wide Observe.Level.Error;
+         Observe.Logs.set_level wide ~level:Observe.Level.Error;
          Observe.Logs.emit wide;
          Alcotest.(check int)
            "sealed set is not authored" 0 !authored_after_seal;
@@ -457,12 +494,12 @@ let wide_final_admission () =
   let observer = make_observer () in
   let captured = ref None in
   ignore
-    (Observer.with_capture observer (config ~min_level:Observe.Level.Error ())
-       (fun capture ->
+    (Observer.with_capture observer
+       ~config:(config ~min_level:Observe.Level.Error ()) (fun capture ->
          let rejected = Observe.Logs.create ~name:"threshold" () in
          Observe.Logs.emit rejected;
          let admitted = Observe.Logs.create ~name:"threshold" () in
-         Observe.Logs.set_level admitted Observe.Level.Error;
+         Observe.Logs.set_level admitted ~level:Observe.Level.Error;
          Observe.Logs.emit admitted;
          captured := Some capture));
   match Observe.Capture.logs (Option.get !captured) with
@@ -482,33 +519,34 @@ let wide_error_level () =
   let observer = make_observer () in
   let captured = ref None in
   ignore
-    (Observer.with_capture observer (config ~min_level:Observe.Level.Error ())
-       (fun capture ->
+    (Observer.with_capture observer
+       ~config:(config ~min_level:Observe.Level.Error ()) (fun capture ->
          let derived = Observe.Logs.create ~name:"derived-error" () in
          Observe.Logs.set derived (fun m ->
-             m.error Observe.Error.exn (Failure "boom"));
+             m.error ~using:Observe.Error.exn (Failure "boom"));
          Observe.Logs.emit derived;
          let explicit_before = Observe.Logs.create ~name:"explicit-before" () in
-         Observe.Logs.set_level explicit_before Observe.Level.Warn;
+         Observe.Logs.set_level explicit_before ~level:Observe.Level.Warn;
          Observe.Logs.set explicit_before (fun m ->
-             m.error Observe.Error.exn (Failure "before"));
+             m.error ~using:Observe.Error.exn (Failure "before"));
          Observe.Logs.emit explicit_before;
          let explicit_after = Observe.Logs.create ~name:"explicit-after" () in
          Observe.Logs.set explicit_after (fun m ->
-             m.error Observe.Error.exn (Failure "after"));
-         Observe.Logs.set_level explicit_after Observe.Level.Warn;
+             m.error ~using:Observe.Error.exn (Failure "after"));
+         Observe.Logs.set_level explicit_after ~level:Observe.Level.Warn;
          Observe.Logs.emit explicit_after;
          let nested = Observe.Logs.create ~name:"nested-error" () in
          Observe.Logs.set nested (fun m ->
              let open Observe.Logs in
              m.untyped
              |+ m.object_ "failure" (fun n ->
-                 n.error Observe.Error.exn (Failure "nested"))
+                 n.error ~using:Observe.Error.exn (Failure "nested"))
              |> m.seal);
          Observe.Logs.emit nested;
          let traced = Observe.Logs.create ~name:"traced-error" () in
          Observe.Logs.set traced (fun m ->
-             m.error Observe.Error.exn ~backtrace:traced_backtrace traced_error);
+             m.error ~using:Observe.Error.exn ~backtrace:traced_backtrace
+               traced_error);
          Observe.Logs.emit traced;
          captured := Some capture));
   match Observe.Capture.logs (Option.get !captured) with
@@ -535,6 +573,84 @@ let wide_error_level () =
         "explicit Warn must override derived Error in both call orders, and \
          direct and nested errors must be admitted"
 
+let wide_annotations () =
+  let observer = make_observer () in
+  let captured = ref None in
+  let post_seal_forced = ref 0 in
+  ignore
+    (Observer.with_capture observer
+       ~config:(config ~min_level:Observe.Level.Debug ()) (fun capture ->
+         let explicit = Observe.Logs.create ~name:"explicit-annotations" () in
+         Observe.Logs.annotate explicit ~level:Observe.Level.Info (fun () ->
+             "started");
+         Observe.Logs.annotate explicit ~level:Observe.Level.Warn (fun () ->
+             "retrying");
+         Observe.Logs.set_level explicit ~level:Observe.Level.Debug;
+         Observe.Logs.emit explicit;
+         Observe.Logs.annotate explicit ~level:Observe.Level.Error (fun () ->
+             incr post_seal_forced;
+             "too late");
+         let derived = Observe.Logs.create ~name:"derived-annotation" () in
+         Observe.Logs.annotate derived ~level:Observe.Level.Warn (fun () ->
+             "slow dependency");
+         Observe.Logs.emit derived;
+         let isolated = Observe.Logs.create ~name:"isolated-point" () in
+         Observe.Logs.info ~operation:isolated
+           (Test_io.text ~tag:"companion" "separate");
+         Observe.Logs.emit isolated;
+         captured := Some capture));
+  let logs = Observe.Capture.logs (Option.get !captured) in
+  match logs with
+  | [ explicit; derived; point; isolated ] ->
+      Alcotest.(check int)
+        "post-seal annotation remains lazy" 0 !post_seal_forced;
+      Alcotest.(check int)
+        "post-seal annotation is diagnosed by its own operation" 1
+        (Test_io.diagnostic_count
+           (Observe.Capture.diagnostics (Option.get !captured))
+           Observe.Diagnostics.Post_seal_annotate);
+      Alcotest.(check bool)
+        "explicit level wins over annotation-derived severity" true
+        (Observe.Level.equal Observe.Level.Debug (Observe.Log.level explicit));
+      let annotations = Observe.Log.annotations explicit in
+      Alcotest.(check (list string))
+        "annotation contribution order" [ "started"; "retrying" ]
+        (List.map Observe.Log.annotation_message annotations);
+      Alcotest.(check bool)
+        "warn annotation derives warn" true
+        (Observe.Level.equal Observe.Level.Warn (Observe.Log.level derived));
+      Alcotest.(check int)
+        "point logs have no embedded annotations" 0
+        (List.length (Observe.Log.annotations point));
+      Alcotest.(check int)
+        "correlated point is not copied into the wide operation" 0
+        (List.length (Observe.Log.annotations isolated))
+  | _ -> Alcotest.fail "expected annotated, derived, point, and isolated logs"
+
+let wide_annotation_bound () =
+  let observer = make_observer () in
+  let captured = ref None in
+  ignore
+    (Observer.with_capture observer ~config:(config ()) (fun capture ->
+         let wide = Observe.Logs.create ~name:"annotation-bound" () in
+         for index = 0 to 1_023 do
+           Observe.Logs.annotate wide ~level:Observe.Level.Info (fun () ->
+               string_of_int index)
+         done;
+         Observe.Logs.annotate wide ~level:Observe.Level.Info (fun () ->
+             "overflow");
+         Observe.Logs.emit wide;
+         captured := Some capture));
+  let capture = Option.get !captured in
+  Alcotest.(check int)
+    "annotation overflow withholds the wide event" 0
+    (List.length (Observe.Capture.logs capture));
+  Alcotest.(check int)
+    "annotation overflow is diagnosed once" 1
+    (Test_io.diagnostic_count
+       (Observe.Capture.diagnostics capture)
+       Observe.Diagnostics.Canonical_freeze_failed)
+
 let wide_creation_capability_failures () =
   let identifier_calls = ref 0 in
   let monotonic_calls = ref 0 in
@@ -556,7 +672,7 @@ let wide_creation_capability_failures () =
   let observer = Observer.create host in
   let captured = ref None in
   ignore
-    (Observer.with_capture observer (config ()) (fun capture ->
+    (Observer.with_capture observer ~config:(config ()) (fun capture ->
          let create_and_touch name =
            let wide = Observe.Logs.create ~name () in
            Observe.Logs.set wide (fun m ->
@@ -628,7 +744,7 @@ let wide_completion_capability_failures () =
   let observer = Observer.create host in
   let captured = ref None in
   ignore
-    (Observer.with_capture observer (config ()) (fun capture ->
+    (Observer.with_capture observer ~config:(config ()) (fun capture ->
          let create_emit_and_touch name =
            let wide = Observe.Logs.create ~name () in
            Observe.Logs.emit wide;
@@ -681,7 +797,7 @@ let canonical_snapshot () =
   let observer = make_observer () in
   let captured = ref None in
   ignore
-    (Observer.with_capture observer (config ()) (fun capture ->
+    (Observer.with_capture observer ~config:(config ()) (fun capture ->
          let payload = Bytes.of_string "before" in
          let numbers = [| 1; 2 |] in
          let reference = ref "reference-before" in
@@ -689,7 +805,7 @@ let canonical_snapshot () =
          let deferred = lazy !deferred_source in
          let mapped = { text = "mapped-before" } in
          Observe.Logs.info (fun m ->
-             m.typed mutable_event_schema
+             m.typed ~using:mutable_event_schema
                { payload; numbers; reference; deferred; mapped });
          Bytes.set payload 0 'X';
          numbers.(0) <- 99;
@@ -733,7 +849,7 @@ let typed_box description value (builder : Observe.Logs.builder) =
     Observe.Generated_runtime.record_schema event_t ~builder:(fun _ ->
         { typed = Fun.id })
   in
-  builder.typed schema { value }
+  builder.typed ~using:schema { value }
 
 type cycle = Next of cycle Lazy.t
 
@@ -751,7 +867,7 @@ let canonical_bounds_and_failures () =
   let observer = make_observer () in
   let captured = ref None in
   ignore
-    (Observer.with_capture observer (config ()) (fun capture ->
+    (Observer.with_capture observer ~config:(config ()) (fun capture ->
          Observe.Logs.info
            (untyped (fun () ->
                 Observe.Value.object_
@@ -843,7 +959,7 @@ let failed_wide_contribution_seals () =
   let authored_after_failure = ref 0 in
   let captured = ref None in
   ignore
-    (Observer.with_capture observer (config ()) (fun capture ->
+    (Observer.with_capture observer ~config:(config ()) (fun capture ->
          let wide = Observe.Logs.create ~name:"failed-contribution" () in
          let opaque = Observe.Type.of_repr Repr.int in
          Observe.Logs.set wide (fun m ->
@@ -881,7 +997,7 @@ let aggregate_wide_bound () =
   let authored_after_failure = ref 0 in
   let captured = ref None in
   ignore
-    (Observer.with_capture observer (config ()) (fun capture ->
+    (Observer.with_capture observer ~config:(config ()) (fun capture ->
          let wide = Observe.Logs.create ~name:"aggregate-bound" () in
          Observe.Logs.set wide (fun m ->
              let open Observe.Logs in
@@ -948,7 +1064,8 @@ let io_owner_conflict () =
   let owner = make_observer () in
   let other = make_observer () in
   let capture_claim =
-    Observer.with_capture owner (config ()) (fun _ -> Test_io.Direct.return ())
+    Observer.with_capture owner ~config:(config ()) (fun _ ->
+        Test_io.Direct.return ())
   in
   Alcotest.(check bool)
     "first I/O implementation claims through capture" true
@@ -961,7 +1078,7 @@ let invalid_capacity () =
   let observer = make_observer () in
   let called = ref false in
   let result =
-    Observer.with_capture observer (config ()) ~capacity:0 (fun _ ->
+    Observer.with_capture observer ~config:(config ()) ~capacity:0 (fun _ ->
         called := true;
         Test_io.Direct.return ())
   in
@@ -1225,6 +1342,12 @@ let disabled () =
 let no_output () =
   let observer = make_observer () in
   init_ok observer (config ~console:Observe.Config.Silent ());
+  let authored = ref 0 in
+  Observe.Logs.info (fun m ->
+      incr authored;
+      m.text ~tag:"outputless" "must remain lazy");
+  Alcotest.(check int)
+    "point author is not evaluated without an active route" 0 !authored;
   Alcotest.(check int)
     "enabled installation with no output is diagnosed" 1
     (Test_io.process_diagnostic_count Observe.Diagnostics.No_delivery_target)
@@ -1241,7 +1364,7 @@ let scope_overrides_production () =
   init_ok observer (config ());
   let capture =
     match
-      Observer.with_capture observer (config ()) (fun capture ->
+      Observer.with_capture observer ~config:(config ()) (fun capture ->
           Observe.Logs.info (Test_io.text ~tag:"scope" "captured");
           Test_io.Direct.return capture)
     with
@@ -1267,11 +1390,11 @@ let nested_capture_precedence () =
   init_ok observer (config ());
   let outer, inner =
     match
-      Observer.with_capture observer (config ()) (fun outer ->
+      Observer.with_capture observer ~config:(config ()) (fun outer ->
           Observe.Logs.info (Test_io.text ~tag:"outer" "before-inner");
           let inner =
             match
-              Observer.with_capture observer (config ()) (fun inner ->
+              Observer.with_capture observer ~config:(config ()) (fun inner ->
                   Observe.Logs.info (Test_io.text ~tag:"inner" "inside");
                   Test_io.Direct.return inner)
             with
@@ -1310,7 +1433,7 @@ let cancellation_capture_close () =
   let cancelled =
     try
       ignore
-        (Inherited_observer.with_capture observer (inherited_config ())
+        (Inherited_observer.with_capture observer ~config:(inherited_config ())
            (fun current_capture ->
              capture := Some current_capture;
              inherited := Some (Test_io.Inherited.inherited_context context);
@@ -1369,7 +1492,7 @@ let closed_inherited_tombstone () =
   let inherited = ref None in
   let capture =
     match
-      Inherited_observer.with_capture observer (inherited_config ())
+      Inherited_observer.with_capture observer ~config:(inherited_config ())
         (fun current_capture ->
           inherited := Some (Test_io.Inherited.inherited_context context);
           Observe.Logs.info (Test_io.text ~tag:"capture" "before-detach");
@@ -1409,7 +1532,7 @@ let callback_restoration () =
   Alcotest.check_raises "callback exception preserved" (Failure "callback")
     (fun () ->
       ignore
-        (Observer.with_capture observer (config ()) (fun _ ->
+        (Observer.with_capture observer ~config:(config ()) (fun _ ->
              raise (Failure "callback"))));
   Observe.Logs.info (Test_io.text ~tag:"after" "production");
   Alcotest.(check int) "binding restored after exception" 1 !console
@@ -1439,7 +1562,7 @@ let control_backtrace () =
     try
       ignore
         (Observer.with_capture observer
-           (config ~console:Observe.Config.Silent ()) (fun _ ->
+           ~config:(config ~console:Observe.Config.Silent ()) (fun _ ->
              Observe.Logs.info
                (untyped (fun () ->
                     Printexc.raise_with_backtrace Test_io.Direct.Control
@@ -1463,13 +1586,15 @@ let scenario = function
   | "not-initialized" -> not_initialized
   | "wide-lifecycle" -> wide_lifecycle
   | "causal-correlation" -> causal_children_and_correlation
-  | "managed-execution" -> managed_execution
-  | "terminal-completion" -> terminal_completion
+  | "current-operation" -> current_operation_contract
+  | "operation-execution" -> operation_execution
   | "operation-lookup-failure" -> operation_lookup_failure
   | "wide-inert-laziness" -> wide_inert_laziness
   | "wide-merge-and-seal" -> wide_merge_and_seal
   | "wide-final-admission" -> wide_final_admission
   | "wide-error-level" -> wide_error_level
+  | "wide-annotations" -> wide_annotations
+  | "wide-annotation-bound" -> wide_annotation_bound
   | "wide-creation-capabilities" -> wide_creation_capability_failures
   | "wide-completion-capabilities" -> wide_completion_capability_failures
   | "canonical-snapshot" -> canonical_snapshot

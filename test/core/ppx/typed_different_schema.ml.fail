@@ -1,7 +1,7 @@
 type first = { count : int } [@@deriving observe]
 type second = { count : int } [@@deriving observe]
 
-let log = Observe.Logs.create_typed ~name:"first" first_schema
+let log = Observe.Logs.create_typed ~name:"first" ~using:first_schema ()
 
 let _ =
   Observe.Logs.set log (fun m -> m.typed (second_patch ~count:1 ()))

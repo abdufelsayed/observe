@@ -14,7 +14,7 @@ type untyped_builder = {
   object_ : string -> untyped_author -> field;
   error :
     'error.
-    'error Error.t ->
+    using:'error Error.t ->
     ?backtrace:Printexc.raw_backtrace ->
     'error ->
     untyped_patch;
@@ -31,8 +31,9 @@ type builder = {
   seal : object_ -> t;
   value : Value.t -> t;
   error :
-    'error. 'error Error.t -> ?backtrace:Printexc.raw_backtrace -> 'error -> t;
-  typed : 'a 'builder. ('a, 'builder) Schema.t -> 'a -> t;
+    'error.
+    using:'error Error.t -> ?backtrace:Printexc.raw_backtrace -> 'error -> t;
+  typed : 'a 'builder. using:('a, 'builder) Schema.t -> 'a -> t;
 }
 
 type author = builder -> t

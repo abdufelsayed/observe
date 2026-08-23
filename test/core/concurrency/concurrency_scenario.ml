@@ -75,7 +75,7 @@ let capture_conservation work capacity =
   let capacity = max 1 capacity in
   let observer = Observer.create (Test_io.Host.create ()) in
   let result =
-    Observer.with_capture observer (config ()) ~capacity (fun capture ->
+    Observer.with_capture observer ~config:(config ()) ~capacity (fun capture ->
         let await_start = barrier work in
         let threads =
           Array.init work (fun index ->
@@ -139,7 +139,7 @@ let wide_contribution_and_seal work =
   let work = max 2 work in
   let observer = Observer.create (Test_io.Host.create ()) in
   let result =
-    Observer.with_capture observer (config ()) (fun capture ->
+    Observer.with_capture observer ~config:(config ()) (fun capture ->
         let wide = Observe.Logs.create ~name:"concurrent-wide" () in
         let await_set = barrier work in
         let setters =
@@ -177,7 +177,7 @@ let wide_contribution_and_seal work =
   match Observe.Capture.logs capture with
   | [ log ] ->
       let json =
-        match Observe.Log.body log with
+        match Observe.Log.event log with
         | Observe.Log.Text _ -> Alcotest.fail "wide body was text"
         | Observe.Log.Structured { value; _ } ->
             Observe.Value.frozen_to_json_string value
@@ -200,7 +200,7 @@ let wide_set_level_emit_race work =
   let work = max 2 work in
   let observer = Observer.create (Test_io.Host.create ()) in
   let result =
-    Observer.with_capture observer (config ()) (fun capture ->
+    Observer.with_capture observer ~config:(config ()) (fun capture ->
         let wide = Observe.Logs.create ~name:"full-race" () in
         let await_start = barrier (work * 3) in
         let setters =
@@ -210,7 +210,7 @@ let wide_set_level_emit_race work =
                   await_start ();
                   if index = 0 then
                     Observe.Logs.set wide (fun m ->
-                        m.error Observe.Error.exn (Failure "raced"))
+                        m.error ~using:Observe.Error.exn (Failure "raced"))
                   else
                     Observe.Logs.set wide (fun m ->
                         let open Observe.Logs in
@@ -226,7 +226,7 @@ let wide_set_level_emit_race work =
               Thread.create
                 (fun () ->
                   await_start ();
-                  Observe.Logs.set_level wide Observe.Level.Warn)
+                  Observe.Logs.set_level wide ~level:Observe.Level.Warn)
                 ())
         in
         let emitters =
@@ -250,7 +250,7 @@ let wide_set_level_emit_race work =
   match Observe.Capture.logs capture with
   | [ log ] ->
       let json =
-        match Observe.Log.body log with
+        match Observe.Log.event log with
         | Observe.Log.Text _ -> Alcotest.fail "full wide race body was text"
         | Observe.Log.Structured { value; _ } ->
             Observe.Value.frozen_to_json_string value
@@ -294,10 +294,71 @@ let wide_set_level_emit_race work =
           (Observe.Level.equal Observe.Level.Error (Observe.Log.level log))
   | _ -> Alcotest.fail "full wide race did not publish exactly once"
 
+let wide_annotation_emit_race work =
+  let work = max 2 work in
+  let observer = Observer.create (Test_io.Host.create ()) in
+  let evaluated = Atomic.make 0 in
+  let result =
+    Observer.with_capture observer ~config:(config ()) (fun capture ->
+        let wide = Observe.Logs.create ~name:"annotation-race" () in
+        let await_start = barrier (work * 2) in
+        let annotators =
+          Array.init work (fun index ->
+              Thread.create
+                (fun () ->
+                  await_start ();
+                  Observe.Logs.annotate wide ~level:Observe.Level.Warn
+                    (fun () ->
+                      ignore (Atomic.fetch_and_add evaluated 1 : int);
+                      "annotation-" ^ string_of_int index))
+                ())
+        in
+        let emitters =
+          Array.init work (fun _ ->
+              Thread.create
+                (fun () ->
+                  await_start ();
+                  Observe.Logs.emit wide)
+                ())
+        in
+        Array.iter Thread.join annotators;
+        Array.iter Thread.join emitters;
+        Test_io.Direct.return capture)
+  in
+  let capture =
+    match result with
+    | Ok capture -> capture
+    | Error _ -> Alcotest.fail "annotation race capture was rejected"
+  in
+  match Observe.Capture.logs capture with
+  | [ log ] ->
+      let annotations = Observe.Log.annotations log in
+      let committed = List.length annotations in
+      let diagnostics = Observe.Capture.diagnostics capture in
+      let rejected =
+        Test_io.diagnostic_count diagnostics
+          Observe.Diagnostics.Post_seal_annotate
+      in
+      Alcotest.(check int)
+        "every raced annotation is committed or rejected" work
+        (committed + rejected);
+      Alcotest.(check int)
+        "only committed annotation callbacks are evaluated" committed
+        (Atomic.get evaluated);
+      Alcotest.(check int)
+        "exactly one raced annotation emission wins" (work - 1)
+        (Test_io.diagnostic_count diagnostics Observe.Diagnostics.Post_seal_emit);
+      Alcotest.(check bool)
+        "a committed warning annotation derives warning severity" true
+        (if committed = 0 then
+           Observe.Level.equal Observe.Level.Info (Observe.Log.level log)
+         else Observe.Level.equal Observe.Level.Warn (Observe.Log.level log))
+  | _ -> Alcotest.fail "annotation race did not publish exactly once"
+
 let wide_authoring_linearization () =
   let observer = Observer.create (Test_io.Host.create ()) in
   let result =
-    Observer.with_capture observer (config ()) (fun capture ->
+    Observer.with_capture observer ~config:(config ()) (fun capture ->
         let wide = Observe.Logs.create ~name:"authoring-linearization" () in
         let mutex = Mutex.create () in
         let condition = Condition.create () in
@@ -366,7 +427,7 @@ let wide_authoring_linearization () =
   match Observe.Capture.logs capture with
   | [ log ] ->
       let json =
-        match Observe.Log.body log with
+        match Observe.Log.event log with
         | Observe.Log.Text _ -> Alcotest.fail "wide body was text"
         | Observe.Log.Structured { value; _ } ->
             Observe.Value.frozen_to_json_string value
@@ -379,7 +440,7 @@ let wide_authoring_linearization () =
 let capture_parallel_wide_authors ~name first_author second_author =
   let observer = Observer.create (Test_io.Host.create ()) in
   let result =
-    Observer.with_capture observer (config ()) (fun capture ->
+    Observer.with_capture observer ~config:(config ()) (fun capture ->
         let wide = Observe.Logs.create ~name () in
         let first_entered = Atomic.make false in
         let second_entered = Atomic.make false in
@@ -433,7 +494,7 @@ let wide_parallel_materialization () =
   match Observe.Capture.logs capture with
   | [ log ] ->
       let json =
-        match Observe.Log.body log with
+        match Observe.Log.event log with
         | Observe.Log.Text _ -> Alcotest.fail "wide body was text"
         | Observe.Log.Structured { value; _ } ->
             Observe.Value.frozen_to_json_string value
@@ -460,63 +521,6 @@ let wide_parallel_failure_linearization () =
     "failed lifecycle publishes nothing" 0
     (List.length (Observe.Capture.logs capture))
 
-let terminal_race work =
-  let work = max 3 work in
-  let observer = Observer.create (Test_io.Host.create ()) in
-  let result =
-    Observer.with_capture observer (config ()) (fun capture ->
-        let wide = Observe.Logs.create ~name:"terminal-race" () in
-        let terminal =
-          Observe.Logs.Terminal.create ~error:Observe.Error.exn wide
-        in
-        let await_start = barrier work in
-        let threads =
-          Array.init work (fun index ->
-              Thread.create
-                (fun () ->
-                  await_start ();
-                  let set (m : Observe.Logs.untyped_builder) =
-                    let open Observe.Logs in
-                    m.untyped
-                    |+ m.field
-                         ("terminal_" ^ string_of_int index)
-                         Observe.Type.int index
-                    |> m.seal
-                  in
-                  match index mod 3 with
-                  | 0 -> Observe.Logs.Terminal.complete terminal ~set ()
-                  | 1 ->
-                      Observe.Logs.Terminal.fail terminal ~set
-                        (Failure "terminal-race")
-                  | _ -> Observe.Logs.Terminal.cancel terminal ~set ())
-                ())
-        in
-        Array.iter Thread.join threads;
-        Test_io.Direct.return capture)
-  in
-  let capture =
-    match result with
-    | Ok capture -> capture
-    | Error _ -> Alcotest.fail "terminal race capture was rejected"
-  in
-  match Observe.Capture.logs capture with
-  | [ log ] ->
-      Alcotest.(check int)
-        "terminal race bypasses repeated emit misuse" 0
-        (Test_io.diagnostic_count
-           (Observe.Capture.diagnostics capture)
-           Observe.Diagnostics.Post_seal_emit);
-      let json =
-        match Observe.Log.body log with
-        | Observe.Log.Text _ -> Alcotest.fail "terminal body was text"
-        | Observe.Log.Structured { value; _ } ->
-            Observe.Value.frozen_to_json_string value
-      in
-      Alcotest.(check int)
-        "only winning terminal callback authors final facts" 1
-        (occurrences json "\"terminal_")
-  | _ -> Alcotest.fail "terminal race did not publish exactly once"
-
 let () =
   let mode = if Array.length Sys.argv > 1 then Sys.argv.(1) else "missing" in
   let argument index ~default =
@@ -532,9 +536,9 @@ let () =
   | "diagnostic-counting" -> diagnostic_counting work
   | "wide-contribution-and-seal" -> wide_contribution_and_seal work
   | "wide-set-level-emit-race" -> wide_set_level_emit_race work
+  | "wide-annotation-emit-race" -> wide_annotation_emit_race work
   | "wide-authoring-linearization" -> wide_authoring_linearization ()
   | "wide-parallel-materialization" -> wide_parallel_materialization ()
   | "wide-parallel-failure-linearization" ->
       wide_parallel_failure_linearization ()
-  | "terminal-race" -> terminal_race work
   | _ -> Alcotest.failf "unknown concurrency scenario: %s" mode

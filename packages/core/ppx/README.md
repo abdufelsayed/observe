@@ -2,10 +2,9 @@
 
 `observe.ppx` provides admission-preserving logging extensions, the
 `[@@deriving observe]` type-description deriver, and the namespaced
-`[%observe.value ...]` untyped-value extension. Generated code uses
-`Observe.Logs`, `Observe.Type`, `Observe.Value`, and the documented
-`Observe.Generated_runtime` compatibility ABI; application runtime code does
-not link the PPX implementation.
+`[%observe.value ...]` untyped-value extension. Generated code is coordinated
+with Observe's runtime support; application code does not call that support
+directly or link the PPX implementation.
 
 Enable it in Dune:
 
@@ -29,7 +28,10 @@ a second logging model:
   untyped { action = "retry"; attempt = 2 }]
 
 [%observe.error
-  typed sync_failed_schema { source = "postgres"; attempts = 3 }]
+  typed ~using:sync_failed_schema { source = "postgres"; attempts = 3 }]
+
+[%observe.error
+  error ~using:Observe.Error.exn ~backtrace exn]
 ```
 
 They expand semantically to the ordinary public API:
@@ -47,7 +49,11 @@ Observe.Logs.warn (fun m ->
        ]))
 
 Observe.Logs.error (fun m ->
-  m.typed sync_failed_schema { source = "postgres"; attempts = 3 })
+  m.typed ~using:sync_failed_schema
+    { source = "postgres"; attempts = 3 })
+
+Observe.Logs.error (fun m ->
+  m.error ~using:Observe.Error.exn ~backtrace exn)
 ```
 
 The callback remains the only deferred authoring boundary. The active route and
@@ -57,23 +63,18 @@ behavior. Ordinary callback exception containment is unchanged.
 
 The fixed-level forms are `[%observe.debug ...]`, `[%observe.info ...]`,
 `[%observe.warn ...]`, and `[%observe.error ...]`. Each accepts exactly one of
-`text`, `untyped`, or `typed`. Anonymous record syntax preserves E1's
+`text`, `untyped`, `typed`, or `error`. Anonymous record syntax preserves E1's
 annotation-free primitive literals, nested objects, lists, and options without
 nesting `[%observe.value]`. An arbitrary expression uses an explicit
 description such as `string value` or `list string values`. A dynamic level
-uses a pair:
+uses the manual API:
 
 ```ocaml
-[%observe.emit (level, typed event_schema event)]
+Observe.Logs.log ~level (fun m ->
+  m.typed ~using:event_schema event)
 ```
 
-which expands to:
-
-```ocaml
-Observe.Logs.log ~level (fun m -> m.typed event_schema event)
-```
-
-The restricted body vocabulary is deliberate: misspelled or unsupported forms
+The restricted event vocabulary is deliberate: misspelled or unsupported forms
 receive a located PPX error instead of expanding into an unrelated expression.
 The manual `Observe.Logs` API remains available and requires no PPX.
 
@@ -84,19 +85,20 @@ The manual `Observe.Logs` API remains available and requires no PPX.
 ```ocaml
 let open_log = Observe.Logs.create ~name:"checkout" () in
 [%observe.set open_log
-  untyped
-    {
-      cart_id = string cart_id;
-      phase = "started";
-      customer = { id = string customer_id; plan = string plan };
-    }];
+  {
+    cart_id = string cart_id;
+    phase = "started";
+    customer = { id = string customer_id; plan = string plan };
+  }];
+[%observe.info open_log "customer context collected"];
 
 let typed_log =
-  Observe.Logs.create_typed ~name:"checkout" checkout_event_schema
+  Observe.Logs.create_typed ~name:"checkout"
+    ~using:checkout_event_schema ()
 in
 [%observe.set typed_log
-  { phase = Authorized authorization_id; attempts = attempts + 1 }];
-[%observe.set typed_log error Observe.Error.exn exn]
+  typed { phase = Authorized authorization_id; attempts = attempts + 1 }];
+[%observe.set typed_log error ~using:Observe.Error.exn exn]
 ```
 
 Self-describing anonymous syntax expands through the same package-owned value
@@ -104,8 +106,23 @@ conversion as E1 and becomes an untyped patch through the PPX runtime contract.
 Explicitly described arbitrary expressions retain their supplied description.
 Typed sparse records expand through the generated builder attached to the
 handle, so OCaml checks field names, nested patch shapes, and value types
-without PPX-inserted annotations. The extension does not infer a schema from
-syntax.
+without PPX-inserted annotations. An open record needs no mode marker because
+it is the ordinary `set` form. The `typed` marker selects generated sparse
+patch construction, which OCaml cannot infer from an arbitrary handle
+expression; `error` selects schema-independent error contribution.
+
+A level extension whose first expression is a wide handle appends one explicit
+annotation instead of emitting a separate point log:
+
+```ocaml
+[%observe.warn checkout "payment provider is retrying"]
+```
+
+This is the concise form of
+`Observe.Logs.annotate checkout ~level:Observe.Level.Warn (fun () -> ...)`.
+The message remains lazy, appears under `logs` in the final wide event, and can
+raise the derived operation level. Ordinary point logs remain independent and
+are never copied into that list.
 
 ## Typed descriptions
 
@@ -256,6 +273,16 @@ Type parameters become description parameters:
 type 'a box = Box of 'a [@@deriving observe]
 
 let string_box_t = box_t Observe.Type.string
+```
+
+A parameterized record's sparse patch constructor receives the exact schema
+witness so the description and patch identity cannot drift apart:
+
+```ocaml
+type 'a envelope = { value : 'a } [@@deriving observe]
+
+let using = envelope_schema Observe.Type.int
+let patch = envelope_patch ~using ~value:42 ()
 ```
 
 The manual form is a function receiving the same component description:

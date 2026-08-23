@@ -1,4 +1,4 @@
-(** Deterministic, finite-capacity capture of completed log envelopes. *)
+(** Deterministic, finite-capacity capture of completed logs. *)
 
 type t
 
@@ -14,7 +14,7 @@ val diagnostics : t -> Diagnostics.entry list
 val close : t -> unit
 
 val offer : t -> Log.t -> [ `Accepted | `Overflow | `Closed ]
-(** Offer one completed envelope. Open captures retain the earliest [capacity]
+(** Offer one completed log. Open captures retain the earliest [capacity]
     entries. Overflow and closed offers are diagnosed locally. *)
 
 val record : t -> Diagnostics.kind -> unit

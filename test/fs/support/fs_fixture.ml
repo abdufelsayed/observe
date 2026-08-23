@@ -115,7 +115,7 @@ module IO = struct
     notifier.disposed <- true;
     notify notifier
 
-  let child = Filename.concat
+  let child ~dir ~name = Filename.concat dir name
   let ensure_directory _ = Lwt.return (Ok ())
 
   let open_append path =

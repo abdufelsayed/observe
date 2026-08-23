@@ -18,7 +18,7 @@ let main () =
   Observe.Logs.info ~operation:order (fun m ->
       m.text ~tag:"fulfillment" "reserving inventory");
   [%observe.set
-    order untyped
+    order
       {
         order_id = "ord_01JQ9";
         inventory = { status = "reserved"; warehouse = "cairo-1" };

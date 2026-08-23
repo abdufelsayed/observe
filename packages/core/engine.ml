@@ -33,7 +33,7 @@ type t = {
   clock : unit -> (Timestamp.t, Io.clock_error) result;
   monotonic_now : unit -> (int64, Io.clock_error) result;
   next_id : unit -> (string, Io.clock_error) result;
-  resolve_operation_id : unit -> string option;
+  resolve_operation : unit -> Log.operation_reference option;
   is_control_exception : exn -> bool;
   output : output;
 }
@@ -47,7 +47,7 @@ let automatic_console environment =
       | _ -> Config.Ndjson)
 
 let create_outputs config ~console_style ~clock ~monotonic_now ~next_id
-    ~resolve_operation_id ~console ~is_control_exception =
+    ~resolve_operation ~console ~is_control_exception =
   let policy =
     match Config.console config with
     | Config.Auto -> automatic_console (Config.environment config)
@@ -65,19 +65,19 @@ let create_outputs config ~console_style ~clock ~monotonic_now ~next_id
     clock;
     monotonic_now;
     next_id;
-    resolve_operation_id;
+    resolve_operation;
     is_control_exception;
     output = Outputs { console; drains = Config.drains config; formatter };
   }
 
-let create_capture config ~clock ~monotonic_now ~next_id ~resolve_operation_id
+let create_capture config ~clock ~monotonic_now ~next_id ~resolve_operation
     ~is_control_exception capture =
   {
     config;
     clock;
     monotonic_now;
     next_id;
-    resolve_operation_id;
+    resolve_operation;
     is_control_exception;
     output = Capture capture;
   }
@@ -87,6 +87,11 @@ let record_diagnostic t kind =
   | Outputs _ -> Diagnostics.record kind
   | Capture capture -> Capture.record capture kind
 
+let has_active_route = function
+  | Capture _ -> true
+  | Outputs { formatter = None; drains = []; _ } -> false
+  | Outputs _ -> true
+
 let after_install t =
   match t.output with
   | Outputs { formatter = None; drains = []; _ } when Config.enabled t.config ->
@@ -95,6 +100,7 @@ let after_install t =
 
 let admitted t level =
   Config.enabled t.config
+  && has_active_route t.output
   && Level.compare level (Config.min_level t.config) >= 0
 
 let evaluate_author t author =
@@ -123,11 +129,11 @@ let evaluate_author t author =
   | Raised -> Raised
   | Returned result -> Returned result
 
-let create_log t level timestamp ?correlation_id ?operation body =
+let create_log t level timestamp ?correlation ?operation ?annotations event =
   Log.Producer.make ~service:(Config.service t.config)
     ?environment:(Config.environment t.config)
-    ?version:(Config.version t.config) ~timestamp ~level ?correlation_id
-    ?operation body
+    ?version:(Config.version t.config) ~timestamp ~level ?correlation ?operation
+    ?annotations event
 
 let offer_capture t capture log = ignore (Capture.offer capture log)
 
@@ -165,20 +171,20 @@ let dispatch t log =
         formatter;
       List.iter (fun drain -> offer_drain t drain log) drains
 
-let emit_point t ?correlation_id level author =
+let emit_point t ?correlation level author =
   if admitted t level then
-    let correlation_id =
-      match correlation_id with
+    let correlation =
+      match correlation with
       | Some _ as explicit -> explicit
       | None -> (
           match
             contain ~is_control_exception:t.is_control_exception
-              t.resolve_operation_id
+              t.resolve_operation
           with
           | Raised ->
               record_diagnostic t Diagnostics.Operation_lookup_raised;
               None
-          | Returned correlation_id -> correlation_id)
+          | Returned correlation -> correlation)
     in
     match
       contain ~is_control_exception:t.is_control_exception (fun () ->
@@ -193,7 +199,7 @@ let emit_point t ?correlation_id level author =
         | Returned (Error _) ->
             record_diagnostic t Diagnostics.Canonical_freeze_failed
         | Returned (Ok body) -> (
-            match create_log t level timestamp ?correlation_id body with
+            match create_log t level timestamp ?correlation body with
             | Ok log -> dispatch t log
             | Error _ -> record_diagnostic t Diagnostics.Canonical_freeze_failed
             ))
@@ -217,14 +223,19 @@ type wide = {
   origin : Log.structured_origin;
   engine : t option;
   id : string option;
-  parent_id : string option;
+  parent : Log.operation_reference option;
   start_ns : int64 option;
   mutable body : Snapshot.Object_accumulator.state;
   mutable explicit_level : Level.t option;
-  mutable has_error : bool;
+  mutable derived_level : Level.t;
+  mutable annotations_rev : Log.annotation list;
+  mutable annotation_count : int;
+  mutable annotation_bytes : int;
   lifecycle : int Atomic.t;
   writer : bool Atomic.t;
 }
+
+type current = Open of wide | Typed of wide * Schema.identity
 
 let inert_wide () =
   {
@@ -232,11 +243,14 @@ let inert_wide () =
     origin = Log.Open;
     engine = None;
     id = None;
-    parent_id = None;
+    parent = None;
     start_ns = None;
     body = Snapshot.Object_accumulator.empty;
     explicit_level = None;
-    has_error = false;
+    derived_level = Level.Info;
+    annotations_rev = [];
+    annotation_count = 0;
+    annotation_bytes = 0;
     lifecycle = Atomic.make lifecycle_closing;
     writer = Atomic.make false;
   }
@@ -244,7 +258,13 @@ let inert_wide () =
 let contained_call t callback =
   contain ~is_control_exception:t.is_control_exception callback
 
-let wide_id wide = wide.id
+let wide_reference wide =
+  Option.map
+    (fun id -> Log.Producer.operation_reference ~name:wide.name ~id)
+    wide.id
+
+let current_reference = function
+  | Open wide | Typed (wide, _) -> wide_reference wide
 
 let own_wide_text ~used value =
   let length = String.length value in
@@ -253,13 +273,8 @@ let own_wide_text ~used value =
   else Snapshot.own_text value
 
 let create_wide t ?parent ~name ~origin () =
-  let routed =
-    match t.output with
-    | Capture _ -> true
-    | Outputs { formatter; drains; _ } ->
-        Option.is_some formatter || drains <> []
-  in
-  if (not (Config.enabled t.config)) || not routed then inert_wide ()
+  if (not (Config.enabled t.config)) || not (has_active_route t.output) then
+    inert_wide ()
   else if String.trim name = "" then (
     record_diagnostic t Diagnostics.Canonical_freeze_failed;
     inert_wide ())
@@ -293,23 +308,31 @@ let create_wide t ?parent ~name ~origin () =
                     record_diagnostic t Diagnostics.Monotonic_clock_unavailable;
                     inert_wide ()
                 | Returned (Ok start_ns) ->
-                    let parent_id = Option.bind parent wide_id in
+                    let parent = Option.bind parent wide_reference in
                     {
                       name;
                       origin;
                       engine = Some t;
                       id = Some id;
-                      parent_id;
+                      parent;
                       start_ns = Some start_ns;
                       body = Snapshot.Object_accumulator.empty;
                       explicit_level = None;
-                      has_error = false;
+                      derived_level = Level.Info;
+                      annotations_rev = [];
+                      annotation_count = 0;
+                      annotation_bytes = 0;
                       lifecycle = Atomic.make 0;
                       writer = Atomic.make false;
                     })))
 
 let merge_body = Snapshot.Object_accumulator.merge
-let clear_wide_body wide = wide.body <- Snapshot.Object_accumulator.empty
+
+let clear_wide wide =
+  wide.body <- Snapshot.Object_accumulator.empty;
+  wide.annotations_rev <- [];
+  wide.annotation_count <- 0;
+  wide.annotation_bytes <- 0
 
 let reject_authoring engine diagnostic =
   record_diagnostic engine diagnostic;
@@ -353,14 +376,14 @@ let fail_authoring wide engine diagnostic =
   let first_failure = mark_failed wide in
   if first_failure then (
     acquire_writer wide;
-    clear_wide_body wide;
+    clear_wide wide;
     release_writer wide);
   release_authoring wide;
   if first_failure then record_diagnostic engine diagnostic
 
 let fail_authoring_with_writer wide engine diagnostic =
   let first_failure = mark_failed wide in
-  if first_failure then clear_wide_body wide;
+  if first_failure then clear_wide wide;
   release_writer wide;
   release_authoring wide;
   if first_failure then record_diagnostic engine diagnostic
@@ -419,10 +442,82 @@ let contribute_wide wide materialize =
                 false
             | Returned (Ok body) ->
                 wide.body <- body;
-                wide.has_error <- wide.has_error || contribution_has_error;
+                if contribution_has_error then
+                  wide.derived_level <-
+                    (if Level.compare Level.Error wide.derived_level > 0 then
+                       Level.Error
+                     else wide.derived_level);
                 release_writer wide;
                 release_authoring wide;
                 true))
+
+let annotate_wide wide level author =
+  match wide.engine with
+  | None -> false
+  | Some engine
+    when not (reserve_authoring wide engine Diagnostics.Post_seal_annotate) ->
+      false
+  | Some engine -> (
+      let clocked =
+        match contained_call engine engine.clock with
+        | result -> result
+        | exception raised ->
+            let backtrace = Printexc.get_raw_backtrace () in
+            fail_authoring wide engine Diagnostics.Clock_raised;
+            Printexc.raise_with_backtrace raised backtrace
+      in
+      match clocked with
+      | Raised ->
+          fail_authoring wide engine Diagnostics.Clock_raised;
+          false
+      | Returned (Error Io.Unavailable) ->
+          fail_authoring wide engine Diagnostics.Clock_unavailable;
+          false
+      | Returned (Ok timestamp) -> (
+          let materialized =
+            match
+              contained_call engine (fun () -> Snapshot.own_text (author ()))
+            with
+            | result -> result
+            | exception raised ->
+                let backtrace = Printexc.get_raw_backtrace () in
+                fail_authoring wide engine Diagnostics.Message_evaluation_raised;
+                Printexc.raise_with_backtrace raised backtrace
+          in
+          match materialized with
+          | Raised ->
+              fail_authoring wide engine Diagnostics.Message_evaluation_raised;
+              false
+          | Returned (Error _) ->
+              fail_authoring wide engine Diagnostics.Canonical_freeze_failed;
+              false
+          | Returned (Ok message) ->
+              acquire_writer wide;
+              let message_bytes = String.length message in
+              if
+                authoring_failed wide
+                || wide.annotation_count >= Snapshot.width_limit
+                || message_bytes
+                   > Snapshot.max_string_bytes - wide.annotation_bytes
+              then (
+                if authoring_failed wide then (
+                  release_writer wide;
+                  release_authoring wide)
+                else
+                  fail_authoring_with_writer wide engine
+                    Diagnostics.Canonical_freeze_failed;
+                false)
+              else (
+                wide.annotations_rev <-
+                  Log.Producer.annotation ~timestamp ~level ~message
+                  :: wide.annotations_rev;
+                wide.annotation_count <- wide.annotation_count + 1;
+                wide.annotation_bytes <- wide.annotation_bytes + message_bytes;
+                if Level.compare level wide.derived_level > 0 then
+                  wide.derived_level <- level;
+                release_writer wide;
+                release_authoring wide;
+                true)))
 
 let set_wide_level wide level =
   match wide.engine with
@@ -456,12 +551,12 @@ let emit_wide wide =
         wait_for_authors wide;
         if not (authoring_failed wide) then (
           let body = Snapshot.Object_accumulator.as_fragment wide.body in
-          clear_wide_body wide;
+          let annotations = List.rev wide.annotations_rev in
+          clear_wide wide;
           let level =
             match wide.explicit_level with
             | Some level -> level
-            | None when wide.has_error -> Level.Error
-            | None -> Level.Info
+            | None -> wide.derived_level
           in
           match contained_call engine engine.monotonic_now with
           | Raised ->
@@ -483,11 +578,12 @@ let emit_wide wide =
                         in
                         let operation =
                           Log.Producer.operation ~name:wide.name ~id
-                            ?parent_id:wide.parent_id ~duration_ns ()
+                            ?parent:wide.parent ~duration_ns ()
                         in
                         match
                           contained_call engine (fun () ->
                               create_log engine level timestamp ~operation
+                                ~annotations
                                 (Log.Producer.Structured
                                    { origin = wide.origin; value = body }))
                         with

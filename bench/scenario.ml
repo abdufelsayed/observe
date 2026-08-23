@@ -78,8 +78,9 @@ let retained_core_operation operation =
 let captured_observation emit =
   let observer = Observer.create (Benchmark_io.create ()) in
   match
-    Observer.with_capture observer (config ~console:Observe.Config.Silent ())
-      ~capacity:1 (fun capture ->
+    Observer.with_capture observer
+      ~config:(config ~console:Observe.Config.Silent ()) ~capacity:1
+      (fun capture ->
         emit ();
         match Observe.Capture.logs capture with
         | [ log ] -> log
@@ -112,7 +113,8 @@ let capture_operation emit =
   prepared (fun () ->
       match
         Observer.with_capture observer
-          (config ~console:Observe.Config.Silent ()) ~capacity:1 (fun capture ->
+          ~config:(config ~console:Observe.Config.Silent ()) ~capacity:1
+          (fun capture ->
             emit ();
             consume (Observe.Capture.logs capture))
       with
@@ -215,13 +217,13 @@ let untyped_small () (m : Observe.Logs.builder) =
   m.value (Payload.small_untyped ())
 
 let typed_small () (m : Observe.Logs.builder) =
-  m.typed Payload.small_schema Payload.small
+  m.typed ~using:Payload.small_schema Payload.small
 
 let untyped_nested () (m : Observe.Logs.builder) =
   m.value (Payload.nested_untyped ())
 
 let typed_nested () (m : Observe.Logs.builder) =
-  m.typed Payload.nested_schema Payload.nested
+  m.typed ~using:Payload.nested_schema Payload.nested
 
 let open_small () (m : Observe.Logs.builder) =
   let open Observe.Logs in
@@ -251,7 +253,7 @@ let validate_contended_log mode expected_fields = function
   | None -> failwith "contended wide benchmark emitted no observation"
   | Some log ->
       let body =
-        match Observe.Log.body log with
+        match Observe.Log.event log with
         | Observe.Log.Text _ ->
             failwith "contended wide benchmark emitted a text observation"
         | Observe.Log.Structured { value; _ } ->
@@ -403,11 +405,12 @@ let open_wide_repeated () =
   Observe.Logs.emit wide
 
 let typed_wide_create () =
-  Observe.Logs.create_typed ~name:"typed-wide" Payload.small_schema |> consume
+  Observe.Logs.create_typed ~name:"typed-wide" ~using:Payload.small_schema ()
+  |> consume
 
 let typed_wide_create_set () =
   let wide =
-    Observe.Logs.create_typed ~name:"typed-wide" Payload.small_schema
+    Observe.Logs.create_typed ~name:"typed-wide" ~using:Payload.small_schema ()
   in
   Observe.Logs.set wide (fun m ->
       m.typed
@@ -417,7 +420,7 @@ let typed_wide_create_set () =
 
 let typed_wide_repeated () =
   let wide =
-    Observe.Logs.create_typed ~name:"typed-wide" Payload.small_schema
+    Observe.Logs.create_typed ~name:"typed-wide" ~using:Payload.small_schema ()
   in
   for user_id = 1 to 4 do
     Observe.Logs.set wide (fun m -> m.typed (Payload.small_patch ~user_id ()))
@@ -448,7 +451,8 @@ let open_wide_replace count () =
 
 let typed_wide_replace count () =
   let wide =
-    Observe.Logs.create_typed ~name:"typed-wide-replace" Payload.small_schema
+    Observe.Logs.create_typed ~name:"typed-wide-replace"
+      ~using:Payload.small_schema ()
   in
   for user_id = 1 to count do
     Observe.Logs.set wide (fun m -> m.typed (Payload.small_patch ~user_id ()))
@@ -458,41 +462,54 @@ let typed_wide_replace count () =
 let open_wide_error () =
   let wide = Observe.Logs.create ~name:"open-wide" () in
   Observe.Logs.set wide (fun m ->
-      m.error Observe.Error.exn (Failure "benchmark failure"));
+      m.error ~using:Observe.Error.exn (Failure "benchmark failure"));
   Observe.Logs.emit wide
 
 let open_wide_set_level () =
   let wide = Observe.Logs.create ~name:"open-wide" () in
-  Observe.Logs.set_level wide Observe.Level.Warn;
+  Observe.Logs.set_level wide ~level:Observe.Level.Warn;
+  Observe.Logs.emit wide
+
+let open_wide_annotate () =
+  let wide = Observe.Logs.create ~name:"open-wide" () in
+  Observe.Logs.annotate wide ~level:Observe.Level.Warn (fun () ->
+      "payment provider is retrying");
   Observe.Logs.emit wide
 
 let explicit_correlated_point wide () =
   Observe.Logs.info ~operation:wide (text ())
 
-let ambient_correlated_point observer wide () =
-  Observer.with_wide observer wide (fun () -> Observe.Logs.info (text ()))
+let operation_point observer () =
+  Observer.with_operation observer ~name:"point-operation" (fun () ->
+      Observe.Logs.info (text ()))
 
-let managed_success observer () =
-  let wide = Observe.Logs.create ~name:"managed-success" () in
+let current_open_operation observer () =
+  Observer.with_operation observer ~name:"current-open" (fun () ->
+      consume (Observe.Logs.current ()))
+
+let current_typed_operation observer () =
+  Observer.with_operation observer ~name:"current-typed"
+    ~using:Payload.small_schema (fun () ->
+      consume (Observe.Logs.current_typed ~using:Payload.small_schema))
+
+let operation_success observer () =
   consume
-    (Observer.manage observer wide ~error:Observe.Error.exn (fun () -> 42))
+    (Observer.with_operation observer ~name:"operation-success" (fun () -> 42))
 
-let managed_failure observer () =
-  let wide = Observe.Logs.create ~name:"managed-failure" () in
+let operation_failure observer () =
   match
-    Observer.manage observer wide ~error:Observe.Error.exn (fun () ->
-        raise (Failure "managed benchmark"))
+    Observer.with_operation observer ~name:"operation-failure" (fun () ->
+        raise (Failure "operation benchmark"))
   with
   | _ -> ()
   | exception Failure _ -> ()
 
-let managed_child observer () =
-  let parent = Observe.Logs.create ~name:"managed-parent" () in
+let child_operation observer () =
+  let parent = Observe.Logs.create ~name:"operation-parent" () in
   consume
-    (Observer.fork observer ~parent ~name:"managed-child"
-       ~error:Observe.Error.exn (fun _child -> 42))
+    (Observer.fork observer ~parent ~name:"operation-child" (fun () -> 42))
 
-let lwt_managed_prepare mode =
+let lwt_operation_prepare mode =
   let restore = redirect_standard_error () in
   let drain = accepted_drain () in
   try
@@ -501,35 +518,32 @@ let lwt_managed_prepare mode =
     let operation () =
       match mode with
       | `Success ->
-          let wide = Observe.Logs.create ~name:"lwt-managed-success" () in
           consume
             (Lwt_main.run
-               (Observe_lwt_unix.manage wide ~error:Observe.Error.exn (fun () ->
-                    Lwt.return 42)))
+               (Observe_lwt_unix.with_operation ~name:"lwt-operation-success"
+                  (fun () -> Lwt.return 42)))
       | `Failure ->
-          let wide = Observe.Logs.create ~name:"lwt-managed-failure" () in
           Lwt_main.run
             (Lwt.catch
                (fun () ->
-                 Observe_lwt_unix.manage wide ~error:Observe.Error.exn
-                   (fun () -> Lwt.fail (Failure "managed benchmark")))
+                 Observe_lwt_unix.with_operation ~name:"lwt-operation-failure"
+                   (fun () -> Lwt.fail (Failure "operation benchmark")))
                (fun _ -> Lwt.return_unit))
       | `Cancellation ->
-          let wide = Observe.Logs.create ~name:"lwt-managed-cancel" () in
           let pending, _resolver = Lwt.task () in
-          let managed =
-            Observe_lwt_unix.manage wide ~error:Observe.Error.exn (fun () ->
-                pending)
+          let operation =
+            Observe_lwt_unix.with_operation ~name:"lwt-operation-cancel"
+              (fun () -> pending)
           in
-          Lwt.cancel managed;
+          Lwt.cancel operation;
           Lwt_main.run
-            (Lwt.catch (fun () -> managed) (fun _ -> Lwt.return_unit))
+            (Lwt.catch (fun () -> operation) (fun _ -> Lwt.return_unit))
       | `Child ->
           let parent = Observe.Logs.create ~name:"lwt-parent" () in
           consume
             (Lwt_main.run
-               (Observe_lwt_unix.fork ~parent ~name:"lwt-child"
-                  ~error:Observe.Error.exn (fun _child -> Lwt.return 42)))
+               (Observe_lwt_unix.fork ~parent ~name:"lwt-child" (fun () ->
+                    Lwt.return 42)))
     in
     {
       operation;
@@ -568,7 +582,7 @@ let child_wide () =
 
 let typed_wide () =
   let wide =
-    Observe.Logs.create_typed ~name:"typed-wide" Payload.small_schema
+    Observe.Logs.create_typed ~name:"typed-wide" ~using:Payload.small_schema ()
   in
   Observe.Logs.set wide (fun m ->
       m.typed
@@ -578,7 +592,8 @@ let typed_wide () =
 
 let nested_typed_wide () =
   let wide =
-    Observe.Logs.create_typed ~name:"nested-wide" Payload.nested_schema
+    Observe.Logs.create_typed ~name:"nested-wide" ~using:Payload.nested_schema
+      ()
   in
   Observe.Logs.set wide (fun m ->
       m.typed
@@ -760,24 +775,33 @@ let core_scenarios =
     make ~name:"core/wide-stage/open-set-level" ~suite:Core
       ~boundary:"wide-level" ~payload:"open-empty" (fun () ->
         retained_wide_operation open_wide_set_level);
+    make ~name:"core/wide-stage/open-annotate" ~suite:Core
+      ~boundary:"wide-annotation" ~payload:"one-warning" (fun () ->
+        retained_wide_operation open_wide_annotate);
     make ~name:"core/correlation/explicit-point" ~suite:Core
       ~boundary:"correlated-point" ~payload:"tagged-text" (fun () ->
         let wide = Observe.Logs.create ~name:"point-parent" () in
         retained_core_operation (explicit_correlated_point wide));
-    make ~name:"core/correlation/ambient-point" ~suite:Core
-      ~boundary:"correlated-point" ~payload:"tagged-text" (fun () ->
+    make ~name:"core/operation/point" ~suite:Core ~boundary:"operation-point"
+      ~payload:"tagged-text" (fun () ->
+        retained_core_with_observer (fun observer -> operation_point observer));
+    make ~name:"core/operation/current-open" ~suite:Core
+      ~boundary:"operation-current" ~payload:"open-empty" (fun () ->
         retained_core_with_observer (fun observer ->
-            let wide = Observe.Logs.create ~name:"point-parent" () in
-            ambient_correlated_point observer wide));
-    make ~name:"core/managed/success" ~suite:Core ~boundary:"managed-success"
+            current_open_operation observer));
+    make ~name:"core/operation/current-typed" ~suite:Core
+      ~boundary:"operation-current" ~payload:"typed-empty" (fun () ->
+        retained_core_with_observer (fun observer ->
+            current_typed_operation observer));
+    make ~name:"core/operation/success" ~suite:Core
+      ~boundary:"operation-success" ~payload:"open-empty" (fun () ->
+        retained_core_with_observer (fun observer -> operation_success observer));
+    make ~name:"core/operation/failure" ~suite:Core
+      ~boundary:"operation-failure" ~payload:"open-error" (fun () ->
+        retained_core_with_observer (fun observer -> operation_failure observer));
+    make ~name:"core/operation/child" ~suite:Core ~boundary:"operation-child"
       ~payload:"open-empty" (fun () ->
-        retained_core_with_observer (fun observer -> managed_success observer));
-    make ~name:"core/managed/failure" ~suite:Core ~boundary:"managed-failure"
-      ~payload:"open-error" (fun () ->
-        retained_core_with_observer (fun observer -> managed_failure observer));
-    make ~name:"core/managed/child" ~suite:Core ~boundary:"managed-child"
-      ~payload:"open-empty" (fun () ->
-        retained_core_with_observer (fun observer -> managed_child observer));
+        retained_core_with_observer (fun observer -> child_operation observer));
     make ~name:"core/wide/nested-patch" ~suite:Core
       ~boundary:"nested-wide-patch" ~payload:"typed-nested" (fun () ->
         retained_wide_operation nested_typed_wide);
@@ -848,18 +872,18 @@ let lwt_unix_scenarios =
         prepare_lwt_unix_operation
           (config ~environment:"development" ~console:Observe.Config.Pretty ())
           child_wide);
-    make ~name:"lwt-unix/managed/success" ~suite:Lwt_unix
-      ~boundary:"managed-success" ~payload:"open-empty" (fun () ->
-        lwt_managed_prepare `Success);
-    make ~name:"lwt-unix/managed/failure" ~suite:Lwt_unix
-      ~boundary:"managed-failure" ~payload:"open-error" (fun () ->
-        lwt_managed_prepare `Failure);
-    make ~name:"lwt-unix/managed/cancellation" ~suite:Lwt_unix
-      ~boundary:"managed-cancellation" ~payload:"open-empty" (fun () ->
-        lwt_managed_prepare `Cancellation);
-    make ~name:"lwt-unix/managed/child" ~suite:Lwt_unix
-      ~boundary:"managed-child" ~payload:"open-empty" (fun () ->
-        lwt_managed_prepare `Child);
+    make ~name:"lwt-unix/operation/success" ~suite:Lwt_unix
+      ~boundary:"operation-success" ~payload:"open-empty" (fun () ->
+        lwt_operation_prepare `Success);
+    make ~name:"lwt-unix/operation/failure" ~suite:Lwt_unix
+      ~boundary:"operation-failure" ~payload:"open-error" (fun () ->
+        lwt_operation_prepare `Failure);
+    make ~name:"lwt-unix/operation/cancellation" ~suite:Lwt_unix
+      ~boundary:"operation-cancellation" ~payload:"open-empty" (fun () ->
+        lwt_operation_prepare `Cancellation);
+    make ~name:"lwt-unix/operation/child" ~suite:Lwt_unix
+      ~boundary:"operation-child" ~payload:"open-empty" (fun () ->
+        lwt_operation_prepare `Child);
   ]
 
 let fs_lwt_unix_scenarios =

@@ -67,7 +67,7 @@ let config ?environment ?console ?drains service =
   Observe.Config.create_exn ~service ?environment ?console ?drains ()
 
 let text_tag log =
-  match Observe.Log.body log with
+  match Observe.Log.event log with
   | Observe.Log.Text { tag; _ } -> tag
   | Observe.Log.Structured _ -> fail "expected text log"
 
@@ -88,9 +88,11 @@ let operation_id log =
 let correlation_by_tag capture tag =
   Observe.Capture.logs capture
   |> List.find_map (fun log ->
-      match Observe.Log.body log with
+      match Observe.Log.event log with
       | Observe.Log.Text { tag = actual; _ } when String.equal actual tag ->
-          Some (Observe.Log.correlation_id log)
+          Some
+            (Option.map Observe.Log.operation_reference_id
+               (Observe.Log.correlation log))
       | Observe.Log.Text _ | Observe.Log.Structured _ -> None)
   |> Option.value ~default:None
 
@@ -121,6 +123,91 @@ let clock () =
   let seconds = Int64.to_float timestamp /. 1_000_000_000.0 in
   check (seconds >= before -. 0.001) "clock sample preceded test bounds";
   check (seconds <= after +. 0.001) "clock sample exceeded test bounds"
+
+let default_identity () =
+  let captured = ref None in
+  let drain =
+    Observe.Drain.create (fun log ->
+        captured := Some log;
+        Observe.Drain.Accepted)
+  in
+  Observe_lwt_unix.init_exn
+    (config ~console:Observe.Config.Silent ~drains:[ drain ] "default-id");
+  let wide = Observe.Logs.create ~name:"identity" () in
+  Observe.Logs.emit wide;
+  let id =
+    match !captured with
+    | Some log -> operation_id log
+    | None -> fail "default identity operation was not delivered"
+  in
+  match Uuidm.of_string id with
+  | Some uuid ->
+      check (Uuidm.version uuid = 4) "default identity was not UUID v4"
+  | None -> fail "default identity was not a UUID: %S" id
+
+let custom_identity () =
+  let captured = ref [] in
+  let captured_lock = Mutex.create () in
+  let drain =
+    Observe.Drain.create (fun log ->
+        Mutex.lock captured_lock;
+        captured := operation_id log :: !captured;
+        Mutex.unlock captured_lock;
+        Observe.Drain.Accepted)
+  in
+  let counter = ref 0 in
+  let generating = Atomic.make false in
+  let id_generator () =
+    check
+      (Atomic.compare_and_set generating false true)
+      "custom identity generator was invoked concurrently";
+    Fun.protect
+      ~finally:(fun () -> Atomic.set generating false)
+      (fun () ->
+        let next = !counter + 1 in
+        Thread.delay 0.001;
+        counter := next;
+        Format.sprintf "custom-operation-%d" next)
+  in
+  Observe_lwt_unix.init_exn ~id_generator
+    (config ~console:Observe.Config.Silent ~drains:[ drain ] "custom-id");
+  let threads =
+    List.init 16 (fun _ ->
+        Thread.create
+          (fun () ->
+            let wide = Observe.Logs.create ~name:"identity" () in
+            Observe.Logs.emit wide)
+          ())
+  in
+  List.iter Thread.join threads;
+  let identities = List.sort_uniq String.compare !captured in
+  check (List.length identities = 16) "custom identities were not fresh";
+  check
+    (List.mem "custom-operation-1" identities
+    && List.mem "custom-operation-16" identities)
+    "custom identity generator did not determine operation identities"
+
+let failing_identity () =
+  let delivered = ref 0 in
+  let authored = ref 0 in
+  let drain =
+    Observe.Drain.create (fun _ ->
+        incr delivered;
+        Observe.Drain.Accepted)
+  in
+  Observe_lwt_unix.init_exn
+    ~id_generator:(fun () -> failwith "identity source failed")
+    (config ~console:Observe.Config.Silent ~drains:[ drain ] "failing-id");
+  let wide = Observe.Logs.create ~name:"identity" () in
+  Observe.Logs.set wide (fun builder ->
+      incr authored;
+      builder.seal builder.untyped);
+  Observe.Logs.emit wide;
+  check (!authored = 0) "failed identity did not leave an inert handle";
+  check (!delivered = 0) "failed identity published an operation";
+  check
+    (process_diagnostic_count Observe.Diagnostics.Identity_raised = 1)
+    "failed identity was not contained and diagnosed"
 
 let console () =
   let (), output =
@@ -169,14 +256,14 @@ let wide_json_console () =
         Observe.Logs.emit wide)
   in
   check
-    (contains output "\"operation\":{\"name\":\"checkout\",\"id\":")
-    "wide operation envelope missing from ready JSON: %S" output;
+    (contains output "\"operation\":\"checkout\",\"operation_id\":")
+    "wide operation fields missing from ready JSON: %S" output;
   check
-    (contains output "\"duration_ns\":\"")
+    (contains output "\"duration_ms\":")
     "wide duration missing from ready JSON: %S" output;
   check
-    (contains output "\"body\":{\"cart_id\":\"cart-1\"}")
-    "wide body missing from ready JSON: %S" output;
+    (contains output "\"cart_id\":\"cart-1\"")
+    "wide event fields missing from ready JSON: %S" output;
   check
     ((not (contains output "\"status\":"))
     && (not (contains output "\"outcome\":"))
@@ -347,26 +434,24 @@ let lifecycle_failure () =
 let basic_capture () =
   let capture =
     Lwt_main.run
-      (Observe_lwt_unix.Test.with_capture_exn (config "capture") (fun capture ->
+      (Observe_lwt_unix.Test.with_capture_exn ~config:(config "capture")
+         (fun capture ->
            Observe.Logs.info (text ~tag:"captured" "message");
            Lwt.return capture))
   in
   check (capture_tags capture = [ "captured" ]) "capture missed the log"
 
-let wide_scope () =
+let operation_scope () =
   let capture =
     Lwt_main.run
-      (Observe_lwt_unix.Test.with_capture_exn (config "wide-scope")
+      (Observe_lwt_unix.Test.with_capture_exn ~config:(config "operation-scope")
          (fun capture ->
-           let parent = Observe.Logs.create ~name:"parent" () in
-           let child = Observe.Logs.create ~parent ~name:"child" () in
-           let left = Observe.Logs.create ~name:"left" () in
-           let right = Observe.Logs.create ~name:"right" () in
            Lwt.bind
-             (Observe_lwt_unix.with_wide parent (fun () ->
+             (Observe_lwt_unix.with_operation ~name:"parent" (fun () ->
+                  let parent = Observe.Logs.current () in
                   Observe.Logs.info (text ~tag:"parent-before" "message");
                   Lwt.bind
-                    (Observe_lwt_unix.with_wide child (fun () ->
+                    (Observe_lwt_unix.fork ~parent ~name:"child" (fun () ->
                          Lwt.bind (Lwt.pause ()) (fun () ->
                              Observe.Logs.info
                                (text ~tag:"child-inside" "message");
@@ -377,34 +462,32 @@ let wide_scope () =
              (fun () ->
                Lwt.bind
                  (Lwt.both
-                    (Observe_lwt_unix.with_wide left (fun () ->
+                    (Observe_lwt_unix.with_operation ~name:"left" (fun () ->
                          Lwt.bind (Lwt.pause ()) (fun () ->
                              Observe.Logs.info (text ~tag:"left" "message");
                              Lwt.return_unit)))
-                    (Observe_lwt_unix.with_wide right (fun () ->
+                    (Observe_lwt_unix.with_operation ~name:"right" (fun () ->
                          Lwt.bind (Lwt.pause ()) (fun () ->
                              Observe.Logs.info (text ~tag:"right" "message");
                              Lwt.return_unit))))
                  (fun _ ->
                    Observe.Logs.info (text ~tag:"outside" "message");
-                   List.iter Observe.Logs.emit [ child; parent; left; right ];
                    Lwt.return capture))))
   in
+  let parent_id = correlation_by_tag capture "parent-before" in
+  let child_id = correlation_by_tag capture "child-inside" in
+  check (Option.is_some parent_id) "parent scope did not correlate";
   check
-    (correlation_by_tag capture "parent-before" = Some "operation-1")
-    "parent scope did not correlate";
-  check
-    (correlation_by_tag capture "child-inside" = Some "operation-2")
+    (Option.is_some child_id && child_id <> parent_id)
     "nested child scope did not override parent";
   check
-    (correlation_by_tag capture "parent-after" = Some "operation-1")
+    (correlation_by_tag capture "parent-after" = parent_id)
     "nested child did not restore parent";
-  check
-    (correlation_by_tag capture "left" = Some "operation-3")
-    "left concurrent scope leaked";
-  check
-    (correlation_by_tag capture "right" = Some "operation-4")
-    "right concurrent scope leaked";
+  let left_id = correlation_by_tag capture "left" in
+  let right_id = correlation_by_tag capture "right" in
+  check (Option.is_some left_id) "left operation was not current";
+  check (Option.is_some right_id) "right operation was not current";
+  check (left_id <> right_id) "concurrent operation scopes leaked";
   check
     (correlation_by_tag capture "outside" = None)
     "scope installed a fallback operation";
@@ -412,95 +495,96 @@ let wide_scope () =
     Observe.Capture.logs capture
     |> List.filter (fun log -> Observe.Log.kind log = Observe.Log.Wide)
   in
-  match wide_logs with
-  | child :: parent :: _ ->
-      let child_operation = Option.get (Observe.Log.operation child) in
-      check
-        (Observe.Log.operation_parent_id child_operation = Some "operation-1")
-        "child lost its parent reference";
-      check (operation_id parent = "operation-1") "parent identity changed"
-  | _ -> fail "expected completed wide logs"
+  let named name =
+    List.find
+      (fun log ->
+        match Observe.Log.operation log with
+        | Some operation ->
+            String.equal (Observe.Log.operation_name operation) name
+        | None -> false)
+      wide_logs
+  in
+  let child_operation = Option.get (Observe.Log.operation (named "child")) in
+  check
+    (Option.map Observe.Log.operation_reference_id
+       (Observe.Log.operation_parent child_operation)
+    = parent_id)
+    "child lost its parent reference";
+  check
+    (Some (operation_id (named "parent")) = parent_id)
+    "parent identity changed"
 
-let managed_wide () =
+let operation_lifecycle () =
   Printexc.record_backtrace true;
-  let escaped = Failure "managed-lwt" in
+  let escaped = Failure "operation-lwt" in
   let original =
-    try failwith "managed-lwt-origin"
+    try failwith "operation-lwt-origin"
     with Failure _ -> Printexc.get_raw_backtrace ()
   in
   let caught = ref None in
   let capture =
     Lwt_main.run
-      (Observe_lwt_unix.Test.with_capture_exn (config "managed-wide")
-         (fun capture ->
-           let success = Observe.Logs.create ~name:"success" () in
+      (Observe_lwt_unix.Test.with_capture_exn
+         ~config:(config "operation-lifecycle") (fun capture ->
            let marker = ref 9 in
            Lwt.bind
-             (Observe_lwt_unix.manage success ~error:Observe.Error.exn
-                (fun () ->
+             (Observe_lwt_unix.with_operation ~name:"success" (fun () ->
                   Lwt.bind (Lwt.pause ()) (fun () -> Lwt.return marker)))
              (fun returned ->
-               check (returned == marker) "managed Lwt result was replaced";
-               let failure = Observe.Logs.create ~name:"failure" () in
+               check (returned == marker) "operation Lwt result was replaced";
                Lwt.bind
                  (Lwt.catch
                     (fun () ->
-                      Observe_lwt_unix.manage failure ~error:Observe.Error.exn
-                        (fun () ->
+                      Observe_lwt_unix.with_operation ~name:"failure" (fun () ->
                           Lwt.bind (Lwt.pause ()) (fun () ->
                               Printexc.raise_with_backtrace escaped original)))
                     (fun raised ->
                       caught := Some (raised, Printexc.get_raw_backtrace ());
                       Lwt.return_unit))
                  (fun () ->
-                   let cancelled = Observe.Logs.create ~name:"cancelled" () in
                    let pending, _ = Lwt.task () in
-                   let managed =
-                     Observe_lwt_unix.manage cancelled ~error:Observe.Error.exn
+                   let operation =
+                     Observe_lwt_unix.with_operation ~name:"cancelled"
                        (fun () -> pending)
                    in
-                   Lwt.cancel managed;
+                   Lwt.cancel operation;
                    Lwt.bind
                      (Lwt.catch
-                        (fun () -> managed)
+                        (fun () -> operation)
                         (function
                           | Lwt.Canceled -> Lwt.return_unit
                           | raised -> Lwt.fail raised))
                      (fun () ->
-                       let parent = Observe.Logs.create ~name:"parent" () in
-                       Lwt.bind
-                         (Observe_lwt_unix.with_wide parent (fun () ->
-                              Lwt.bind
-                                (Observe_lwt_unix.fork ~parent ~name:"child"
-                                   ~error:Observe.Error.exn (fun _child ->
-                                     Observe.Logs.info
-                                       (text ~tag:"fork-child" "message");
-                                     Lwt.return 42))
-                                (fun result ->
-                                  check (result = 42)
-                                    "managed child result was replaced";
+                       Observe_lwt_unix.with_operation ~name:"parent" (fun () ->
+                           let parent = Observe.Logs.current () in
+                           Lwt.bind
+                             (Observe_lwt_unix.fork ~parent ~name:"child"
+                                (fun () ->
                                   Observe.Logs.info
-                                    (text ~tag:"fork-parent" "message");
-                                  Lwt.return_unit)))
-                         (fun () ->
-                           Observe.Logs.emit parent;
-                           Lwt.return capture))))))
+                                    (text ~tag:"fork-child" "message");
+                                  Lwt.return 42))
+                             (fun result ->
+                               check (result = 42)
+                                 "child operation result was replaced";
+                               Observe.Logs.info
+                                 (text ~tag:"fork-parent" "message");
+                               Lwt.return capture)))))))
   in
   (match !caught with
   | Some (raised, backtrace) ->
-      check (raised == escaped) "managed Lwt exception identity changed";
+      check (raised == escaped) "operation Lwt exception identity changed";
       let original = Printexc.raw_backtrace_to_string original in
       let propagated = Printexc.raw_backtrace_to_string backtrace in
       check
         (String.length propagated >= String.length original
         && String.sub propagated 0 (String.length original) = original)
-        "managed Lwt backtrace origin changed"
-  | None -> fail "managed Lwt failure was swallowed");
+        "operation Lwt backtrace origin changed"
+  | None -> fail "operation Lwt failure was swallowed");
   let wide_logs =
     Observe.Capture.logs capture
     |> List.filter (fun log -> Observe.Log.kind log = Observe.Log.Wide)
   in
-  check (List.length wide_logs = 5) "managed boundaries did not emit once";
+  check (List.length wide_logs = 5) "operation boundaries did not emit once";
   let by_name name =
     List.find
       (fun log ->
@@ -513,39 +597,48 @@ let managed_wide () =
   check
     (Observe.Level.equal Observe.Level.Error
        (Observe.Log.level (by_name "failure")))
-    "managed ordinary failure did not derive Error";
+    "ordinary failure did not derive Error";
   check
     (Observe.Level.equal Observe.Level.Info
        (Observe.Log.level (by_name "cancelled")))
-    "managed cancellation inferred Error";
+    "cancellation inferred Error";
   check
-    (correlation_by_tag capture "fork-child" = Some "operation-5")
-    "managed child was not current";
+    (correlation_by_tag capture "fork-child"
+    = Some (operation_id (by_name "child")))
+    "child operation was not current";
   check
-    (correlation_by_tag capture "fork-parent" = Some "operation-4")
-    "managed child did not restore parent"
+    (correlation_by_tag capture "fork-parent"
+    = Some (operation_id (by_name "parent")))
+    "child operation did not restore parent"
 
-let managed_late_callback () =
+let operation_late_callback () =
+  let current_rejected = ref false in
   let capture =
     Lwt_main.run
-      (Observe_lwt_unix.Test.with_capture_exn (config "managed-late")
+      (Observe_lwt_unix.Test.with_capture_exn ~config:(config "operation-late")
          (fun capture ->
-           let wide = Observe.Logs.create ~name:"cancelled" () in
            let trigger, wake_trigger = Lwt.wait () in
            let late = ref Lwt.return_unit in
            let pending, _ = Lwt.task () in
-           let managed =
-             Observe_lwt_unix.manage wide ~error:Observe.Error.exn (fun () ->
+           let operation =
+             Observe_lwt_unix.with_operation ~name:"cancelled" (fun () ->
                  late :=
                    Lwt.bind trigger (fun () ->
+                       (current_rejected :=
+                          match Observe.Logs.current () with
+                          | _ -> false
+                          | exception
+                              Observe.Logs.Current_error Observe.Logs.Not_bound
+                            ->
+                              true);
                        Observe.Logs.info (text ~tag:"late-operation" "message");
                        Lwt.return_unit);
                  pending)
            in
-           Lwt.cancel managed;
+           Lwt.cancel operation;
            Lwt.bind
              (Lwt.catch
-                (fun () -> managed)
+                (fun () -> operation)
                 (function
                   | Lwt.Canceled -> Lwt.return_unit | raised -> Lwt.fail raised))
              (fun () ->
@@ -555,18 +648,64 @@ let managed_late_callback () =
   check
     (correlation_by_tag capture "late-operation" = None)
     "late callback retained a closed operation scope";
+  check !current_rejected "late callback retrieved a closed operation handle";
   check
     (List.length
        (List.filter
           (fun log -> Observe.Log.kind log = Observe.Log.Wide)
           (Observe.Capture.logs capture))
     = 1)
-    "cancelled managed wide did not complete exactly once"
+    "cancelled operation did not complete exactly once"
+
+let operation_foreign_execution () =
+  let foreign_current_rejected = ref false in
+  let capture =
+    Lwt_main.run
+      (Observe_lwt_unix.Test.with_capture_exn
+         ~config:(config "operation-foreign") (fun capture ->
+           Lwt.bind
+             (Observe_lwt_unix.with_operation ~name:"parent" (fun () ->
+                  Lwt.bind
+                    (Lwt_preemptive.detach
+                       (fun () ->
+                         (foreign_current_rejected :=
+                            match Observe.Logs.current () with
+                            | _ -> false
+                            | exception
+                                Observe.Logs.Current_error
+                                  Observe.Logs.Not_bound ->
+                                true);
+                         Observe.Logs.info
+                           (text ~tag:"foreign-operation" "message"))
+                       ())
+                    (fun () ->
+                      Observe.Logs.info
+                        (text ~tag:"restored-operation" "message");
+                      Lwt.return_unit)))
+             (fun () -> Lwt.return capture)))
+  in
+  check !foreign_current_rejected
+    "foreign execution retrieved an inherited operation";
+  check
+    (correlation_by_tag capture "foreign-operation" = None)
+    "foreign execution inherited operation correlation";
+  check
+    (match correlation_by_tag capture "restored-operation" with
+    | Some id ->
+        List.exists
+          (fun log ->
+            match Observe.Log.operation log with
+            | Some operation ->
+                String.equal (Observe.Log.operation_id operation) id
+            | None -> false)
+          (Observe.Capture.logs capture)
+    | None -> false)
+    "foreign execution disturbed the parent operation"
 
 let capture_then_init () =
   let capture =
     Lwt_main.run
-      (Observe_lwt_unix.Test.with_capture_exn (config "before-init")
+      (Observe_lwt_unix.Test.with_capture_exn ~config:(config "before-init")
          (fun capture ->
            Observe.Logs.info (text ~tag:"capture" "message");
            Lwt.return capture))
@@ -585,7 +724,8 @@ let concurrent_capture () =
   let release, wake_release = Lwt.wait () in
   let entered = ref 0 in
   let run service tag =
-    Observe_lwt_unix.Test.with_capture_exn (config service) (fun capture ->
+    Observe_lwt_unix.Test.with_capture_exn ~config:(config service)
+      (fun capture ->
         incr entered;
         if !entered = 2 then Lwt.wakeup wake_release ();
         Lwt.bind release (fun () ->
@@ -601,10 +741,11 @@ let concurrent_capture () =
 let nested_capture () =
   let outer, inner =
     Lwt_main.run
-      (Observe_lwt_unix.Test.with_capture_exn (config "outer") (fun outer ->
+      (Observe_lwt_unix.Test.with_capture_exn ~config:(config "outer")
+         (fun outer ->
            Observe.Logs.info (text ~tag:"outer-before" "message");
            Lwt.bind
-             (Observe_lwt_unix.Test.with_capture_exn (config "inner")
+             (Observe_lwt_unix.Test.with_capture_exn ~config:(config "inner")
                 (fun inner ->
                   Observe.Logs.info (text ~tag:"inner" "message");
                   Lwt.return inner))
@@ -621,12 +762,12 @@ let exception_restoration () =
   let inner = ref None in
   let outer =
     Lwt_main.run
-      (Observe_lwt_unix.Test.with_capture_exn (config "outer-error")
+      (Observe_lwt_unix.Test.with_capture_exn ~config:(config "outer-error")
          (fun outer ->
            Lwt.catch
              (fun () ->
-               Observe_lwt_unix.Test.with_capture_exn (config "inner-error")
-                 (fun capture ->
+               Observe_lwt_unix.Test.with_capture_exn
+                 ~config:(config "inner-error") (fun capture ->
                    inner := Some capture;
                    Observe.Logs.info (text ~tag:"inner-error" "message");
                    Lwt.fail Exit))
@@ -652,7 +793,8 @@ let cancellation () =
   let late = ref Lwt.return_unit in
   let pending, _ = Lwt.task () in
   let promise =
-    Observe_lwt_unix.Test.with_capture_exn (config "cancel") (fun current ->
+    Observe_lwt_unix.Test.with_capture_exn ~config:(config "cancel")
+      (fun current ->
         capture := Some current;
         late :=
           Lwt.bind trigger (fun () ->
@@ -680,7 +822,8 @@ let late_callback () =
   let late = ref Lwt.return_unit in
   let capture =
     Lwt_main.run
-      (Observe_lwt_unix.Test.with_capture_exn (config "late") (fun capture ->
+      (Observe_lwt_unix.Test.with_capture_exn ~config:(config "late")
+         (fun capture ->
            late :=
              Lwt.bind trigger (fun () ->
                  Observe.Logs.info (text ~tag:"late" "message");
@@ -696,8 +839,8 @@ let late_callback () =
 
 let invalid_capacity () =
   let promise =
-    Observe_lwt_unix.Test.with_capture_exn (config "invalid") ~capacity:0
-      (fun _ -> Lwt.return_unit)
+    Observe_lwt_unix.Test.with_capture_exn ~config:(config "invalid")
+      ~capacity:0 (fun _ -> Lwt.return_unit)
   in
   match Lwt_main.run promise with
   | exception Observe_lwt_unix.Test.Capture_error (Observe.Invalid_capacity 0)
@@ -710,6 +853,9 @@ let invalid_capacity () =
 let scenarios =
   [
     ("clock", clock);
+    ("default-identity", default_identity);
+    ("custom-identity", custom_identity);
+    ("failing-identity", failing_identity);
     ("console", console);
     ("json-console", json_console);
     ("wide-json-console", wide_json_console);
@@ -723,9 +869,10 @@ let scenarios =
     ("lifecycle-flush", lifecycle_flush);
     ("lifecycle-failure", lifecycle_failure);
     ("basic-capture", basic_capture);
-    ("wide-scope", wide_scope);
-    ("managed-wide", managed_wide);
-    ("managed-late", managed_late_callback);
+    ("operation-scope", operation_scope);
+    ("operation-lifecycle", operation_lifecycle);
+    ("operation-late", operation_late_callback);
+    ("operation-foreign", operation_foreign_execution);
     ("capture-then-init", capture_then_init);
     ("concurrent-capture", concurrent_capture);
     ("nested-capture", nested_capture);

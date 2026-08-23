@@ -11,7 +11,7 @@ module IO = struct
     val await : notifier -> unit Lwt.t
     val notify : notifier -> unit
     val dispose : notifier -> unit
-    val child : string -> string -> string
+    val child : dir:string -> name:string -> string
     val ensure_directory : string -> (unit, error) result Lwt.t
     val open_append : string -> (file, error) result Lwt.t
 
@@ -42,7 +42,7 @@ module Make (IO : IO.S) = struct
     let await notifier = Lwt.protected (IO.await notifier)
     let notify = IO.notify
     let dispose = IO.dispose
-    let child = IO.child
+    let child ~dir ~name = IO.child ~dir ~name
     let ensure_directory = IO.ensure_directory
     let open_append = IO.open_append
     let write = IO.write

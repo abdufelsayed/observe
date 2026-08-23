@@ -18,7 +18,8 @@ let () =
 ]}
 
 The initializer is synchronous. It installs Lwt callback-local context, the OS
-wall clock, and automatic formatted output on standard error. Console records
+wall clock, cryptographically random UUID v4 operation identities, and
+automatic formatted output on standard error. Console records
 are submitted without blocking the producer and written in order by one bounded
 Lwt worker. It starts no scheduler and returns no logging handle. See
 {!module:Observe_lwt_unix}.
@@ -31,8 +32,26 @@ Before process exit, run {!val:Observe_lwt_unix.shutdown} through the active Lwt
 scheduler. Use {!val:Observe_lwt_unix.flush} when the worker should remain open.
 Official filesystem workers register with the same lifecycle, so these calls
 cover console and daily-file records accepted before their barriers. The
-{!module:Observe_lwt_unix.Lifecycle} module is for output-integration authors;
-ordinary applications configure the drain returned by [Observe_fs_lwt_unix].
+{!module:Observe_lwt_unix.Lifecycle} module registers independently installed
+outputs; the filesystem package uses the same lifecycle when its drain is
+configured.
+
+{1 Operations}
+
+{!val:Observe_lwt_unix.with_operation} creates a wide log, binds it as current
+for the callback, and makes one final publication attempt when the callback
+settles. Invalid error interpretation seals and withholds the wide log. Code in
+the callback retrieves the open handle through {!val:Observe.Logs.current} or a
+schema-locked handle through {!val:Observe.Logs.current_typed}. Child operations
+use {!val:Observe_lwt_unix.fork} and restore the parent binding afterward.
+
+Tests or deployments with an existing identity policy can supply
+[~id_generator] to {!val:Observe_lwt_unix.init}. The portable [observe-lwt]
+composition keeps [next_id] injectable for deterministic tests without changing
+the ready production default. The ready Unix composition serializes generator
+calls. Each call must promptly return a fresh, non-empty, valid UTF-8 operation
+identifier; a raised exception or invalid result withholds only that operation
+and produces a diagnostic.
 
 {1 Capture}
 

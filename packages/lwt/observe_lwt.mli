@@ -1,8 +1,9 @@
 (** Configurable Lwt I/O for Observe.
 
     Most Lwt applications on Unix should initialize logging through
-    [Observe_lwt_unix]. Integration authors can inject another clock and console
-    implementation with {!create}, then apply [Observe.Make] to {!IO}. *)
+    [Observe_lwt_unix]. Alternative clock and console implementations can be
+    supplied with {!create}, then composed by applying [Observe.Make] to {!IO}.
+*)
 
 type t
 (** A completed Lwt I/O state. *)

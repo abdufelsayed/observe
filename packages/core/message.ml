@@ -18,7 +18,7 @@ type untyped_builder = {
   object_ : string -> untyped_author -> field;
   error :
     'error.
-    'error Error.t ->
+    using:'error Error.t ->
     ?backtrace:Printexc.raw_backtrace ->
     'error ->
     untyped_patch;
@@ -35,8 +35,9 @@ type builder = {
   seal : object_ -> t;
   value : Value.t -> t;
   error :
-    'error. 'error Error.t -> ?backtrace:Printexc.raw_backtrace -> 'error -> t;
-  typed : 'a 'builder. ('a, 'builder) Schema.t -> 'a -> t;
+    'error.
+    using:'error Error.t -> ?backtrace:Printexc.raw_backtrace -> 'error -> t;
+  typed : 'a 'builder. using:('a, 'builder) Schema.t -> 'a -> t;
 }
 
 type author = builder -> t
@@ -58,11 +59,8 @@ let rec untyped_builder =
         let patch = author untyped_builder in
         { name; fragment = patch.fragment; has_error = patch.has_error });
     error =
-      (fun interpretation ?backtrace error ->
-        {
-          fragment = Error.freeze interpretation ?backtrace error;
-          has_error = true;
-        });
+      (fun ~using ?backtrace error ->
+        { fragment = Error.freeze using ?backtrace error; has_error = true });
     seal =
       (fun object_ ->
         let rec collect one fields = function
@@ -108,7 +106,7 @@ let builder =
     seal = (fun object_ -> Untyped (untyped_builder.seal object_).fragment);
     value = (fun value -> Value value);
     error =
-      (fun interpretation ?backtrace error ->
-        Untyped (Error.freeze interpretation ?backtrace error));
-    typed = (fun description value -> Typed (description, value));
+      (fun ~using ?backtrace error ->
+        Untyped (Error.freeze using ?backtrace error));
+    typed = (fun ~using value -> Typed (using, value));
   }

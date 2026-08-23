@@ -109,6 +109,7 @@ end
 module Schema : sig
   type ('record, 'builder) t
   type 'record patch
+  type identity
 end
 
 module Error : sig
@@ -297,20 +298,21 @@ module Generated_runtime : sig
   val record_patch_fields :
     ('record, 'builder) Schema.t -> patch_field list -> 'record Schema.patch
 
-  val named_record_patch :
-    string -> patch_field option list -> 'record Schema.patch
+  val identified_record_patch :
+    Schema.identity -> patch_field option list -> 'record Schema.patch
 
-  val named_record_patch_fields :
-    string -> patch_field list -> 'record Schema.patch
+  val identified_record_patch_fields :
+    Schema.identity -> patch_field list -> 'record Schema.patch
 
-  val named_error_patch : string -> fragment -> 'record Schema.patch
+  val identified_error_patch :
+    Schema.identity -> fragment -> 'record Schema.patch
 
-  val combine_named_patches :
-    string -> 'record Schema.patch list -> 'record Schema.patch
+  val combine_identified_patches :
+    Schema.identity -> 'record Schema.patch list -> 'record Schema.patch
 
   val record_schema :
     ?name:string ->
-    builder:(string -> 'builder) ->
+    builder:(Schema.identity -> 'builder) ->
     'record description ->
     ('record, 'builder) Schema.t
 
@@ -348,42 +350,53 @@ end
 
 module Log : sig
   type t
-  (** A completed admitted log whose structured body is an immutable bounded
+  (** A completed admitted log whose structured event is an immutable bounded
       package-owned snapshot. *)
 
-  type body =
+  type event =
     | Text of { tag : string; message : string }
     | Structured of { origin : structured_origin; value : Value.frozen }
 
   and structured_origin = Open | Declared of string
 
   type kind = Point | Wide
+  type operation_reference
   type operation
+  type annotation
 
   val service : t -> string
   val environment : t -> string option
   val version : t -> string option
   val timestamp : t -> Timestamp.t
   val level : t -> Level.t
-  val body : t -> body
+  val event : t -> event
 
   val kind : t -> kind
   (** Distinguish an auto-emitted point observation from a completed wide
       operation without inspecting presentation output. *)
 
   val operation : t -> operation option
-  (** The immutable operation envelope on a wide observation. Point observations
+  (** The immutable operation facts on a wide observation. Point observations
       return [None], including correlated points. *)
 
-  val correlation_id : t -> string option
-  (** The associated wide-log occurrence identifier on a point log. *)
+  val correlation : t -> operation_reference option
+  (** The current or explicitly associated operation on a separate point log. *)
 
+  val annotations : t -> annotation list
+  (** Explicit timestamped entries accumulated inside a wide operation. *)
+
+  val operation_reference_name : operation_reference -> string
+  val operation_reference_id : operation_reference -> string
   val operation_name : operation -> string
   val operation_id : operation -> string
-  val operation_parent_id : operation -> string option
+  val operation_parent : operation -> operation_reference option
 
   val operation_duration_ns : operation -> int64
   (** The non-negative monotonic elapsed duration. *)
+
+  val annotation_timestamp : annotation -> Timestamp.t
+  val annotation_level : annotation -> Level.t
+  val annotation_message : annotation -> string
 end
 
 module Diagnostics : sig
@@ -401,6 +414,7 @@ module Diagnostics : sig
     | Message_evaluation_raised
     | Canonical_freeze_failed
     | Post_seal_set
+    | Post_seal_annotate
     | Post_seal_set_level
     | Post_seal_emit
     | Formatting_failed
@@ -466,9 +480,10 @@ module Formatter : sig
   *)
 
   val json : t
-  (** Render one compact object. Correlated points add [operation_id]. Wide logs
-      add a nested [operation] object and keep consumer data under [body]. Exact
-      timestamps and durations are decimal nanosecond strings. *)
+  (** Render one flat compact event. Package metadata uses documented reserved
+      root fields, while consumer structured fields remain at the root.
+      Timestamps are RFC 3339 UTC strings with nanosecond precision and wide
+      durations are numeric milliseconds. *)
 
   val ndjson : t
   (** The same compact object as {!json}, followed by one line feed. *)
@@ -558,7 +573,7 @@ module Logs : sig
     object_ : string -> (untyped_builder -> untyped_patch) -> field;
     error :
       'error.
-      'error Error.t ->
+      using:'error Error.t ->
       ?backtrace:Printexc.raw_backtrace ->
       'error ->
       untyped_patch;
@@ -575,8 +590,11 @@ module Logs : sig
     value : Value.t -> message;
     error :
       'error.
-      'error Error.t -> ?backtrace:Printexc.raw_backtrace -> 'error -> message;
-    typed : 'a 'builder. ('a, 'builder) Schema.t -> 'a -> message;
+      using:'error Error.t ->
+      ?backtrace:Printexc.raw_backtrace ->
+      'error ->
+      message;
+    typed : 'a 'builder. using:('a, 'builder) Schema.t -> 'a -> message;
   }
   (** The admitted point builder. [text] supports type-safe format strings;
       [untyped], [field], [object_], and [seal] author anonymous record-shaped
@@ -618,7 +636,8 @@ module Logs : sig
   val create_typed :
     ?parent:('parent_builder, 'parent_patch) t ->
     name:string ->
-    ('record, 'builder) Schema.t ->
+    using:('record, 'builder) Schema.t ->
+    unit ->
     ('builder, 'record Schema.patch) t
   (** Start an empty wide log locked to one declared record schema. Its
       contributions are sparse patches; no field is mandatory at emission. *)
@@ -628,38 +647,34 @@ module Logs : sig
       Objects merge recursively and later non-object values replace earlier
       values. Failed contributions seal and withhold the lifecycle. *)
 
-  val set_level : ('builder, 'patch) t -> Level.t -> unit
+  val set_level : ('builder, 'patch) t -> level:Level.t -> unit
   (** Replace the explicit level. The last explicit value wins over derived
       [Error] regardless of call order. *)
+
+  val annotate :
+    ('builder, 'patch) t -> level:Level.t -> (unit -> string) -> unit
+  (** Append one explicit timestamped entry to the completed wide operation. The
+      callback remains lazy, and separate point logs are never copied into the
+      operation's annotation list. *)
 
   val emit : ('builder, 'patch) t -> unit
   (** Seal and attempt final-level admission and publication exactly once. *)
 
-  module Terminal : sig
-    type ('builder, 'patch) log = ('builder, 'patch) t
-    type ('builder, 'patch) t
+  type current_error =
+    | Not_bound
+    | Expected_open
+    | Expected_typed
+    | Schema_mismatch
 
-    val create :
-      error:exn Error.t -> ('builder, 'patch) log -> ('builder, 'patch) t
-    (** Create a single-use terminal owner for an existing wide log. *)
+  exception Current_error of current_error
 
-    val complete :
-      ('builder, 'patch) t -> ?set:('builder -> 'patch) -> unit -> unit
+  val current : unit -> (untyped_builder, untyped_patch) t
+  (** Return the open wide log bound by the innermost operation scope. *)
 
-    val fail :
-      ('builder, 'patch) t ->
-      ?set:('builder -> 'patch) ->
-      ?backtrace:Printexc.raw_backtrace ->
-      exn ->
-      unit
-
-    val cancel :
-      ('builder, 'patch) t -> ?set:('builder -> 'patch) -> unit -> unit
-    (** The first terminal action wins and emits the same ordinary lifecycle.
-        Its optional [set] contribution is authored only by that winner and
-        before emission. [fail] then contributes the selected safe error
-        interpretation; cancellation contributes no inferred fields or level. *)
-  end
+  val current_typed :
+    using:('record, 'builder) Schema.t -> ('builder, 'record Schema.patch) t
+  (** Return the schema-locked wide log bound by the innermost operation scope.
+      The supplied schema must be the same instance used to start it. *)
 end
 
 module IO : sig
@@ -750,7 +765,7 @@ module Make (IO : IO.S) : sig
 
   val with_capture :
     t ->
-    Config.t ->
+    config:Config.t ->
     ?capacity:int ->
     (Capture.t -> 'a io) ->
     ('a, capture_error) result io
@@ -763,34 +778,30 @@ module Make (IO : IO.S) : sig
       capture remains available for inspection but closed to further delivery.
   *)
 
-  val with_wide : t -> ('builder, 'patch) Logs.t -> (unit -> 'a io) -> 'a io
-  (** Bind an existing wide log for scoped point-log correlation only. This
-      catches nothing and emits nothing. *)
-
-  val manage :
+  val with_operation :
     t ->
-    ('builder, 'patch) Logs.t ->
-    error:exn Error.t ->
+    name:string ->
+    ?using:('record, 'builder) Schema.t ->
+    ?error:exn Error.t ->
     (unit -> 'a io) ->
     'a io
-  (** Run work inside the wide-log scope, contribute an escaping ordinary
-      exception through [error], emit once, and preserve the original runtime
-      outcome. Native cancellation completes without inferred error meaning. *)
+  (** Create one wide log, bind it as current while the callback runs, and make
+      one final publication attempt when the callback settles. Ordinary escaping
+      exceptions are contributed with [error], which defaults to {!Error.exn},
+      then re-propagated with their original backtrace. Failed error
+      interpretation seals and withholds the invalid observation. Runtime
+      control exceptions complete the operation without inferred error meaning.
+  *)
 
   val fork :
     t ->
     parent:('parent_builder, 'parent_patch) Logs.t ->
     name:string ->
-    error:exn Error.t ->
-    ((Logs.untyped_builder, Logs.untyped_patch) Logs.t -> 'a io) ->
+    ?using:('record, 'builder) Schema.t ->
+    ?error:exn Error.t ->
+    (unit -> 'a io) ->
     'a io
-
-  val fork_typed :
-    t ->
-    parent:('parent_builder, 'parent_patch) Logs.t ->
-    name:string ->
-    ('record, 'builder) Schema.t ->
-    error:exn Error.t ->
-    (('builder, 'record Schema.patch) Logs.t -> 'a io) ->
-    'a io
+  (** Run an independently completed child operation. The child records the
+      parent's complete reference without copying or modifying its event. The
+      prior current operation is restored when the callback settles. *)
 end

@@ -6,8 +6,9 @@ additional drains, and deterministic capture without performing I/O.
 
 Point logs auto-emit one text, anonymous structured, or declared record event.
 Wide logs use the same field and schema meaning but accept successive lazy
-contributions before one explicit completion. Runtime-current handles, child
-operations, and managed callbacks remain outside the portable lifecycle.
+contributions before one explicit or scope-bounded completion. The core owns
+current-handle meaning and operation behavior; runtime compositions supply the
+dynamic binding and effect settlement required to execute them.
 Drains that accept work for later effectful delivery can report a terminal
 worker failure through {!val:Observe.Drain.Integration.report_failure} without
 recursing through normal logging.
@@ -31,7 +32,7 @@ Ordinary code logs through {!module:Observe.Logs}:
 [%observe.info
   untyped { action = "user_login"; user_id = 42 }];
 
-[%observe.info typed event_schema event]
+[%observe.info typed ~using:event_schema event]
 ]}
 
 The callback and every text, untyped, or typed value constructed inside it run
@@ -43,14 +44,16 @@ A portable wide log is explicit:
 
 {[
 let log = Observe.Logs.create ~name:"checkout" () in
-[%observe.set log untyped { cart_id = string cart_id }];
-[%observe.set log untyped { phase = "authorized" }];
+[%observe.set log { cart_id = string cart_id }];
+[%observe.set log { phase = "authorized" }];
+[%observe.info log "authorization completed"];
 Observe.Logs.emit log
 ]}
 
 For a record derived with [@@deriving observe], [event_schema] locks complete
 point values and sparse wide patches to the same declared root. The deriver also
-generates [event_patch] and one-layer [[%observe.set log { ... }]] authoring.
+generates [event_patch] and one-layer
+[[%observe.set log typed { ... }]] authoring.
 
 {1 Configuration and output}
 

@@ -16,7 +16,7 @@ val create_outputs :
   clock:(unit -> (Timestamp.t, Io.clock_error) result) ->
   monotonic_now:(unit -> (int64, Io.clock_error) result) ->
   next_id:(unit -> (string, Io.clock_error) result) ->
-  resolve_operation_id:(unit -> string option) ->
+  resolve_operation:(unit -> Log.operation_reference option) ->
   console:(string -> Io.console_acceptance) ->
   is_control_exception:(exn -> bool) ->
   t
@@ -26,7 +26,7 @@ val create_capture :
   clock:(unit -> (Timestamp.t, Io.clock_error) result) ->
   monotonic_now:(unit -> (int64, Io.clock_error) result) ->
   next_id:(unit -> (string, Io.clock_error) result) ->
-  resolve_operation_id:(unit -> string option) ->
+  resolve_operation:(unit -> Log.operation_reference option) ->
   is_control_exception:(exn -> bool) ->
   Capture.t ->
   t
@@ -38,9 +38,12 @@ val record_diagnostic : t -> Diagnostics.kind -> unit
 (** Record through the engine's active output or capture diagnostic boundary. *)
 
 val emit_point :
-  t -> ?correlation_id:string -> Level.t -> Message.author -> unit
+  t -> ?correlation:Log.operation_reference -> Level.t -> Message.author -> unit
 
 type wide
+type current = Open of wide | Typed of wide * Schema.identity
+
+val current_reference : current -> Log.operation_reference option
 
 type contribution =
   | Contribution of Snapshot.fragment * bool
@@ -56,7 +59,8 @@ val create_wide :
   unit ->
   wide
 
-val wide_id : wide -> string option
+val wide_reference : wide -> Log.operation_reference option
 val contribute_wide : wide -> (unit -> contribution) -> bool
+val annotate_wide : wide -> Level.t -> (unit -> string) -> bool
 val set_wide_level : wide -> Level.t -> unit
 val emit_wide : wide -> unit

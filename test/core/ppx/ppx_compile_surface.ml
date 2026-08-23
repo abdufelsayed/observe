@@ -16,11 +16,17 @@ let text_log () =
 let untyped_log () = [%observe.warn untyped { action = "retry"; attempts = 2 }]
 
 let typed_log () =
-  [%observe.error typed event_schema { request_id = "req-1"; attempts = 2 }]
+  [%observe.error
+    typed ~using:event_schema { request_id = "req-1"; attempts = 2 }]
+
+let reordered_labels exn backtrace () =
+  [%observe.info
+    typed { request_id = "req-2"; attempts = 3 } ~using:event_schema];
+  [%observe.error error exn ~backtrace ~using:Observe.Error.exn]
 
 let dynamic_log level () =
-  [%observe.emit
-    level, typed event_schema { request_id = "req-2"; attempts = 0 }]
+  Observe.Logs.log ~level (fun m ->
+      m.typed ~using:event_schema { request_id = "req-2"; attempts = 0 })
 
 let () =
   ignore description;
@@ -28,4 +34,5 @@ let () =
   ignore text_log;
   ignore untyped_log;
   ignore typed_log;
+  ignore reordered_labels;
   ignore dynamic_log

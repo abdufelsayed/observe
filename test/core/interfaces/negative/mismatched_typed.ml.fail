@@ -15,4 +15,5 @@ let event_schema =
     ~builder:(fun _ -> { typed = Fun.id })
 
 let _ =
-  Observe.Logs.info (fun m -> m.typed event_schema { value = "not an int" })
+  Observe.Logs.info (fun m ->
+      m.typed ~using:event_schema { value = "not an int" })

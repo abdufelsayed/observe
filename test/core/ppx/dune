@@ -78,7 +78,10 @@
   value_suffixed_integer.ml
   value_record_update.ml
   logging_unknown_form.ml
-  logging_emit_shape.ml
+  logging_typed_without_schema.ml
+  logging_reserved_field.ml
+  wide_error_missing_using.ml
+  wide_redundant_untyped.ml
   untyped_nested_value.ml.fail
   untyped_dynamic.ml
   deriver_abstract.ml
@@ -110,13 +113,31 @@
     %{dep:check_negative.sh}
     %{exe:ppx_driver.exe}
     %{dep:logging_unknown_form.ml}
-    "[%observe.info]: expected [text ...], [untyped { ... }], [typed schema value], or [error interpretation value]")
+    "[%observe.info]: expected [text ...], [untyped { ... }], [typed ~using value], or [error ~using:interpretation value]")
    (run
     bash
     %{dep:check_negative.sh}
     %{exe:ppx_driver.exe}
-    %{dep:logging_emit_shape.ml}
-    "[%observe.emit]: expected [(level, text ...)]")
+    %{dep:logging_typed_without_schema.ml}
+    "[%observe.info]: [typed] requires [~using] and one value")
+   (run
+    bash
+    %{dep:check_negative.sh}
+    %{exe:ppx_driver.exe}
+    %{dep:logging_reserved_field.ml}
+    "[%observe.info]: field [service] is reserved for Observe metadata")
+   (run
+    bash
+    %{dep:check_negative.sh}
+    %{exe:ppx_driver.exe}
+    %{dep:wide_error_missing_using.ml}
+    "[%observe.set]: [error] requires [~using], an optional [~backtrace], and one value")
+   (run
+    bash
+    %{dep:check_negative.sh}
+    %{exe:ppx_driver.exe}
+    %{dep:wide_redundant_untyped.ml}
+    "[%observe.set]: expected [handle { ... }], [handle typed { ... }], or [handle error ~using:interpretation value]")
    (run
     bash
     %{dep:check_negative.sh}

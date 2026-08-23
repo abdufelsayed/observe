@@ -1,4 +1,4 @@
 type event = { count : int } [@@deriving observe]
 
-let log = Observe.Logs.create_typed ~name:"event" event_schema
-let _ = [%observe.set log { missing = 1 }]
+let log = Observe.Logs.create_typed ~name:"event" ~using:event_schema ()
+let _ = [%observe.set log typed { missing = 1 }]

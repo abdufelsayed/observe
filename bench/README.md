@@ -49,8 +49,10 @@ amortized. Report schema version 3 adds this field.
   It covers filtering, routing, drain fan-out, JSON, true-color pretty
   formatting, complete typed canonical points, anonymous point fields, opaque
   compatibility failure, open wide fragments, typed sparse patches, and nested
-  typed patches. These boundaries are named separately in the report; no
-  latency number is treated as proof of semantic correctness or lock-freedom.
+  typed patches. Operation scenarios separately measure open and typed current
+  lookup, bounded success and failure, a point inside an operation, and child
+  execution. These boundaries are named separately in the report; no latency
+  number is treated as proof of semantic correctness or lock-freedom.
 - `lwt-unix` initializes `Observe_lwt_unix` and performs its real clock and Unix
   standard-error write. Each measured operation includes a `flush` sequence
   barrier, so it measures formatting, bounded submission, scheduler wakeup,
@@ -66,7 +68,7 @@ amortized. Report schema version 3 adds this field.
   point and wide records use the same writer. These measurements do not include
   `fsync` and make no durability claim.
 
-Untyped and typed scenarios use the same small or nested logical body.
+Untyped and typed scenarios use the same small or nested logical event.
 Compare measurements only when their report metadata, benchmark configuration,
 runtime, and machine are compatible. GitHub Actions stores reports as workflow
 artifacts and does not enforce performance thresholds.

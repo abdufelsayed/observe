@@ -29,12 +29,28 @@ module Clock = struct
 end
 
 module Identity = struct
-  let next_value = Atomic.make 0
+  type generator = unit -> string
 
-  let next () =
-    let value = Atomic.fetch_and_add next_value 1 + 1 in
-    Ok ("operation-" ^ string_of_int value)
+  let default () =
+    Mirage_crypto_rng_unix.getrandom 16
+    |> Bytes.of_string
+    |> Uuidm.v4
+    |> Uuidm.to_string
+
+  let selected = Atomic.make default
+  let get () = Atomic.get selected
+  let set generator = Atomic.set selected generator
+
+  let serialize generator =
+    let lock = Mutex.create () in
+    fun () ->
+      Mutex.lock lock;
+      Fun.protect ~finally:(fun () -> Mutex.unlock lock) generator
+
+  let next () = Ok ((get ()) ())
 end
+
+type id_generator = Identity.generator
 
 module Console = struct
   let lowercase = String.lowercase_ascii
@@ -106,16 +122,38 @@ let io =
     ()
 
 let observer = Observer.create io
-let init config = Observer.init observer config
-let init_exn config = Observer.init_exn observer config
-let with_wide wide callback = Observer.with_wide observer wide callback
-let manage wide ~error callback = Observer.manage observer wide ~error callback
+let init_lock = Mutex.create ()
+let initialized = ref false
 
-let fork ~parent ~name ~error callback =
-  Observer.fork observer ~parent ~name ~error callback
+let init ?id_generator config =
+  Mutex.lock init_lock;
+  Fun.protect
+    ~finally:(fun () -> Mutex.unlock init_lock)
+    (fun () ->
+      if !initialized then Error Observe.Already_initialized
+      else
+        let previous = Identity.get () in
+        Identity.set
+          (Option.fold ~none:Identity.default ~some:Identity.serialize
+             id_generator);
+        match Observer.init observer config with
+        | Ok () as initialized_result ->
+            initialized := true;
+            initialized_result
+        | Error _ as error ->
+            Identity.set previous;
+            error)
 
-let fork_typed ~parent ~name schema ~error callback =
-  Observer.fork_typed observer ~parent ~name schema ~error callback
+let init_exn ?id_generator config =
+  match init ?id_generator config with
+  | Ok () -> ()
+  | Error error -> raise (Observe.Init_error error)
+
+let with_operation ~name ?using ?error callback =
+  Observer.with_operation observer ~name ?using ?error callback
+
+let fork ~parent ~name ?using ?error callback =
+  Observer.fork observer ~parent ~name ?using ?error callback
 
 let flush () = Writer_registry.flush writers
 let shutdown () = Writer_registry.shutdown writers
@@ -130,8 +168,8 @@ end
 module Test = struct
   exception Capture_error of Observe.capture_error
 
-  let with_capture_exn config ?capacity callback =
-    Lwt.bind (Observer.with_capture observer config ?capacity callback)
+  let with_capture_exn ~config ?capacity callback =
+    Lwt.bind (Observer.with_capture observer ~config ?capacity callback)
       (function
       | Ok result -> Lwt.return result
       | Error error -> Lwt.fail (Capture_error error))

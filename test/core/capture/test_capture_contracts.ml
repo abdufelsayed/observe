@@ -61,13 +61,13 @@ let reference_event_schema =
       { typed = Fun.id })
 
 let structured_json log =
-  match Observe.Log.body log with
+  match Observe.Log.event log with
   | Observe.Log.Text _ -> Alcotest.fail "expected a structured body"
   | Observe.Log.Structured { value; _ } ->
       Observe.Value.frozen_to_json_string value
 
 let capture ?capacity config callback =
-  match Observer.with_capture observer config ?capacity callback with
+  match Observer.with_capture observer ~config ?capacity callback with
   | Ok value -> value
   | Error Observe.IO_already_registered ->
       Alcotest.fail "I/O implementation unexpectedly conflicted"
@@ -75,7 +75,7 @@ let capture ?capacity config callback =
       Alcotest.failf "unexpected invalid capacity: %d" capacity
 
 let expect_text ~tag ~message log =
-  match Observe.Log.body log with
+  match Observe.Log.event log with
   | Observe.Log.Text actual ->
       Alcotest.(check string) "tag" tag actual.tag;
       Alcotest.(check string) "message" message actual.message
@@ -96,7 +96,8 @@ let test_bodies_and_metadata () =
                    ("attempt", Observe.Value.int 2);
                    ("ok", Observe.Value.bool true);
                  ]));
-        Observe.Logs.error (fun m -> m.typed int_event_schema { value = 7 });
+        Observe.Logs.error (fun m ->
+            m.typed ~using:int_event_schema { value = 7 });
         capture)
   in
   match Observe.Capture.logs capture with
@@ -117,7 +118,7 @@ let test_bodies_and_metadata () =
       Alcotest.(check string)
         "anonymous snapshot" "{\"attempt\":2,\"ok\":true}"
         (structured_json untyped);
-      match Observe.Log.body typed with
+      match Observe.Log.event typed with
       | Observe.Log.Structured { origin = Observe.Log.Declared "int_event"; _ }
         ->
           Alcotest.(check string)
@@ -141,8 +142,8 @@ let test_formatter_semantics () =
     | Error _ -> Alcotest.fail "JSON formatter rejected a valid text log"
   in
   Alcotest.(check string)
-    "semantic JSON envelope"
-    "{\"service\":\"formatter\",\"timestamp\":\"42\",\"level\":\"info\",\"body\":{\"kind\":\"text\",\"tag\":\"json\",\"message\":\"hello\"}}"
+    "semantic flat JSON event"
+    "{\"service\":\"formatter\",\"timestamp\":\"1970-01-01T00:00:00.000000042Z\",\"level\":\"info\",\"tag\":\"json\",\"message\":\"hello\"}"
     json;
   (match Observe.Formatter.format Observe.Formatter.ndjson log with
   | Ok line ->
@@ -182,7 +183,7 @@ let test_admission_and_diagnostics () =
             m.value (Observe.Value.int 0));
         Observe.Logs.debug (fun m ->
             incr typed_calls;
-            m.typed int_event_schema { value = 0 });
+            m.typed ~using:int_event_schema { value = 0 });
         Observe.Logs.info (fun m ->
             incr text_calls;
             m.text ~tag:"admission" "accepted");
@@ -213,7 +214,7 @@ let test_typed_values_are_frozen () =
   let log =
     capture (Test_io.config "identity") (fun capture ->
         Observe.Logs.info (fun m ->
-            m.typed reference_event_schema { reference = value });
+            m.typed ~using:reference_event_schema { reference = value });
         match Observe.Capture.logs capture with
         | [ log ] -> log
         | _ -> Alcotest.fail "expected one typed log")
@@ -222,6 +223,93 @@ let test_typed_values_are_frozen () =
   Alcotest.(check string)
     "later mutation cannot change the snapshot" "{\"reference\":3}"
     (structured_json log)
+
+let test_duplicate_fields_are_rejected_per_contribution () =
+  identities := [ "op-replace"; "op-duplicate" ];
+  monotonic := [ 0L; 1L; 2L; 3L ];
+  let capture =
+    capture (Test_io.config "duplicate-fields") (fun capture ->
+        Observe.Logs.info (fun m ->
+            m.value
+              (Observe.Value.object_
+                 [
+                   ("duplicate", Observe.Value.int 1);
+                   ("duplicate", Observe.Value.int 2);
+                 ]));
+        Observe.Logs.info (fun m ->
+            let open Observe.Logs in
+            m.untyped
+            |+ m.field "duplicate" Observe.Type.int 1
+            |+ m.field "duplicate" Observe.Type.int 2
+            |> m.seal);
+        Observe.Logs.info (fun m ->
+            let open Observe.Logs in
+            m.untyped
+            |+ m.object_ "nested" (fun n ->
+                n.untyped
+                |+ n.field "duplicate" Observe.Type.int 1
+                |+ n.field "duplicate" Observe.Type.int 2
+                |> n.seal)
+            |> m.seal);
+        let replacement = Observe.Logs.create ~name:"replacement" () in
+        Observe.Logs.set replacement (fun m ->
+            let open Observe.Logs in
+            m.untyped |+ m.field "phase" Observe.Type.string "started" |> m.seal);
+        Observe.Logs.set replacement (fun m ->
+            let open Observe.Logs in
+            m.untyped
+            |+ m.field "phase" Observe.Type.string "finished"
+            |> m.seal);
+        Observe.Logs.emit replacement;
+        let duplicate = Observe.Logs.create ~name:"duplicate" () in
+        Observe.Logs.set duplicate (fun m ->
+            let open Observe.Logs in
+            m.untyped
+            |+ m.field "field" Observe.Type.int 1
+            |+ m.field "field" Observe.Type.int 2
+            |> m.seal);
+        Observe.Logs.emit duplicate;
+        capture)
+  in
+  (match Observe.Capture.logs capture with
+  | [ replacement ] ->
+      Alcotest.(check string)
+        "later contributions replace prior fields" "{\"phase\":\"finished\"}"
+        (structured_json replacement)
+  | logs ->
+      Alcotest.failf "expected one valid replacement, received %d logs"
+        (List.length logs));
+  Alcotest.(check int)
+    "every duplicate contribution was diagnosed" 4
+    (Test_io.diagnostic_count
+       (Observe.Capture.diagnostics capture)
+       Observe.Diagnostics.Canonical_freeze_failed)
+
+let test_typed_patches_require_schema_identity () =
+  identities := [ "op-schema-mismatch" ];
+  monotonic := [ 0L; 1L ];
+  let same_named_schema =
+    Observe.Generated_runtime.record_schema int_event_t ~builder:(fun _ ->
+        ({ typed = Fun.id } : int_event_builder))
+  in
+  let capture =
+    capture (Test_io.config "schema-identity") (fun capture ->
+        let wide =
+          Observe.Logs.create_typed ~name:"schema-identity"
+            ~using:same_named_schema ()
+        in
+        Observe.Logs.set wide (fun m -> m.typed (int_event_patch ~value:7 ()));
+        Observe.Logs.emit wide;
+        capture)
+  in
+  Alcotest.(check int)
+    "same-named foreign schema patch was withheld" 0
+    (List.length (Observe.Capture.logs capture));
+  Alcotest.(check int)
+    "schema mismatch was diagnosed" 1
+    (Test_io.diagnostic_count
+       (Observe.Capture.diagnostics capture)
+       Observe.Diagnostics.Canonical_freeze_failed)
 
 let test_point_and_wide_semantic_capture () =
   monotonic := [ 0L; 10L; 71_000_010L; 184_000_000L ];
@@ -233,7 +321,7 @@ let test_point_and_wide_semantic_capture () =
         let parent = Observe.Logs.create ~name:"checkout" () in
         let child =
           Observe.Logs.create_typed ~parent ~name:"validate-cart"
-            int_event_schema
+            ~using:int_event_schema ()
         in
         Observe.Logs.info ~operation:parent
           (Test_io.text ~tag:"correlated" "waiting");
@@ -254,10 +342,12 @@ let test_point_and_wide_semantic_capture () =
         (Observe.Log.kind point = Observe.Log.Point);
       Alcotest.(check (option string))
         "ordinary point has no correlation" None
-        (Observe.Log.correlation_id point);
+        (Option.map Observe.Log.operation_reference_id
+           (Observe.Log.correlation point));
       Alcotest.(check (option string))
         "correlated point identity" (Some "op_parent")
-        (Observe.Log.correlation_id correlated);
+        (Option.map Observe.Log.operation_reference_id
+           (Observe.Log.correlation correlated));
       Alcotest.(check bool)
         "correlated observation remains a point" true
         (Observe.Log.kind correlated = Observe.Log.Point);
@@ -270,11 +360,12 @@ let test_point_and_wide_semantic_capture () =
         (Observe.Log.operation_id child_operation);
       Alcotest.(check (option string))
         "child parent" (Some "op_parent")
-        (Observe.Log.operation_parent_id child_operation);
+        (Option.map Observe.Log.operation_reference_id
+           (Observe.Log.operation_parent child_operation));
       Alcotest.(check int64)
         "child duration" 71_000_000L
         (Observe.Log.operation_duration_ns child_operation);
-      (match Observe.Log.body child with
+      (match Observe.Log.event child with
       | Observe.Log.Structured
           { origin = Observe.Log.Declared "int_event"; value } ->
           Alcotest.(check string)
@@ -291,7 +382,8 @@ let test_point_and_wide_semantic_capture () =
         (Observe.Log.operation_id parent_operation);
       Alcotest.(check (option string))
         "parent has no parent" None
-        (Observe.Log.operation_parent_id parent_operation);
+        (Option.map Observe.Log.operation_reference_id
+           (Observe.Log.operation_parent parent_operation));
       Alcotest.(check int64)
         "parent duration" 184_000_000L
         (Observe.Log.operation_duration_ns parent_operation);
@@ -321,6 +413,10 @@ let () =
             test_admission_and_diagnostics;
           Alcotest.test_case "typed snapshot semantics" `Quick
             test_typed_values_are_frozen;
+          Alcotest.test_case "duplicate fields" `Quick
+            test_duplicate_fields_are_rejected_per_contribution;
+          Alcotest.test_case "typed schema identity" `Quick
+            test_typed_patches_require_schema_identity;
           Alcotest.test_case "point and wide semantic inspection" `Quick
             test_point_and_wide_semantic_capture;
         ] );

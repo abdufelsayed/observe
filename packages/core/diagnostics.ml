@@ -12,6 +12,7 @@ type kind =
   | Message_evaluation_raised
   | Canonical_freeze_failed
   | Post_seal_set
+  | Post_seal_annotate
   | Post_seal_set_level
   | Post_seal_emit
   | Formatting_failed
@@ -42,6 +43,7 @@ let kinds =
     Message_evaluation_raised;
     Canonical_freeze_failed;
     Post_seal_set;
+    Post_seal_annotate;
     Post_seal_set_level;
     Post_seal_emit;
     Formatting_failed;
@@ -69,17 +71,18 @@ let index = function
   | Message_evaluation_raised -> 10
   | Canonical_freeze_failed -> 11
   | Post_seal_set -> 12
-  | Post_seal_set_level -> 13
-  | Post_seal_emit -> 14
-  | Formatting_failed -> 15
-  | Formatting_raised -> 16
-  | Console_rejected -> 17
-  | Console_raised -> 18
-  | Drain_rejected -> 19
-  | Drain_raised -> 20
-  | Drain_delivery_failed -> 21
-  | Capture_overflow -> 22
-  | Capture_closed -> 23
+  | Post_seal_annotate -> 13
+  | Post_seal_set_level -> 14
+  | Post_seal_emit -> 15
+  | Formatting_failed -> 16
+  | Formatting_raised -> 17
+  | Console_rejected -> 18
+  | Console_raised -> 19
+  | Drain_rejected -> 20
+  | Drain_raised -> 21
+  | Drain_delivery_failed -> 22
+  | Capture_overflow -> 23
+  | Capture_closed -> 24
 
 let create_store () = Array.init (Array.length kinds) (fun _ -> Atomic.make 0)
 

@@ -231,7 +231,7 @@ let process_diagnostic_count kind =
   diagnostic_count (Observe.Diagnostics.snapshot ()) kind
 
 let text_payload log =
-  match Observe.Log.body log with
+  match Observe.Log.event log with
   | Observe.Log.Text { tag; message } -> Some (tag, message)
   | Observe.Log.Structured _ -> None
 
@@ -241,4 +241,4 @@ let text ~tag message (builder : Observe.Logs.builder) =
 let untyped value (builder : Observe.Logs.builder) = builder.value value
 
 let typed description value (builder : Observe.Logs.builder) =
-  builder.typed description value
+  builder.typed ~using:description value

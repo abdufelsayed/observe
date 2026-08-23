@@ -14,6 +14,7 @@ type kind =
   | Message_evaluation_raised
   | Canonical_freeze_failed
   | Post_seal_set
+  | Post_seal_annotate
   | Post_seal_set_level
   | Post_seal_emit
   | Formatting_failed

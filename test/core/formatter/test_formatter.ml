@@ -22,6 +22,7 @@ type rich_event =
 type tree = Leaf of string | Branch of tree list [@@deriving observe]
 type unsafe_variant = Unsafe
 type child_event = { result : string } [@@deriving observe]
+type reserved_event = { service : string } [@@deriving observe]
 
 let take label values =
   match !values with
@@ -47,7 +48,7 @@ let observer =
 let capture_outcome level message =
   let config = Test_io.config ~min_level:Observe.Level.Debug "example" in
   match
-    Observer.with_capture observer config (fun capture ->
+    Observer.with_capture observer ~config (fun capture ->
         Observe.Logs.log ~level message;
         (Observe.Capture.logs capture, Observe.Capture.diagnostics capture))
   with
@@ -84,7 +85,7 @@ let typed description value (builder : Observe.Logs.builder) =
     Observe.Generated_runtime.record_schema event_t ~builder:(fun _ ->
         { typed = Fun.id })
   in
-  builder.typed schema { value }
+  builder.typed ~using:schema { value }
 
 let format_pretty style log =
   match Observe.Formatter.format (Observe.Formatter.pretty style) log with
@@ -111,20 +112,23 @@ let wide_fixtures () =
   identities := [ "op_parent"; "op_child" ];
   let outcome =
     Observer.with_capture observer
-      (Test_io.config ~min_level:Observe.Level.Debug "example") (fun capture ->
+      ~config:(Test_io.config ~min_level:Observe.Level.Debug "example")
+      (fun capture ->
         let parent = Observe.Logs.create ~name:"checkout" () in
         let child =
           Observe.Logs.create_typed ~parent ~name:"charge-card"
-            child_event_schema
+            ~using:child_event_schema ()
         in
         Observe.Logs.info ~operation:parent
           (Test_io.text ~tag:"inventory" "waiting");
+        Observe.Logs.annotate parent ~level:Observe.Level.Warn (fun () ->
+            "inventory delayed");
         Observe.Logs.set parent (fun m ->
             let open Observe.Logs in
             m.untyped
             |+ m.field "cart_id" Observe.Type.string "cart-1"
-            |+ m.field "operation" Observe.Type.string "consumer"
-            |+ m.field "service" Observe.Type.string "body"
+            |+ m.field "consumer_operation" Observe.Type.string "reserve"
+            |+ m.field "consumer_service" Observe.Type.string "inventory"
             |> m.seal);
         Observe.Logs.set child (fun m ->
             m.typed (child_event_patch ~result:"authorized" ()));
@@ -195,7 +199,41 @@ let test_timestamp_boundaries () =
   check_timestamp 0L "00:00:00.000";
   check_timestamp 999_999L "00:00:00.000";
   check_timestamp 86_399_999_999_999L "23:59:59.999";
-  check_timestamp (-1L) "23:59:59.999"
+  check_timestamp (-1L) "23:59:59.999";
+  timestamp := Observe.Timestamp.of_unix_ns (-1L);
+  let log =
+    capture_one Observe.Level.Info (Test_io.text ~tag:"time" "message")
+  in
+  Alcotest.(check string)
+    "RFC 3339 preserves a pre-epoch nanosecond"
+    "{\"service\":\"example\",\"timestamp\":\"1969-12-31T23:59:59.999999999Z\",\"level\":\"info\",\"tag\":\"time\",\"message\":\"message\"}"
+    (format_json Observe.Formatter.json log)
+
+let check_rfc3339_timestamp nanoseconds expected =
+  timestamp := Observe.Timestamp.of_unix_ns nanoseconds;
+  let log =
+    capture_one Observe.Level.Info (Test_io.text ~tag:"time" "message")
+  in
+  let expected =
+    "{\"service\":\"example\",\"timestamp\":\""
+    ^ expected
+    ^ "\",\"level\":\"info\",\"tag\":\"time\",\"message\":\"message\"}"
+  in
+  Alcotest.(check string)
+    "exact RFC 3339 timestamp" expected
+    (format_json Observe.Formatter.json log)
+
+let test_rfc3339_calendar_boundaries () =
+  List.iter
+    (fun (nanoseconds, expected) ->
+      check_rfc3339_timestamp nanoseconds expected)
+    [
+      (Int64.min_int, "1677-09-21T00:12:43.145224192Z");
+      (-2_203_977_600_000_000_000L, "1900-02-28T00:00:00.000000000Z");
+      (951_782_400_000_000_000L, "2000-02-29T00:00:00.000000000Z");
+      (4_107_542_400_000_000_000L, "2100-03-01T00:00:00.000000000Z");
+      (Int64.max_int, "2262-04-11T23:47:16.854775807Z");
+    ]
 
 let test_text_control_escaping () =
   timestamp := Observe.Timestamp.of_unix_ns 0L;
@@ -431,6 +469,12 @@ let test_canonical_failures_are_withheld () =
   check_withheld "non-finite float"
     (untyped (fun () ->
          Observe.Value.object_ [ ("value", Observe.Value.float nan) ]));
+  check_withheld "reserved root metadata"
+    (untyped (fun () ->
+         Observe.Value.object_
+           [ ("service", Observe.Value.string "consumer-value") ]));
+  check_withheld "reserved typed root metadata" (fun builder ->
+      builder.typed ~using:reserved_event_schema { service = "consumer-value" });
   let opaque = Observe.Type.of_repr (Observe.Type.repr deployment_t) in
   check_withheld "opaque Repr without bounded projection"
     (typed opaque `Development)
@@ -513,19 +557,29 @@ let test_ansi_16_typed_structure () =
 let test_wide_pretty_layout () =
   let fixtures = wide_fixtures () in
   Alcotest.(check string)
-    "correlated point" "10:23:45.612 INFO [inventory] (op_parent) waiting"
+    "correlated point"
+    "10:23:45.612 INFO [inventory] waiting\n\
+    \  └─ operation: checkout (op_parent)"
     (pretty fixtures.correlated);
   Alcotest.(check string)
     "child wide"
-    "10:23:45.612 INFO [charge-card] 71ms (op_child <- op_parent)\n\
+    "10:23:45.612 INFO [charge-card] 71ms\n\
+    \  ├─ id: \"op_child\"\n\
+    \  ├─ parent: checkout (op_parent)\n\
     \  └─ result: \"authorized\""
     (pretty fixtures.child);
   Alcotest.(check string)
     "parent wide"
-    "10:23:45.612 INFO [checkout] 184ms (op_parent)\n\
+    "10:23:45.612 WARN [checkout] 184ms\n\
+    \  ├─ id: \"op_parent\"\n\
     \  ├─ cart_id: \"cart-1\"\n\
-    \  ├─ operation: \"consumer\"\n\
-    \  └─ service: \"body\""
+    \  ├─ consumer_operation: \"reserve\"\n\
+    \  ├─ consumer_service: \"inventory\"\n\
+    \  └─ logs\n\
+    \     └─ [0]\n\
+    \        ├─ timestamp: \"1970-01-01T10:23:45.612000000Z\"\n\
+    \        ├─ level: \"warn\"\n\
+    \        └─ message: \"inventory delayed\""
     (pretty fixtures.parent);
   List.iter
     (fun style ->
@@ -538,16 +592,17 @@ let test_wide_pretty_layout () =
       Observe.Formatter.Truecolor;
     ]
 
-let test_wide_json_envelopes () =
+let test_wide_json_events () =
   let fixtures = wide_fixtures () in
   let correlated =
-    "{\"service\":\"example\",\"timestamp\":\"37425612000000\",\"level\":\"info\",\"operation_id\":\"op_parent\",\"body\":{\"kind\":\"text\",\"tag\":\"inventory\",\"message\":\"waiting\"}}"
+    "{\"service\":\"example\",\"timestamp\":\"1970-01-01T10:23:45.612000000Z\",\"level\":\"info\",\"operation\":\"checkout\",\"operation_id\":\"op_parent\",\"tag\":\"inventory\",\"message\":\"waiting\"}"
   in
   let child =
-    "{\"service\":\"example\",\"timestamp\":\"37425612000000\",\"level\":\"info\",\"operation\":{\"name\":\"charge-card\",\"id\":\"op_child\",\"parent_id\":\"op_parent\",\"duration_ns\":\"71000000\"},\"body\":{\"result\":\"authorized\"}}"
+    "{\"service\":\"example\",\"timestamp\":\"1970-01-01T10:23:45.612000000Z\",\"level\":\"info\",\"operation\":\"charge-card\",\"operation_id\":\"op_child\",\"parent_operation\":\"checkout\",\"parent_operation_id\":\"op_parent\",\"duration_ms\":71,\"result\":\"authorized\"}"
   in
   let parent =
-    "{\"service\":\"example\",\"timestamp\":\"37425612000000\",\"level\":\"info\",\"operation\":{\"name\":\"checkout\",\"id\":\"op_parent\",\"duration_ns\":\"184000000\"},\"body\":{\"cart_id\":\"cart-1\",\"operation\":\"consumer\",\"service\":\"body\"}}"
+    "{\"service\":\"example\",\"timestamp\":\"1970-01-01T10:23:45.612000000Z\",\"level\":\"warn\",\"operation\":\"checkout\",\"operation_id\":\"op_parent\",\"duration_ms\":184,\"cart_id\":\"cart-1\",\"consumer_operation\":\"reserve\",\"consumer_service\":\"inventory\",\"logs\":[{\"timestamp\":\"1970-01-01T10:23:45.612000000Z\",\"level\":\"warn\",\"message\":\"inventory \
+     delayed\"}]}"
   in
   List.iter
     (fun (name, log, expected) ->
@@ -558,7 +613,7 @@ let test_wide_json_envelopes () =
     [
       ("correlated point", fixtures.correlated, correlated);
       ("child wide", fixtures.child, child);
-      ("parent collision boundary", fixtures.parent, parent);
+      ("parent flat event", fixtures.parent, parent);
     ]
 
 let test_wide_metadata_escaping () =
@@ -567,7 +622,8 @@ let test_wide_metadata_escaping () =
   identities := [ "op\nid" ];
   let outcome =
     Observer.with_capture observer
-      (Test_io.config ~min_level:Observe.Level.Debug "example") (fun capture ->
+      ~config:(Test_io.config ~min_level:Observe.Level.Debug "example")
+      (fun capture ->
         let wide = Observe.Logs.create ~name:"checkout\027[31m" () in
         Observe.Logs.emit wide;
         Observe.Capture.logs capture)
@@ -585,11 +641,11 @@ let test_wide_metadata_escaping () =
   in
   Alcotest.(check string)
     "pretty metadata is terminal safe"
-    "10:23:45.612 INFO [checkout\\u001b[31m] 1us (op\\nid)\n  └─ {}"
+    "10:23:45.612 INFO [checkout\\u001b[31m] 1us\n  └─ id: \"op\\nid\""
     (pretty log);
   Alcotest.(check string)
     "JSON metadata is escaped"
-    "{\"service\":\"example\",\"timestamp\":\"37425612000000\",\"level\":\"info\",\"operation\":{\"name\":\"checkout\\u001b[31m\",\"id\":\"op\\nid\",\"duration_ns\":\"1000\"},\"body\":{}}"
+    "{\"service\":\"example\",\"timestamp\":\"1970-01-01T10:23:45.612000000Z\",\"level\":\"info\",\"operation\":\"checkout\\u001b[31m\",\"operation_id\":\"op\\nid\",\"duration_ms\":0.001}"
     (format_json Observe.Formatter.json log)
 
 let () =
@@ -602,6 +658,8 @@ let () =
           Alcotest.test_case "visible levels" `Quick test_visible_text_levels;
           Alcotest.test_case "timestamp boundaries" `Quick
             test_timestamp_boundaries;
+          Alcotest.test_case "RFC 3339 calendar boundaries" `Quick
+            test_rfc3339_calendar_boundaries;
           Alcotest.test_case "control escaping" `Quick
             test_text_control_escaping;
         ] );
@@ -641,8 +699,8 @@ let () =
         [
           Alcotest.test_case "pretty layout and style parity" `Quick
             test_wide_pretty_layout;
-          Alcotest.test_case "JSON and NDJSON envelopes" `Quick
-            test_wide_json_envelopes;
+          Alcotest.test_case "JSON and NDJSON events" `Quick
+            test_wide_json_events;
           Alcotest.test_case "metadata escaping" `Quick
             test_wide_metadata_escaping;
         ] );

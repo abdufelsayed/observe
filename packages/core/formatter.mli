@@ -25,18 +25,21 @@ val format : t -> Log.t -> (string, error) result
     exception containment so it can preserve its narrow exception policy. *)
 
 val pretty : style -> t
-(** Render compact tagged text or an ordered structured tree. Wide headers show
-    the operation name, human-readable duration, occurrence identity, and
-    optional parent identity. Timestamps use UTC time of day with millisecond
+(** Render compact tagged text or an ordered structured tree. A wide header
+    keeps the human-readable operation name and duration prominent; full
+    occurrence and parent references appear in the tree. Explicit annotations
+    appear under [logs]. Timestamps use UTC time of day with millisecond
     precision. Caller-controlled terminal control characters are escaped. *)
 
 val pretty_line : style -> t
 (** Internal terminal projection with exactly one trailing line feed. *)
 
 val json : t
-(** Render one compact object. Correlated points add [operation_id]. Wide logs
-    add a nested [operation] object and keep consumer data under [body]. Exact
-    timestamps and durations are decimal nanosecond strings. *)
+(** Render one flat compact event. Package metadata occupies documented reserved
+    root fields, and consumer structured fields remain at the root. Timestamps
+    are RFC 3339 UTC strings with nanosecond precision. Wide durations are
+    numeric milliseconds. Parent references contain both name and identifier,
+    and explicit annotations appear under [logs]. *)
 
 val ndjson : t
 (** The same compact object as {!json}, followed by one line feed. *)

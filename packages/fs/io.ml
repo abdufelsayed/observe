@@ -15,7 +15,7 @@ module type S = sig
   val await : notifier -> unit t
   val notify : notifier -> unit
   val dispose : notifier -> unit
-  val child : string -> string -> string
+  val child : dir:string -> name:string -> string
   val ensure_directory : string -> (unit, error) result t
   val open_append : string -> (file, error) result t
 

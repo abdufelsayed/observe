@@ -47,7 +47,7 @@ fi
 "$runner" diagnostic-counting "$work"
 "$runner" wide-contribution-and-seal "$work"
 "$runner" wide-set-level-emit-race "$work"
+"$runner" wide-annotation-emit-race "$work"
 "$runner" wide-authoring-linearization
 "$runner" wide-parallel-materialization
 "$runner" wide-parallel-failure-linearization
-"$runner" terminal-race "$work"

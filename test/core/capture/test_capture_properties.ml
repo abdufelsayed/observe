@@ -60,7 +60,7 @@ let nested_case =
     generator
 
 let captured_text log =
-  match Observe.Log.body log with
+  match Observe.Log.event log with
   | Observe.Log.Text { message; _ } -> int_of_string message
   | Observe.Log.Structured _ -> failwith "unexpected body"
 
@@ -70,7 +70,7 @@ let prop_capture_retains_prefix_and_conserves_offers =
     flat_case (fun (capacity, values) ->
       let config = Test_io.config ~min_level:Observe.Level.Debug "property" in
       match
-        Observer.with_capture observer config ~capacity (fun capture ->
+        Observer.with_capture observer ~config ~capacity (fun capture ->
             List.iter
               (fun value ->
                 Observe.Logs.debug
@@ -119,12 +119,12 @@ let prop_nested_capture_routes_to_innermost_and_restores_outer =
     nested_case (fun case ->
       let config = Test_io.config ~min_level:Observe.Level.Debug "property" in
       match
-        Observer.with_capture observer config ~capacity:case.outer_capacity
+        Observer.with_capture observer ~config ~capacity:case.outer_capacity
           (fun outer_capture ->
             List.iter emit case.before;
             let inner_capture =
               match
-                Observer.with_capture observer config
+                Observer.with_capture observer ~config
                   ~capacity:case.inner_capacity (fun inner_capture ->
                     List.iter emit case.inner;
                     inner_capture)

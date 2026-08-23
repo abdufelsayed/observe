@@ -7,6 +7,8 @@
   observe-lwt
   lwt
   lwt.unix
+  uuidm
+  mirage-crypto-rng.unix
   ptime.clock
   mtime.clock.os
   unix

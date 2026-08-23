@@ -33,7 +33,7 @@ module IO : sig
         may coalesce repeated notifications. [dispose] resolves current and
         future waits and releases runtime resources. *)
 
-    val child : string -> string -> string
+    val child : dir:string -> name:string -> string
     val ensure_directory : string -> (unit, error) result t
     val open_append : string -> (file, error) result t
 

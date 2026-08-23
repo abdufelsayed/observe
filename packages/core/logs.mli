@@ -11,7 +11,7 @@ type untyped_builder = Message.untyped_builder = {
   object_ : string -> (untyped_builder -> untyped_patch) -> field;
   error :
     'error.
-    'error Error.t ->
+    using:'error Error.t ->
     ?backtrace:Printexc.raw_backtrace ->
     'error ->
     untyped_patch;
@@ -27,8 +27,11 @@ type builder = private {
   value : Value.t -> message;
   error :
     'error.
-    'error Error.t -> ?backtrace:Printexc.raw_backtrace -> 'error -> message;
-  typed : 'a 'builder. ('a, 'builder) Schema.t -> 'a -> message;
+    using:'error Error.t ->
+    ?backtrace:Printexc.raw_backtrace ->
+    'error ->
+    message;
+  typed : 'a 'builder. using:('a, 'builder) Schema.t -> 'a -> message;
 }
 
 type author = builder -> message
@@ -61,7 +64,8 @@ val create :
 val create_typed :
   ?parent:('parent_builder, 'parent_patch) t ->
   name:string ->
-  ('record, 'builder) Schema.t ->
+  using:('record, 'builder) Schema.t ->
+  unit ->
   ('builder, 'record Schema.patch) t
 (** Start an empty wide log locked to one declared record schema. Contributions
     are sparse patches; no declared field is required before completion. *)
@@ -72,40 +76,43 @@ val set : ('builder, 'patch) t -> ('builder -> 'patch) -> unit
     replace earlier values at the same field. A failed contribution seals and
     withholds the lifecycle. *)
 
-val set_level : ('builder, 'patch) t -> Level.t -> unit
+val set_level : ('builder, 'patch) t -> level:Level.t -> unit
 (** Replace the explicit level. The last explicit level wins over an
     error-derived [Error], regardless of call order. *)
+
+val annotate : ('builder, 'patch) t -> level:Level.t -> (unit -> string) -> unit
+(** Append one explicit timestamped entry to the completed wide operation. The
+    callback runs only while the handle is active. Annotation levels contribute
+    to the operation's derived level; an explicit [set_level] still wins.
+    Separate point logs are never copied into this list. *)
 
 val emit : ('builder, 'patch) t -> unit
 (** Seal and attempt to publish the wide log exactly once. Admission uses the
     final level. Completion failures remain sealed and are diagnosed. *)
 
-module Terminal : sig
-  type ('builder, 'patch) log = ('builder, 'patch) t
-  type ('builder, 'patch) t
+type current_error =
+  | Not_bound
+  | Expected_open
+  | Expected_typed
+  | Schema_mismatch
 
-  val create :
-    error:exn Error.t -> ('builder, 'patch) log -> ('builder, 'patch) t
-  (** Create a single-use terminal owner for an existing wide log. *)
+exception Current_error of current_error
 
-  val complete :
-    ('builder, 'patch) t -> ?set:('builder -> 'patch) -> unit -> unit
+val current : unit -> (untyped_builder, untyped_patch) t
+(** Return the open wide log bound by the innermost operation scope. Raises
+    [Current_error Not_bound] outside a scope and [Current_error Expected_open]
+    when the current operation is schema-locked. *)
 
-  val fail :
-    ('builder, 'patch) t ->
-    ?set:('builder -> 'patch) ->
-    ?backtrace:Printexc.raw_backtrace ->
-    exn ->
-    unit
-
-  val cancel : ('builder, 'patch) t -> ?set:('builder -> 'patch) -> unit -> unit
-  (** The first terminal action wins and emits the same ordinary lifecycle. Its
-      optional [set] contribution is authored only by that winner and before
-      emission. [fail] then contributes the selected safe error interpretation;
-      cancellation contributes no inferred fields or level. *)
-end
+val current_typed :
+  using:('record, 'builder) Schema.t -> ('builder, 'record Schema.patch) t
+(** Return the schema-locked wide log bound by the innermost operation scope.
+    The supplied schema must be the same schema instance used to start the
+    operation. Raises [Current_error Not_bound], [Current_error Expected_typed],
+    or [Current_error Schema_mismatch] when that contract is not met. *)
 
 val engine_wide : ('builder, 'patch) t -> Engine.wide
+
+val engine_current : ('builder, 'patch) t -> Engine.current
 (** Internal bridge used by runtime compositions. *)
 
 val contribute_error :
@@ -114,5 +121,5 @@ val contribute_error :
   ?backtrace:Printexc.raw_backtrace ->
   'error ->
   bool
-(** Internal schema-independent error contribution used by managed runtimes.
+(** Internal schema-independent error contribution used by bounded operations.
     Returns whether the error contribution was accepted. *)

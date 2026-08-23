@@ -298,8 +298,8 @@ module Make (IO : Io.S) = struct
       | Error _ -> None
       | Ok bytes ->
           let path =
-            IO.child t.directory
-              (Observe_fs_date.Date.filename (Observe.Log.timestamp log))
+            IO.child ~dir:t.directory
+              ~name:(Observe_fs_date.Date.filename (Observe.Log.timestamp log))
           in
           Some (path, bytes)
       | exception exn ->

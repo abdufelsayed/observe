@@ -135,7 +135,7 @@ let mutation () =
   let writer = create () in
   install [ 0L ] (Writer.drain writer);
   let sample = { value = "before" } in
-  Observe.Logs.info (fun m -> m.typed sample_schema sample);
+  Observe.Logs.info (fun m -> m.typed ~using:sample_schema sample);
   sample.value <- "after";
   Lwt_main.run (Writer.shutdown writer) |> Result.get_ok;
   let output =
@@ -166,7 +166,8 @@ let projection () =
              ("action", Observe.Value.string "untyped");
              ("count", Observe.Value.int 2);
            ]));
-  Observe.Logs.info (fun m -> m.typed sample_schema { value = "typed payload" });
+  Observe.Logs.info (fun m ->
+      m.typed ~using:sample_schema { value = "typed payload" });
   let wide = Observe.Logs.create ~name:"filesystem-wide" () in
   Observe.Logs.info ~operation:wide (fun m ->
       m.text ~tag:"correlated" "%s" "point payload");
@@ -188,8 +189,8 @@ let projection () =
     "filesystem lost point correlation: %S" actual;
   check
     (contains actual
-       "\"operation\":{\"name\":\"filesystem-wide\",\"id\":\"filesystem-operation\",\"duration_ns\":\"0\"}")
-    "filesystem lost the wide operation envelope: %S" actual
+       "\"operation\":\"filesystem-wide\",\"operation_id\":\"filesystem-operation\",\"duration_ms\":0")
+    "filesystem lost the flat wide operation fields: %S" actual
 
 let capacity () =
   let writer = create ~capacity:1 () in

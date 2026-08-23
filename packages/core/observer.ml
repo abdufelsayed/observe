@@ -5,6 +5,7 @@ exception Init_error of init_error
 
 type io_registration = {
   resolve_capture : unit -> capture_scope option;
+  resolve_operation : unit -> operation_scope option;
   is_control_exception : exn -> bool;
 }
 
@@ -14,7 +15,7 @@ and capture_scope = {
   closed : bool Atomic.t;
 }
 
-and operation_scope = { id : string; closed : bool Atomic.t }
+and operation_scope = { current : Engine.current; closed : bool Atomic.t }
 
 type route =
   | Vacant
@@ -70,9 +71,30 @@ let active_engine () =
   | Io_registered io -> resolve io Missing
   | Outputs (io, engine) -> resolve io (Engine engine)
 
-let emit_point ?correlation_id ~level author =
+let record_active diagnostic =
   match active_engine () with
-  | Engine engine -> Engine.emit_point engine ?correlation_id level author
+  | Engine engine -> Engine.record_diagnostic engine diagnostic
+  | Missing -> Diagnostics.record diagnostic
+  | Withhold -> ()
+
+let current_operation () =
+  match Atomic.get route with
+  | Vacant -> None
+  | Io_registered io | Outputs (io, _) -> (
+      match
+        Engine.contain ~is_control_exception:io.is_control_exception
+          io.resolve_operation
+      with
+      | Engine.Raised ->
+          record_active Diagnostics.Operation_lookup_raised;
+          None
+      | Engine.Returned None -> None
+      | Engine.Returned (Some scope) ->
+          if Atomic.get scope.closed then None else Some scope.current)
+
+let emit_point ?correlation ~level author =
+  match active_engine () with
+  | Engine engine -> Engine.emit_point engine ?correlation level author
   | Withhold -> ()
   | Missing -> Diagnostics.record Diagnostics.Not_initialized
 
@@ -93,6 +115,7 @@ module Make (IO : Io.S) = struct
     let io =
       {
         resolve_capture = (fun () -> IO.get state capture_key);
+        resolve_operation = (fun () -> IO.get state operation_key);
         is_control_exception = IO.is_control_exception state;
       }
     in
@@ -102,10 +125,12 @@ module Make (IO : Io.S) = struct
   let monotonic_now t () = IO.Clock.monotonic_now t.state
   let next_id t () = IO.Identity.next t.state
 
-  let resolve_operation_id t () =
+  let resolve_operation t () =
     match IO.get t.state operation_key with
     | None -> None
-    | Some scope -> if Atomic.get scope.closed then None else Some scope.id
+    | Some scope ->
+        if Atomic.get scope.closed then None
+        else Engine.current_reference scope.current
 
   let offer_console t output = IO.Console.offer t.state output
 
@@ -115,13 +140,12 @@ module Make (IO : Io.S) = struct
     | `Outputs ->
         Engine.create_outputs config ~console_style:(IO.Console.style t.state)
           ~clock:(clock t) ~monotonic_now:(monotonic_now t) ~next_id:(next_id t)
-          ~resolve_operation_id:(resolve_operation_id t)
-          ~console:(offer_console t) ~is_control_exception
+          ~resolve_operation:(resolve_operation t) ~console:(offer_console t)
+          ~is_control_exception
     | `Capture capture ->
         Engine.create_capture config ~clock:(clock t)
           ~monotonic_now:(monotonic_now t) ~next_id:(next_id t)
-          ~resolve_operation_id:(resolve_operation_id t) ~is_control_exception
-          capture
+          ~resolve_operation:(resolve_operation t) ~is_control_exception capture
 
   let init t config = publish t.io (engine t config `Outputs)
 
@@ -134,7 +158,7 @@ module Make (IO : Io.S) = struct
     if Atomic.compare_and_set scope.closed false true then
       Capture.close scope.capture
 
-  let with_capture t config ?capacity callback =
+  let with_capture t ~config ?capacity callback =
     let capacity =
       match capacity with
       | Some capacity -> capacity
@@ -160,12 +184,9 @@ module Make (IO : Io.S) = struct
                   IO.bind (callback capture) (fun result ->
                       IO.return (Ok result))))
 
-  let with_wide t wide callback =
-    match Engine.wide_id wide with
-    | None -> callback ()
-    | Some id ->
-        let scope = { id; closed = Atomic.make false } in
-        IO.protect t.state
-          ~finally:(fun () -> Atomic.set scope.closed true)
-          (fun () -> IO.with_binding t.state operation_key scope callback)
+  let with_operation t current callback =
+    let scope = { current; closed = Atomic.make false } in
+    IO.protect t.state
+      ~finally:(fun () -> Atomic.set scope.closed true)
+      (fun () -> IO.with_binding t.state operation_key scope callback)
 end

@@ -11,8 +11,8 @@ let is_body_form = function
 
 let expected_body ~loc extension =
   extension_error ~loc extension
-    "expected [text ...], [untyped { ... }], [typed schema value], or [error \
-     interpretation value]"
+    "expected [text ...], [untyped { ... }], [typed ~using value], or [error \
+     ~using:interpretation value]"
 
 let builder_field ~loc builder field =
   pexp_field ~loc (evar ~loc builder) (lident ~loc field)
@@ -20,6 +20,35 @@ let builder_field ~loc builder field =
 let rec longident_last = function
   | Lident name | Ldot (_, name) -> name
   | Lapply (path, _) -> longident_last path
+
+let reserved_fields =
+  [
+    "service";
+    "environment";
+    "version";
+    "timestamp";
+    "level";
+    "operation";
+    "operation_id";
+    "parent_operation";
+    "parent_operation_id";
+    "duration_ms";
+    "tag";
+    "message";
+    "logs";
+  ]
+
+let reject_reserved_root_fields ~extension expression =
+  match expression.pexp_desc with
+  | Pexp_record (fields, None) ->
+      List.iter
+        (fun ({ txt = path; loc }, _) ->
+          let name = longident_last path in
+          if List.mem name reserved_fields then
+            extension_error ~loc extension
+              "field [%s] is reserved for Observe metadata" name)
+        fields
+  | Pexp_record (_, Some _) | _ -> ()
 
 let qualify_description expression =
   let builtins =
@@ -85,8 +114,37 @@ let described_value expression =
   | _ -> None
 
 let anonymous_value ~extension expression =
+  reject_reserved_root_fields ~extension expression;
   Value_extension.value_expression_with ~extension ~fallback:described_value
     expression
+
+let argument label arguments =
+  List.filter_map
+    (fun (actual, value) -> if actual = label then Some value else None)
+    arguments
+
+let typed_arguments arguments =
+  match (argument (Labelled "using") arguments, argument Nolabel arguments) with
+  | [ using ], [ value ] when List.length arguments = 2 ->
+      Some [ (Labelled "using", using); (Nolabel, value) ]
+  | _ -> None
+
+let error_arguments arguments =
+  match
+    ( argument (Labelled "using") arguments,
+      argument (Labelled "backtrace") arguments,
+      argument Nolabel arguments )
+  with
+  | [ using ], [], [ value ] when List.length arguments = 2 ->
+      Some [ (Labelled "using", using); (Nolabel, value) ]
+  | [ using ], [ backtrace ], [ value ] when List.length arguments = 3 ->
+      Some
+        [
+          (Labelled "using", using);
+          (Labelled "backtrace", backtrace);
+          (Nolabel, value);
+        ]
+  | _ -> None
 
 let rec typed_patch ~extension ~builder expression =
   let loc = expression.pexp_loc in
@@ -132,9 +190,25 @@ let body_expression ~extension ~builder expression =
             [ (Nolabel, anonymous_value ~extension object_) ]
       | "untyped", _ ->
           extension_error ~loc extension
-            "[untyped] requires one anonymous object; use the manual [m.value] \
-             compatibility path for an existing Observe.Value.t"
-      | _ -> pexp_apply ~loc (builder_field ~loc builder form) arguments)
+            "[untyped] requires one anonymous object"
+      | "typed", arguments -> (
+          match typed_arguments arguments with
+          | Some arguments ->
+              pexp_apply ~loc (builder_field ~loc builder "typed") arguments
+          | None ->
+              extension_error ~loc extension
+                "[typed] requires [~using] and one value")
+      | "error", arguments -> (
+          match error_arguments arguments with
+          | Some arguments ->
+              pexp_apply ~loc (builder_field ~loc builder "error") arguments
+          | None ->
+              extension_error ~loc extension
+                "[error] requires [~using], an optional [~backtrace], and one \
+                 value")
+      | "text", _ ->
+          pexp_apply ~loc (builder_field ~loc builder "text") arguments
+      | _ -> assert false)
   | _ -> expected_body ~loc extension
 
 let author_expression ~extension expression =
@@ -143,46 +217,53 @@ let author_expression ~extension expression =
   pexp_fun ~loc Nolabel None (pvar ~loc builder)
     (body_expression ~extension ~builder expression)
 
+let level_constructor ~loc = function
+  | "debug" -> pexp_construct ~loc (lident ~loc "Observe.Level.Debug") None
+  | "info" -> pexp_construct ~loc (lident ~loc "Observe.Level.Info") None
+  | "warn" -> pexp_construct ~loc (lident ~loc "Observe.Level.Warn") None
+  | "error" -> pexp_construct ~loc (lident ~loc "Observe.Level.Error") None
+  | _ -> assert false
+
 let expand_level level ~loc ~path:_ expression =
   let extension = "observe." ^ level in
-  eapply ~loc ("Observe.Logs." ^ level)
-    [ (Nolabel, author_expression ~extension expression) ]
-
-let expand_emit ~loc ~path:_ expression =
-  let extension = "observe.emit" in
   match expression.pexp_desc with
-  | Pexp_tuple [ level; body ] ->
-      eapply ~loc "Observe.Logs.log"
+  | Pexp_apply (handle, [ (Nolabel, message) ])
+    when not
+           (match handle.pexp_desc with
+           | Pexp_ident { txt = Lident form; _ } -> is_body_form form
+           | _ -> false) ->
+      eapply ~loc "Observe.Logs.annotate"
         [
-          (Labelled "level", level); (Nolabel, author_expression ~extension body);
+          (Nolabel, handle);
+          (Labelled "level", level_constructor ~loc level);
+          (Nolabel, pexp_fun ~loc Nolabel None (punit ~loc) message);
         ]
   | _ ->
-      extension_error ~loc:expression.pexp_loc extension
-        "expected [(level, text ...)], [(level, untyped value)], or [(level, \
-         typed description value)]"
+      eapply ~loc ("Observe.Logs." ^ level)
+        [ (Nolabel, author_expression ~extension expression) ]
 
 let expand_set ~loc ~path:_ expression =
   let extension = "observe.set" in
-  let expand handle body =
+  let expand handle form arguments =
     let builder = gen_symbol ~prefix:"__observe_builder" () in
     let contribution =
-      match body.pexp_desc with
-      | Pexp_apply
-          ( { pexp_desc = Pexp_ident { txt = Lident "untyped"; _ }; _ },
-            [ (Nolabel, object_) ] ) ->
-          eapply ~loc "Observe.Generated_runtime.untyped_value_patch"
-            [ (Nolabel, anonymous_value ~extension object_) ]
-      | Pexp_record _ ->
+      match (form, arguments) with
+      | "typed", [ (Nolabel, ({ pexp_desc = Pexp_record _; _ } as patch)) ] ->
           pexp_apply ~loc
             (builder_field ~loc builder "typed")
-            [ (Nolabel, typed_patch ~extension ~builder body) ]
-      | Pexp_apply
-          ({ pexp_desc = Pexp_ident { txt = Lident "error"; _ }; _ }, arguments)
-        ->
-          pexp_apply ~loc (builder_field ~loc builder "error") arguments
+            [ (Nolabel, typed_patch ~extension ~builder patch) ]
+      | "error", arguments -> (
+          match error_arguments arguments with
+          | Some arguments ->
+              pexp_apply ~loc (builder_field ~loc builder "error") arguments
+          | None ->
+              extension_error ~loc:expression.pexp_loc extension
+                "[error] requires [~using], an optional [~backtrace], and one \
+                 value")
       | _ ->
-          extension_error ~loc:body.pexp_loc extension
-            "expected [handle untyped { ... }] or [handle { ... }]"
+          extension_error ~loc:expression.pexp_loc extension
+            "expected [handle { ... }], [handle typed { ... }], or [handle \
+             error ~using:interpretation value]"
     in
     pexp_apply ~loc
       (evar ~loc "Observe.Logs.set")
@@ -193,22 +274,27 @@ let expand_set ~loc ~path:_ expression =
   in
   match expression.pexp_desc with
   | Pexp_apply
-      ( handle,
-        (Nolabel, { pexp_desc = Pexp_ident { txt = Lident "error"; _ }; _ })
-        :: arguments ) ->
-      expand handle (pexp_apply ~loc (evar ~loc "error") arguments)
+      (handle, [ (Nolabel, ({ pexp_desc = Pexp_record _; _ } as object_)) ]) ->
+      let builder = gen_symbol ~prefix:"__observe_builder" () in
+      pexp_apply ~loc
+        (evar ~loc "Observe.Logs.set")
+        [
+          (Nolabel, handle);
+          ( Nolabel,
+            pexp_fun ~loc Nolabel None (pvar ~loc builder)
+              (eapply ~loc "Observe.Generated_runtime.untyped_value_patch"
+                 [ (Nolabel, anonymous_value ~extension object_) ]) );
+        ]
   | Pexp_apply
       ( handle,
-        [
-          (Nolabel, { pexp_desc = Pexp_ident { txt = Lident "untyped"; _ }; _ });
-          (Nolabel, object_);
-        ] ) ->
-      expand handle
-        (pexp_apply ~loc (evar ~loc "untyped") [ (Nolabel, object_) ])
-  | Pexp_apply (handle, [ (Nolabel, body) ]) -> expand handle body
+        (Nolabel, { pexp_desc = Pexp_ident { txt = Lident form; _ }; _ })
+        :: arguments )
+    when String.equal form "typed" || String.equal form "error" ->
+      expand handle form arguments
   | _ ->
       extension_error ~loc:expression.pexp_loc extension
-        "expected [handle untyped { ... }] or [handle { ... }]"
+        "expected [handle { ... }], [handle typed { ... }], or [handle error \
+         ~using:interpretation value]"
 
 let expression_extension name expand =
   Extension.declare name Extension.Context.expression
@@ -222,6 +308,5 @@ let rules =
       expression_extension "observe.info" (expand_level "info");
       expression_extension "observe.warn" (expand_level "warn");
       expression_extension "observe.error" (expand_level "error");
-      expression_extension "observe.emit" expand_emit;
       expression_extension "observe.set" expand_set;
     ]

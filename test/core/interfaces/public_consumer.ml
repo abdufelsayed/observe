@@ -63,22 +63,25 @@ let config = Observe.Config.create_exn ~service:"consumer" ()
 let observer = Observer.create ()
 let text = fun (m : Observe.Logs.builder) -> m.text ~tag:"consumer" "message"
 let untyped = fun (m : Observe.Logs.builder) -> m.value (Observe.Value.int 1)
-let typed = fun (m : Observe.Logs.builder) -> m.typed event_schema { value = 1 }
-let pretty = Observe.Formatter.pretty Observe.Formatter.Plain
-let wide = Observe.Logs.create_typed ~name:"consumer" event_schema
-let correlated () = Observe.Logs.info ~operation:wide text
-let scoped callback = Observer.with_wide observer wide callback
 
-let managed callback =
-  Observer.manage observer wide ~error:Observe.Error.exn callback
+let typed =
+ fun (m : Observe.Logs.builder) -> m.typed ~using:event_schema { value = 1 }
+
+let pretty = Observe.Formatter.pretty Observe.Formatter.Plain
+let wide = Observe.Logs.create_typed ~name:"consumer" ~using:event_schema ()
+let correlated () = Observe.Logs.info ~operation:wide text
+
+let operation callback =
+  Observer.with_operation observer ~name:"consumer" ~using:event_schema callback
 
 let typed_child callback =
-  Observer.fork_typed observer ~parent:wide ~name:"child" event_schema
-    ~error:Observe.Error.exn callback
+  Observer.fork observer ~parent:wide ~name:"child" ~using:event_schema callback
+
+let current () = Observe.Logs.current_typed ~using:event_schema
 
 let inspect log =
   let body =
-    match Observe.Log.body log with
+    match Observe.Log.event log with
     | Observe.Log.Text { tag; message } -> `Text (tag, message)
     | Observe.Log.Structured { origin; value } ->
         let origin =
@@ -93,12 +96,13 @@ let inspect log =
       (fun operation ->
         ( Observe.Log.operation_name operation,
           Observe.Log.operation_id operation,
-          Observe.Log.operation_parent_id operation,
+          Option.map Observe.Log.operation_reference_id
+            (Observe.Log.operation_parent operation),
           Observe.Log.operation_duration_ns operation ))
       (Observe.Log.operation log)
   in
   ( Observe.Log.kind log,
-    Observe.Log.correlation_id log,
+    Option.map Observe.Log.operation_reference_id (Observe.Log.correlation log),
     operation,
     Observe.Log.timestamp log,
     Observe.Log.level log,
@@ -122,8 +126,8 @@ let _ =
     typed,
     pretty,
     correlated,
-    scoped,
-    managed,
+    operation,
     typed_child,
+    current,
     extension_formatter,
     extension_drain )

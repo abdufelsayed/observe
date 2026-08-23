@@ -34,7 +34,7 @@ let test_namespaced_value_respects_admission () =
   let config = Test_io.config ~min_level:Observe.Level.Info "ppx-value" in
   let capture =
     match
-      Observer.with_capture observer config (fun capture ->
+      Observer.with_capture observer ~config (fun capture ->
           Observe.Logs.debug author;
           Alcotest.(check int) "filtered value remains deferred" 0 !forces;
           Observe.Logs.info author;
@@ -56,7 +56,7 @@ let test_namespaced_value_respects_admission () =
   in
   Alcotest.(check bool)
     "semantic object shape" true
-    (contains json "\"body\":{\"action\":\"user_login\""
+    (contains json "\"action\":\"user_login\""
     && contains json "\"user_id\":42"
     && contains json "\"attempts\":[1,2,3]")
 

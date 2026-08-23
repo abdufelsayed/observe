@@ -51,7 +51,7 @@ end
 
 let manual () =
   let checkout =
-    Observe.Logs.create_typed ~name:"checkout" checkout_event_schema
+    Observe.Logs.create_typed ~name:"checkout" ~using:checkout_event_schema ()
   in
   Observe.Logs.set checkout (fun m ->
       m.typed (checkout_event_patch ~cart_id:"cart-1" ~phase:Started ()));
@@ -60,16 +60,23 @@ let manual () =
         (checkout_event_patch
            ~customer:(customer_patch ~id:"customer-1" ~plan:"pro" ())
            ~attempts:2 ()));
-  [%observe.set checkout { phase = Authorized "authorization-1"; attempts = 3 }];
-  [%observe.set checkout { customer = { id = "customer-2"; plan = "team" } }];
-  [%observe.set checkout error Observe.Error.exn (Failure "declined")];
+  [%observe.set
+    checkout typed { phase = Authorized "authorization-1"; attempts = 3 }];
+  [%observe.set
+    checkout typed { customer = { id = "customer-2"; plan = "team" } }];
+  let backtrace = Printexc.get_callstack 8 in
+  [%observe.set
+    checkout error ~using:Observe.Error.exn ~backtrace (Failure "declined")];
+  [%observe.set
+    checkout error (Failure "declined again") ~backtrace
+      ~using:Observe.Error.exn];
+  [%observe.warn checkout "payment retry scheduled"];
   Observe.Logs.emit checkout
 
 let open_wide () =
   let log = Observe.Logs.create ~name:"open" () in
   [%observe.set
-    log untyped
-      { phase = "started"; customer = { id = "customer-1"; attempts = 2 } }];
+    log { phase = "started"; customer = { id = "customer-1"; attempts = 2 } }];
   Observe.Logs.emit log
 
 let anonymous_point () =

@@ -56,7 +56,13 @@ and fragment = {
 }
 
 type t = value
-type error = Limit_exceeded | Invalid_utf8 | Unsupported | Conversion_failed
+
+type error =
+  | Limit_exceeded
+  | Invalid_utf8
+  | Duplicate_field
+  | Unsupported
+  | Conversion_failed
 
 type context = {
   mutable nodes : int;
@@ -269,6 +275,34 @@ let width values =
   in
   count 0 values
 
+let rec contains_field_name name = function
+  | [] -> false
+  | (candidate, _) :: rest ->
+      String.equal name candidate || contains_field_name name rest
+
+let duplicate_scan_threshold = 8
+
+let unique_field_names length fields =
+  if length <= 1 then true
+  else if length <= duplicate_scan_threshold then
+    let rec unique = function
+      | [] -> true
+      | (name, _) :: rest ->
+          (not (contains_field_name name rest)) && unique rest
+    in
+    unique fields
+  else
+    let names = Hashtbl.create length in
+    let rec unique = function
+      | [] -> true
+      | (name, _) :: rest ->
+          if Hashtbl.mem names name then false
+          else (
+            Hashtbl.add names name ();
+            unique rest)
+    in
+    unique fields
+
 let list context ~depth values =
   match width values with
   | Error _ as error -> error
@@ -281,6 +315,8 @@ let list context ~depth values =
 let object_ context ~depth fields =
   match width fields with
   | Error _ as error -> error
+  | Ok length when not (unique_field_names length fields) ->
+      Error Duplicate_field
   | Ok _ -> (
       let rec copy_names string_bytes retained_bytes copied = function
         | [] -> Ok (string_bytes, retained_bytes, List.rev copied)
@@ -309,6 +345,8 @@ let object_ context ~depth fields =
 let object_with_owned_names context ~depth fields =
   match width fields with
   | Error _ as error -> error
+  | Ok length when not (unique_field_names length fields) ->
+      Error Duplicate_field
   | Ok _ -> (
       let string_bytes, retained_bytes =
         List.fold_left
@@ -497,53 +535,59 @@ let singleton_object_from_owned name (child : fragment) =
 let object_from_owned fields =
   match fields with
   | [ (name, child) ] -> singleton_object_from_owned name child
-  | _ when List.length fields > width_limit -> Error Limit_exceeded
-  | _ ->
-      let rec build nodes string_bytes byte_bytes retained_bytes height
-          child_requires_compaction copied = function
-        | [] ->
-            let resources =
-              { nodes; string_bytes; byte_bytes; retained_bytes }
-            in
-            let copied = List.rev copied in
-            let object_ =
-              match copied with
-              | [ (name, child) ] -> Single (name, child.value)
-              | fields -> Packed { fields; resources; height }
-            in
-            validate
-              (snapshot
-                 ~requires_compaction:
-                   (match object_ with
-                   | Single _ -> child_requires_compaction
-                   | Packed _ -> true
-                   | Flat _ | Indexed _ -> assert false)
-                 (Object object_) resources height)
-        | (name, (child : fragment)) :: rest ->
-            if not (Utf8.is_valid name) then Error Invalid_utf8
-            else
-              let name = copy_string name in
-              let length = String.length name in
-              let nodes = nodes + child.nodes in
-              let string_bytes = string_bytes + child.string_bytes + length in
-              let byte_bytes = byte_bytes + child.byte_bytes in
-              let retained_bytes =
-                retained_bytes
-                + child.retained_bytes
-                + object_field_retained
-                + length
-              in
-              let height = max height (fragment_height child + 1) in
-              if
-                counts_fit ~nodes ~string_bytes ~byte_bytes ~retained_bytes
-                && height <= max_depth
-              then
-                build nodes string_bytes byte_bytes retained_bytes height
-                  (child_requires_compaction || requires_compaction child)
-                  ((name, child) :: copied) rest
-              else Error Limit_exceeded
-      in
-      build 1 0 0 base_node_retained 0 false [] fields
+  | _ -> (
+      match width fields with
+      | Error _ as error -> error
+      | Ok length when not (unique_field_names length fields) ->
+          Error Duplicate_field
+      | Ok _ ->
+          let rec build nodes string_bytes byte_bytes retained_bytes height
+              child_requires_compaction copied = function
+            | [] ->
+                let resources =
+                  { nodes; string_bytes; byte_bytes; retained_bytes }
+                in
+                let copied = List.rev copied in
+                let object_ =
+                  match copied with
+                  | [ (name, child) ] -> Single (name, child.value)
+                  | fields -> Packed { fields; resources; height }
+                in
+                validate
+                  (snapshot
+                     ~requires_compaction:
+                       (match object_ with
+                       | Single _ -> child_requires_compaction
+                       | Packed _ -> true
+                       | Flat _ | Indexed _ -> assert false)
+                     (Object object_) resources height)
+            | (name, (child : fragment)) :: rest ->
+                if not (Utf8.is_valid name) then Error Invalid_utf8
+                else
+                  let name = copy_string name in
+                  let length = String.length name in
+                  let nodes = nodes + child.nodes in
+                  let string_bytes =
+                    string_bytes + child.string_bytes + length
+                  in
+                  let byte_bytes = byte_bytes + child.byte_bytes in
+                  let retained_bytes =
+                    retained_bytes
+                    + child.retained_bytes
+                    + object_field_retained
+                    + length
+                  in
+                  let height = max height (fragment_height child + 1) in
+                  if
+                    counts_fit ~nodes ~string_bytes ~byte_bytes ~retained_bytes
+                    && height <= max_depth
+                  then
+                    build nodes string_bytes byte_bytes retained_bytes height
+                      (child_requires_compaction || requires_compaction child)
+                      ((name, child) :: copied) rest
+                  else Error Limit_exceeded
+          in
+          build 1 0 0 base_node_retained 0 false [] fields)
 
 let empty_object =
   let resources = node_resources base_node_retained in
@@ -932,12 +976,53 @@ and compact_object = function
            indexed.order_rev)
 
 let complete fragment = compact_fragment_value fragment
+let is_object = function Object _ -> true | _ -> false
+
+let root_field_count = function
+  | Object fields -> object_length fields
+  | Null | Bool _ | Integer _ | Float _ | String _ | Bytes _ | List _
+  | Variant _ ->
+      0
+
+let root_has_field_matching predicate snapshot =
+  match snapshot with
+  | Object fields ->
+      let found = ref false in
+      iter_object_values
+        (fun name _ -> if predicate name then found := true)
+        fields;
+      !found
+  | Null | Bool _ | Integer _ | Float _ | String _ | Bytes _ | List _
+  | Variant _ ->
+      false
+
+let object_has_field name = function
+  | Single (field, _) -> String.equal name field
+  | Flat fields -> contains_field_name name fields
+  | Packed packed -> contains_field_name name packed.fields
+  | Indexed indexed -> String_map.mem name indexed.first
+
+let object_fields_disjoint left right =
+  let disjoint = ref true in
+  iter_object_values
+    (fun name _ -> if object_has_field name left then disjoint := false)
+    right;
+  !disjoint
 
 module Object_accumulator = struct
   type state = fragment
 
   let empty = empty_object
   let merge = merge_object
+
+  let merge_disjoint accumulator patch =
+    match (accumulator.value, patch.value) with
+    | Object (Packed { fields = []; _ }), Object _ -> Ok patch
+    | Object left, Object right ->
+        if object_fields_disjoint left right then merge_object accumulator patch
+        else Error Duplicate_field
+    | _, _ -> Error Conversion_failed
+
   let as_fragment accumulator = accumulator
 end
 
@@ -1004,6 +1089,12 @@ and append_json_fields buffer first = function
       append first indexed.order_rev
 
 let append_json buffer snapshot = append_json_value buffer snapshot
+
+let append_root_json_fields buffer ~first = function
+  | Object fields -> append_json_fields buffer first fields
+  | Null | Bool _ | Integer _ | Float _ | String _ | Bytes _ | List _
+  | Variant _ ->
+      invalid_arg "Snapshot.append_root_json_fields: non-object root"
 
 open Pretty
 
@@ -1088,3 +1179,20 @@ let rec append_pretty_value renderer placement value =
 
 let append_pretty renderer placement snapshot =
   append_pretty_value renderer placement snapshot
+
+let append_root_pretty_fields renderer ~trailing = function
+  | Object fields ->
+      let length = object_length fields in
+      let index = ref 0 in
+      iter_object_values
+        (fun name value ->
+          let current = !index in
+          append_pretty_value renderer
+            (Field { last = current = length - 1 && trailing = 0; name })
+            value;
+          if current < length - 1 then newline renderer;
+          index := current + 1)
+        fields
+  | Null | Bool _ | Integer _ | Float _ | String _ | Bytes _ | List _
+  | Variant _ ->
+      invalid_arg "Snapshot.append_root_pretty_fields: non-object root"

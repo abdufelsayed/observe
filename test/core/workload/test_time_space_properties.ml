@@ -142,7 +142,7 @@ let prop_temporal_pipeline_obeys_stage_boundaries =
           "temporal"
       in
       match
-        Observer.with_capture observer config
+        Observer.with_capture observer ~config
           ~capacity:(max 1 (List.length case.events))
           (fun capture ->
             List.iter
@@ -150,7 +150,9 @@ let prop_temporal_pipeline_obeys_stage_boundaries =
                 current_clock := event.clock;
                 Observe.Logs.log ~level:event.level (fun m ->
                     incr forced;
-                    m.value (Observe.Value.int event.value)))
+                    m.value
+                      (Observe.Value.object_
+                         [ ("value", Observe.Value.int event.value) ])))
               case.events;
             capture)
       with
@@ -220,7 +222,7 @@ let prop_capture_space_is_bounded_by_capacity =
         Test_io.config ~min_level:Observe.Level.Debug "bounded-space"
       in
       match
-        Observer.with_capture observer config ~capacity (fun capture ->
+        Observer.with_capture observer ~config ~capacity (fun capture ->
             for value = 1 to offered do
               Observe.Logs.debug
                 (Test_io.text ~tag:"space" (string_of_int value))

@@ -3,7 +3,7 @@ type event = Request of payload | Idle [@@deriving observe]
 
 let typed =
  fun (m : Observe.Logs.builder) ->
-  m.typed payload_schema { request_id = "r1"; attempts = 2 }
+  m.typed ~using:payload_schema { request_id = "r1"; attempts = 2 }
 
 let untyped =
  fun (m : Observe.Logs.builder) ->
@@ -19,6 +19,7 @@ let text_log () = [%observe.info text ~tag:"consumer" "request %s" "r1"]
 let untyped_log () = [%observe.warn untyped { request_id = "r1"; attempts = 2 }]
 
 let typed_log () =
-  [%observe.error typed payload_schema { request_id = "r1"; attempts = 2 }]
+  [%observe.error
+    typed ~using:payload_schema { request_id = "r1"; attempts = 2 }]
 
 let _ = (typed, untyped, text_log, untyped_log, typed_log)
