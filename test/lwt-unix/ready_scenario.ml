@@ -80,10 +80,18 @@ let diagnostic_count capture kind =
     0
     (Observe.Capture.diagnostics capture)
 
-let operation_id log =
-  match Observe.Log.operation log with
-  | Some operation -> Observe.Log.operation_id operation
-  | None -> fail "expected a wide operation"
+let wide_operation = function
+  | log -> (
+      match Observe.Log.kind log with
+      | Observe.Log.Wide { operation; _ } -> operation
+      | Observe.Log.Point _ -> fail "expected a wide operation")
+
+let is_wide log =
+  match Observe.Log.kind log with
+  | Observe.Log.Wide _ -> true
+  | Observe.Log.Point _ -> false
+
+let operation_id log = Observe.Log.operation_id (wide_operation log)
 
 let correlation_by_tag capture tag =
   Observe.Capture.logs capture
@@ -91,8 +99,10 @@ let correlation_by_tag capture tag =
       match Observe.Log.event log with
       | Observe.Log.Text { tag = actual; _ } when String.equal actual tag ->
           Some
-            (Option.map Observe.Log.operation_reference_id
-               (Observe.Log.correlation log))
+            (match Observe.Log.kind log with
+            | Observe.Log.Point { correlation } ->
+                Option.map Observe.Log.operation_reference_id correlation
+            | Observe.Log.Wide _ -> fail "expected point log")
       | Observe.Log.Text _ | Observe.Log.Structured _ -> None)
   |> Option.value ~default:None
 
@@ -491,20 +501,14 @@ let operation_scope () =
   check
     (correlation_by_tag capture "outside" = None)
     "scope installed a fallback operation";
-  let wide_logs =
-    Observe.Capture.logs capture
-    |> List.filter (fun log -> Observe.Log.kind log = Observe.Log.Wide)
-  in
+  let wide_logs = Observe.Capture.logs capture |> List.filter is_wide in
   let named name =
     List.find
       (fun log ->
-        match Observe.Log.operation log with
-        | Some operation ->
-            String.equal (Observe.Log.operation_name operation) name
-        | None -> false)
+        String.equal (Observe.Log.operation_name (wide_operation log)) name)
       wide_logs
   in
-  let child_operation = Option.get (Observe.Log.operation (named "child")) in
+  let child_operation = wide_operation (named "child") in
   check
     (Option.map Observe.Log.operation_reference_id
        (Observe.Log.operation_parent child_operation)
@@ -580,18 +584,12 @@ let operation_lifecycle () =
         && String.sub propagated 0 (String.length original) = original)
         "operation Lwt backtrace origin changed"
   | None -> fail "operation Lwt failure was swallowed");
-  let wide_logs =
-    Observe.Capture.logs capture
-    |> List.filter (fun log -> Observe.Log.kind log = Observe.Log.Wide)
-  in
+  let wide_logs = Observe.Capture.logs capture |> List.filter is_wide in
   check (List.length wide_logs = 5) "operation boundaries did not emit once";
   let by_name name =
     List.find
       (fun log ->
-        match Observe.Log.operation log with
-        | Some operation ->
-            String.equal (Observe.Log.operation_name operation) name
-        | None -> false)
+        String.equal (Observe.Log.operation_name (wide_operation log)) name)
       wide_logs
   in
   check
@@ -650,11 +648,7 @@ let operation_late_callback () =
     "late callback retained a closed operation scope";
   check !current_rejected "late callback retrieved a closed operation handle";
   check
-    (List.length
-       (List.filter
-          (fun log -> Observe.Log.kind log = Observe.Log.Wide)
-          (Observe.Capture.logs capture))
-    = 1)
+    (List.length (List.filter is_wide (Observe.Capture.logs capture)) = 1)
     "cancelled operation did not complete exactly once"
 
 let operation_foreign_execution () =
@@ -694,10 +688,10 @@ let operation_foreign_execution () =
     | Some id ->
         List.exists
           (fun log ->
-            match Observe.Log.operation log with
-            | Some operation ->
+            match Observe.Log.kind log with
+            | Observe.Log.Wide { operation; _ } ->
                 String.equal (Observe.Log.operation_id operation) id
-            | None -> false)
+            | Observe.Log.Point _ -> false)
           (Observe.Capture.logs capture)
     | None -> false)
     "foreign execution disturbed the parent operation"

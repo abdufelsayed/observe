@@ -14,15 +14,6 @@ module Type : sig
   (** Recover the underlying Repr description for machine operations and
       interoperability. *)
 
-  val of_repr : ?json:(Buffer.t -> 'a -> unit) -> 'a Repr.t -> 'a t
-  (** Lift a raw Repr description. The optional writer appends exactly one
-      compact JSON value and must agree with the representation accepted by the
-      Repr decoder. Without it, JSON and pretty formatting use the generic
-      compatibility path and cannot recover distinctions erased by that
-      encoding. Fully described {!Type} combinators and descriptions produced by
-      [@@deriving observe] use direct Observe writers instead and retain those
-      distinctions. *)
-
   type len = Repr.len
 
   val unit : unit t
@@ -74,15 +65,11 @@ module Type : sig
   val variant : string -> 'b -> ('a, 'b, 'b) open_variant
 
   val case0 :
-    ?polymorphic:bool ->
-    ?is:('a -> bool) ->
-    string ->
-    'a ->
-    ('a, 'a case_p) case
+    ?polymorphic:bool -> is:('a -> bool) -> string -> 'a -> ('a, 'a case_p) case
 
   val case1 :
     ?polymorphic:bool ->
-    ?project:('a -> 'b option) ->
+    project:('a -> 'b option) ->
     string ->
     'b t ->
     ('b -> 'a) ->
@@ -109,7 +96,30 @@ end
 module Schema : sig
   type ('record, 'builder) t
   type 'record patch
-  type identity
+  type 'record patch_builder
+
+  val record :
+    ?name:string ->
+    builder:('record patch_builder -> 'builder) ->
+    'record Type.t ->
+    ('record, 'builder) t
+  (** Create a record-root schema and its typed sparse-patch builder. The
+      callback receives an opaque capability tied to this schema instance. *)
+
+  val field :
+    'record patch_builder -> string -> 'a Type.t -> 'a -> 'record patch
+  (** Build one typed field contribution. *)
+
+  val nested :
+    'record patch_builder ->
+    string ->
+    using:('nested, 'nested_builder) t ->
+    'nested patch ->
+    'record patch
+  (** Build one nested record contribution after checking its schema. *)
+
+  val combine : 'record patch_builder -> 'record patch list -> 'record patch
+  val name : ('record, 'builder) t -> string
 end
 
 module Error : sig
@@ -170,156 +180,29 @@ module Value : sig
   type frozen
   (** Immutable package-owned structured meaning in a completed observation. *)
 
+  type integer =
+    [ `Int of int | `Int32 of int32 | `Int64 of int64 | `Decimal of string ]
+
+  type frozen_view =
+    [ `Null
+    | `Bool of bool
+    | `Integer of integer
+    | `Float of float
+    | `String of string
+    | `Bytes of string
+    | `List of frozen list
+    | `Object of (string * frozen) list
+    | `Variant of string * bool * frozen option ]
+
+  val view : frozen -> frozen_view
+  (** Inspect already completed structured meaning without parsing JSON or
+      receiving mutable snapshot internals. Children remain [frozen] and are
+      traversed recursively through [view]. *)
+
   val frozen_to_json_string : frozen -> string
 
   val to_json_string : t -> (string, json_error) result
   (** Encode one compact JSON value with Observe's direct writer. *)
-end
-
-module Generated_runtime : sig
-  (** Compatibility contract for code emitted by [observe.ppx]. Consumer code
-      should use {!Type}; this module may only evolve with a coordinated
-      PPX/runtime compatibility change. *)
-
-  type 'a description = 'a Type.t
-  type renderer
-  type placement
-
-  type rendered =
-    | Scalar of (renderer -> unit)
-    | Node of (renderer -> placement -> unit)
-
-  val with_json : 'a description -> (Buffer.t -> 'a -> unit) -> 'a description
-  val with_plan : 'a description -> ('a -> rendered) -> 'a description
-
-  type freeze_context
-  type frozen
-  type freeze_error
-
-  val with_freeze :
-    'a description ->
-    (freeze_context -> depth:int -> 'a -> (frozen, freeze_error) result) ->
-    'a description
-
-  val with_recursive_plan :
-    'a description -> ('a description -> 'a -> rendered) -> 'a description
-
-  val with_recursive_freeze :
-    'a description ->
-    ('a description ->
-    freeze_context ->
-    depth:int ->
-    'a ->
-    (frozen, freeze_error) result) ->
-    'a description
-
-  val freeze :
-    'a description ->
-    freeze_context ->
-    depth:int ->
-    'a ->
-    (frozen, freeze_error) result
-
-  val frozen_string :
-    freeze_context -> depth:int -> string -> (frozen, freeze_error) result
-
-  val frozen_object :
-    freeze_context ->
-    depth:int ->
-    (string * frozen) list ->
-    (frozen, freeze_error) result
-
-  val frozen_variant :
-    freeze_context ->
-    depth:int ->
-    bool ->
-    string ->
-    (frozen, freeze_error) result
-
-  val frozen_variant_payload :
-    freeze_context ->
-    depth:int ->
-    bool ->
-    string ->
-    frozen ->
-    (frozen, freeze_error) result
-
-  val json : 'a description -> Buffer.t -> 'a -> unit
-  val plan : 'a description -> 'a -> rendered
-  val is_scalar : 'a description -> 'a -> bool
-  val render : 'a description -> renderer -> placement -> 'a -> unit
-  val inline : placement
-  val start : renderer -> placement -> scalar:bool -> bool
-  val finish : renderer -> bool -> unit
-
-  val field :
-    'a description -> renderer -> last:bool -> name:string -> 'a -> unit
-
-  val constructor :
-    'a description -> renderer -> last:bool -> name:string -> 'a -> unit
-
-  val constructor_start :
-    renderer -> last:bool -> name:string -> scalar:bool -> bool
-
-  val variant : renderer -> placement -> polymorphic:bool -> string -> unit
-  val variant_label : renderer -> polymorphic:bool -> string -> unit
-  val empty_record : renderer -> unit
-  val json_unit : Buffer.t -> unit -> unit
-  val json_bool : Buffer.t -> bool -> unit
-  val json_char : Buffer.t -> char -> unit
-  val json_int : Buffer.t -> int -> unit
-  val json_int32 : Buffer.t -> int32 -> unit
-  val json_int64 : Buffer.t -> int64 -> unit
-  val json_float : Buffer.t -> float -> unit
-  val json_string : Buffer.t -> string -> unit
-  val json_bytes : Buffer.t -> bytes -> unit
-  val json_list : (Buffer.t -> 'a -> unit) -> Buffer.t -> 'a list -> unit
-  val json_array : (Buffer.t -> 'a -> unit) -> Buffer.t -> 'a array -> unit
-  val json_option : (Buffer.t -> 'a -> unit) -> Buffer.t -> 'a option -> unit
-  val json_field : 'a description -> Buffer.t -> bool -> string -> 'a -> bool
-
-  type fragment
-  type patch_field
-  type untyped_patch
-
-  val fragment : 'a description -> 'a -> fragment
-
-  val error_fragment :
-    'error Error.t -> ?backtrace:Printexc.raw_backtrace -> 'error -> fragment
-
-  val patch_fragment : 'record Schema.patch -> fragment
-  val patch_field : string -> fragment -> patch_field
-
-  val record_patch :
-    ('record, 'builder) Schema.t ->
-    patch_field option list ->
-    'record Schema.patch
-
-  val record_patch_fields :
-    ('record, 'builder) Schema.t -> patch_field list -> 'record Schema.patch
-
-  val identified_record_patch :
-    Schema.identity -> patch_field option list -> 'record Schema.patch
-
-  val identified_record_patch_fields :
-    Schema.identity -> patch_field list -> 'record Schema.patch
-
-  val identified_error_patch :
-    Schema.identity -> fragment -> 'record Schema.patch
-
-  val combine_identified_patches :
-    Schema.identity -> 'record Schema.patch list -> 'record Schema.patch
-
-  val record_schema :
-    ?name:string ->
-    builder:(Schema.identity -> 'builder) ->
-    'record description ->
-    ('record, 'builder) Schema.t
-
-  val schema_builder : ('record, 'builder) Schema.t -> 'builder
-
-  val untyped_value_patch : Value.t -> untyped_patch
-  (** PPX runtime bridge for an annotation-free anonymous object. *)
 end
 
 module Level : sig
@@ -359,10 +242,13 @@ module Log : sig
 
   and structured_origin = Open | Declared of string
 
-  type kind = Point | Wide
   type operation_reference
   type operation
   type annotation
+
+  type kind =
+    | Point of { correlation : operation_reference option }
+    | Wide of { operation : operation; annotations : annotation list }
 
   val service : t -> string
   val environment : t -> string option
@@ -372,18 +258,8 @@ module Log : sig
   val event : t -> event
 
   val kind : t -> kind
-  (** Distinguish an auto-emitted point observation from a completed wide
-      operation without inspecting presentation output. *)
-
-  val operation : t -> operation option
-  (** The immutable operation facts on a wide observation. Point observations
-      return [None], including correlated points. *)
-
-  val correlation : t -> operation_reference option
-  (** The current or explicitly associated operation on a separate point log. *)
-
-  val annotations : t -> annotation list
-  (** Explicit timestamped entries accumulated inside a wide operation. *)
+  (** Complete point or wide meaning. Correlation exists only on point logs;
+      operation facts and annotations exist only on wide logs. *)
 
   val operation_reference_name : operation_reference -> string
   val operation_reference_id : operation_reference -> string
@@ -565,7 +441,7 @@ module Logs : sig
 
   type object_
   type field
-  type untyped_patch = Generated_runtime.untyped_patch
+  type untyped_patch
 
   type untyped_builder = private {
     untyped : object_;
@@ -587,7 +463,6 @@ module Logs : sig
     field : 'a. string -> 'a Type.t -> 'a -> field;
     object_ : string -> (untyped_builder -> untyped_patch) -> field;
     seal : object_ -> message;
-    value : Value.t -> message;
     error :
       'error.
       using:'error Error.t ->
@@ -598,9 +473,8 @@ module Logs : sig
   }
   (** The admitted point builder. [text] supports type-safe format strings;
       [untyped], [field], [object_], and [seal] author anonymous record-shaped
-      structure; [value] is the explicit {!Value} compatibility path; and
-      [typed] accepts a complete value through a record schema. Every accepted
-      result is frozen before publication. *)
+      structure; [typed] accepts a complete value through a record schema. Every
+      accepted result is frozen before publication. *)
 
   type author = builder -> message
   (** Message authoring invoked only after route and level admission. *)
@@ -675,6 +549,172 @@ module Logs : sig
     using:('record, 'builder) Schema.t -> ('builder, 'record Schema.patch) t
   (** Return the schema-locked wide log bound by the innermost operation scope.
       The supplied schema must be the same instance used to start it. *)
+end
+
+module Ppx_runtime : sig
+  (** Generated-code contract for [observe.ppx]. Ordinary code uses {!Type},
+      {!Schema}, and {!Logs}; this hierarchy changes only with a coordinated
+      PPX/runtime change. *)
+
+  type 'a type_description = 'a Type.t
+  type logs_message = Logs.message
+  type logs_untyped_patch = Logs.untyped_patch
+
+  module Type : sig
+    type 'a description = 'a type_description
+    type renderer
+    type placement
+
+    type rendered =
+      | Scalar of (renderer -> unit)
+      | Node of (renderer -> placement -> unit)
+
+    val with_json : 'a description -> (Buffer.t -> 'a -> unit) -> 'a description
+    val with_plan : 'a description -> ('a -> rendered) -> 'a description
+
+    type freeze_context
+    type frozen
+    type freeze_error
+
+    val with_freeze :
+      'a description ->
+      (freeze_context -> depth:int -> 'a -> (frozen, freeze_error) result) ->
+      'a description
+
+    val with_recursive_plan :
+      'a description -> ('a description -> 'a -> rendered) -> 'a description
+
+    val with_recursive_freeze :
+      'a description ->
+      ('a description ->
+      freeze_context ->
+      depth:int ->
+      'a ->
+      (frozen, freeze_error) result) ->
+      'a description
+
+    val freeze :
+      'a description ->
+      freeze_context ->
+      depth:int ->
+      'a ->
+      (frozen, freeze_error) result
+
+    val frozen_string :
+      freeze_context -> depth:int -> string -> (frozen, freeze_error) result
+
+    val frozen_object :
+      freeze_context ->
+      depth:int ->
+      (string * frozen) list ->
+      (frozen, freeze_error) result
+
+    val frozen_variant :
+      freeze_context ->
+      depth:int ->
+      bool ->
+      string ->
+      (frozen, freeze_error) result
+
+    val frozen_variant_payload :
+      freeze_context ->
+      depth:int ->
+      bool ->
+      string ->
+      frozen ->
+      (frozen, freeze_error) result
+
+    val json : 'a description -> Buffer.t -> 'a -> unit
+    val plan : 'a description -> 'a -> rendered
+    val is_scalar : 'a description -> 'a -> bool
+    val render : 'a description -> renderer -> placement -> 'a -> unit
+    val inline : placement
+    val start : renderer -> placement -> scalar:bool -> bool
+    val finish : renderer -> bool -> unit
+
+    val field :
+      'a description -> renderer -> last:bool -> name:string -> 'a -> unit
+
+    val constructor :
+      'a description -> renderer -> last:bool -> name:string -> 'a -> unit
+
+    val constructor_start :
+      renderer -> last:bool -> name:string -> scalar:bool -> bool
+
+    val variant : renderer -> placement -> polymorphic:bool -> string -> unit
+    val variant_label : renderer -> polymorphic:bool -> string -> unit
+    val empty_record : renderer -> unit
+    val json_unit : Buffer.t -> unit -> unit
+    val json_bool : Buffer.t -> bool -> unit
+    val json_char : Buffer.t -> char -> unit
+    val json_int : Buffer.t -> int -> unit
+    val json_int32 : Buffer.t -> int32 -> unit
+    val json_int64 : Buffer.t -> int64 -> unit
+    val json_float : Buffer.t -> float -> unit
+    val json_string : Buffer.t -> string -> unit
+    val json_bytes : Buffer.t -> bytes -> unit
+    val json_list : (Buffer.t -> 'a -> unit) -> Buffer.t -> 'a list -> unit
+    val json_array : (Buffer.t -> 'a -> unit) -> Buffer.t -> 'a array -> unit
+    val json_option : (Buffer.t -> 'a -> unit) -> Buffer.t -> 'a option -> unit
+    val json_field : 'a description -> Buffer.t -> bool -> string -> 'a -> bool
+  end
+
+  module Schema : sig
+    type fragment
+    type patch_field
+
+    val fragment : 'a type_description -> 'a -> fragment
+
+    val error_fragment :
+      'error Error.t -> ?backtrace:Printexc.raw_backtrace -> 'error -> fragment
+
+    val patch_fragment : 'record Schema.patch -> fragment
+    val patch_field : string -> fragment -> patch_field
+
+    val record_patch :
+      ('record, 'builder) Schema.t ->
+      patch_field option list ->
+      'record Schema.patch
+
+    val record_patch_fields :
+      ('record, 'builder) Schema.t -> patch_field list -> 'record Schema.patch
+
+    val identified_record_patch :
+      'record Schema.patch_builder ->
+      patch_field option list ->
+      'record Schema.patch
+
+    val identified_record_patch_fields :
+      'record Schema.patch_builder -> patch_field list -> 'record Schema.patch
+
+    val identified_error_patch :
+      'record Schema.patch_builder -> fragment -> 'record Schema.patch
+
+    val combine_identified_patches :
+      'record Schema.patch_builder ->
+      'record Schema.patch list ->
+      'record Schema.patch
+
+    val record_schema :
+      ?name:string ->
+      builder:('record Schema.patch_builder -> 'builder) ->
+      'record type_description ->
+      ('record, 'builder) Schema.t
+
+    val schema_builder : ('record, 'builder) Schema.t -> 'builder
+  end
+
+  module Logs : sig
+    type message = logs_message
+    type untyped_patch = logs_untyped_patch
+
+    val untyped_value_patch : Value.t -> untyped_patch
+    val untyped_message : Value.t -> message
+
+    val is_reserved_field : string -> bool
+    (** Early generated-code diagnostic backed by the runtime's authoritative
+        envelope ownership predicate. *)
+  end
 end
 
 module IO : sig

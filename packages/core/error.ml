@@ -38,3 +38,6 @@ let value interpret ?backtrace error =
 
 let freeze interpret ?backtrace error =
   Value.freeze (value interpret ?backtrace error)
+
+let freeze_into interpret ?backtrace error context ~depth =
+  Value.freeze_into (value interpret ?backtrace error) context ~depth

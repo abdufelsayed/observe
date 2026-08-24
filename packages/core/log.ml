@@ -4,7 +4,6 @@ type event =
 
 and structured_origin = Open | Declared of string
 
-type kind = Point | Wide
 type operation_reference = { name : string; id : string }
 
 type operation = {
@@ -15,6 +14,10 @@ type operation = {
 
 type annotation = { timestamp : Timestamp.t; level : Level.t; message : string }
 
+type kind =
+  | Point of { correlation : operation_reference option }
+  | Wide of { operation : operation; annotations : annotation list }
+
 type t = {
   service : string;
   environment : string option;
@@ -22,9 +25,7 @@ type t = {
   timestamp : Timestamp.t;
   level : Level.t;
   event : event;
-  correlation : operation_reference option;
-  operation : operation option;
-  annotations : annotation list;
+  kind : kind;
 }
 
 let service log = log.service
@@ -33,10 +34,7 @@ let version log = log.version
 let timestamp log = log.timestamp
 let level log = log.level
 let event log = log.event
-let kind log = match log.operation with None -> Point | Some _ -> Wide
-let operation log = log.operation
-let correlation log = log.correlation
-let annotations log = log.annotations
+let kind log = log.kind
 let operation_reference_name reference = reference.name
 let operation_reference_id reference = reference.id
 let operation_name operation = operation.reference.name
@@ -64,17 +62,14 @@ module Producer = struct
   let reference_length reference =
     String.length reference.name + String.length reference.id
 
-  let operation_valid = function
-    | None -> true
-    | Some operation ->
-        reference_valid operation.reference
-        && Option.fold ~none:true ~some:reference_valid operation.parent
+  let operation_valid operation =
+    reference_valid operation.reference
+    && Option.fold ~none:true ~some:reference_valid operation.parent
+    && Int64.compare operation.duration_ns 0L >= 0
 
-  let operation_length = function
-    | None -> 0
-    | Some operation ->
-        reference_length operation.reference
-        + Option.fold ~none:0 ~some:reference_length operation.parent
+  let operation_length operation =
+    reference_length operation.reference
+    + Option.fold ~none:0 ~some:reference_length operation.parent
 
   let event_valid = function
     | Text { tag; message } ->
@@ -98,14 +93,8 @@ module Producer = struct
       (fun length annotation -> length + String.length annotation.message)
       0 annotations
 
-  let reserved_field = function
-    | "service" | "environment" | "version" | "timestamp" | "level"
-    | "operation" | "operation_id" | "parent_operation" | "parent_operation_id"
-    | "duration_ms" | "tag" | "message" | "logs" ->
-        true
-    | _ -> false
-
-  let owns_reserved_field = Snapshot.root_has_field_matching reserved_field
+  let owns_reserved_field =
+    Snapshot.root_has_field_matching Log_envelope.is_reserved_field
 
   let own_event = function
     | Text { tag; message } ->
@@ -117,18 +106,37 @@ module Producer = struct
           Error Snapshot.Conversion_failed
         else Ok (completed_structured ~origin ~value)
 
-  let make ~service ?environment ?version ~timestamp ~level ?correlation
-      ?operation ?(annotations = []) event =
-    if List.length annotations > Snapshot.width_limit then
+  let kind_valid = function
+    | Point { correlation } ->
+        Option.fold ~none:true ~some:reference_valid correlation
+    | Wide { operation; annotations } ->
+        operation_valid operation && List.for_all annotation_valid annotations
+
+  let kind_length = function
+    | Point { correlation } ->
+        Option.fold ~none:0 ~some:reference_length correlation
+    | Wide { operation; annotations } ->
+        operation_length operation + annotations_length annotations
+
+  let annotation_count = function
+    | Point _ -> 0
+    | Wide { annotations; _ } -> List.length annotations
+
+  let kind_accepts_event kind event =
+    match (kind, event) with
+    | Point _, (Text _ | Structured _) | Wide _, Structured _ -> true
+    | Wide _, Text _ -> false
+
+  let make ~service ?environment ?version ~timestamp ~level ~kind event =
+    if annotation_count kind > Snapshot.width_limit then
       Error Snapshot.Limit_exceeded
     else if
       not
         (Snapshot.valid_text service
         && option_valid environment
         && option_valid version
-        && Option.fold ~none:true ~some:reference_valid correlation
-        && operation_valid operation
-        && List.for_all annotation_valid annotations
+        && kind_valid kind
+        && kind_accepts_event kind event
         && event_valid event)
     then Error Snapshot.Invalid_utf8
     else
@@ -136,9 +144,7 @@ module Producer = struct
         String.length service
         + option_length environment
         + option_length version
-        + Option.fold ~none:0 ~some:reference_length correlation
-        + operation_length operation
-        + annotations_length annotations
+        + kind_length kind
         + event_length event
       in
       match
@@ -161,9 +167,7 @@ module Producer = struct
                   timestamp;
                   level;
                   event;
-                  correlation;
-                  operation;
-                  annotations;
+                  kind;
                 })
 
   let operation_reference ~name ~id = { name; id }

@@ -1,16 +1,24 @@
 (** A completed authoring result. [Engine] invokes an [author] only after
     admission, then seals the returned message with runtime metadata. *)
 
+type piece =
+  | Typed_value : 'a Type.t * 'a -> piece
+  | Object of object_
+  | Untyped_value of Value.t
+  | Interpreted_error :
+      'error Error.t * Printexc.raw_backtrace option * 'error
+      -> piece
+
+and object_ = { fields : (string * piece) list; has_error : bool }
+
+type field = { name : string; piece : piece; has_error : bool }
+type untyped_patch = { piece : piece; has_error : bool }
+type untyped = piece
+
 type t =
   | Text of { tag : string; message : string }
-  | Value of Value.t
-  | Untyped of (Snapshot.fragment, Snapshot.error) result
+  | Untyped of untyped
   | Typed : ('a, 'builder) Schema.t * 'a -> t
-
-type fragment = (Snapshot.fragment, Snapshot.error) result
-type object_ = { fields : (string * fragment) list; has_error : bool }
-type field = { name : string; fragment : fragment; has_error : bool }
-type untyped_patch = { fragment : fragment; has_error : bool }
 
 type untyped_builder = {
   untyped : object_;
@@ -33,7 +41,6 @@ type builder = {
   field : 'a. string -> 'a Type.t -> 'a -> field;
   object_ : string -> untyped_author -> field;
   seal : object_ -> t;
-  value : Value.t -> t;
   error :
     'error.
     using:'error Error.t -> ?backtrace:Printexc.raw_backtrace -> 'error -> t;
@@ -44,56 +51,68 @@ type author = builder -> t
 
 let ( |+ ) object_ field =
   {
-    fields = (field.name, field.fragment) :: object_.fields;
+    fields = (field.name, field.piece) :: object_.fields;
     has_error = object_.has_error || field.has_error;
   }
+
+let rec freeze_piece context ~depth = function
+  | Typed_value (description, value) ->
+      Type.freeze_into description context ~depth value
+  | Object object_ -> freeze_object context ~depth object_
+  | Untyped_value value -> Value.freeze_into value context ~depth
+  | Interpreted_error (interpretation, backtrace, error) ->
+      Error.freeze_into interpretation ?backtrace error context ~depth
+
+and freeze_object context ~depth object_ =
+  let rec collect fields = function
+    | [] -> Snapshot.object_ context ~depth fields
+    | (name, piece) :: rest -> (
+        match freeze_piece context ~depth:(depth + 1) piece with
+        | Error _ as error -> error
+        | Ok value -> collect ((name, value) :: fields) rest)
+  in
+  collect [] object_.fields
+
+let materialize piece =
+  let context = Snapshot.create_context () in
+  match freeze_piece context ~depth:0 piece with
+  | Ok value -> Ok (Snapshot.seal context value)
+  | Error _ as error -> error
 
 let rec untyped_builder =
   {
     untyped = { fields = []; has_error = false };
     field =
       (fun name description value ->
-        { name; fragment = Type.freeze description value; has_error = false });
+        { name; piece = Typed_value (description, value); has_error = false });
     object_ =
       (fun name author ->
         let patch = author untyped_builder in
-        { name; fragment = patch.fragment; has_error = patch.has_error });
+        { name; piece = patch.piece; has_error = patch.has_error });
     error =
       (fun ~using ?backtrace error ->
-        { fragment = Error.freeze using ?backtrace error; has_error = true });
-    seal =
-      (fun object_ ->
-        let rec collect one fields = function
-          | [] -> (
-              match (one, fields) with
-              | None, [] -> Snapshot.object_from_owned []
-              | Some (name, value), [] ->
-                  Snapshot.singleton_object_from_owned name value
-              | None, fields -> Snapshot.object_from_owned fields
-              | Some _, _ -> assert false)
-          | (_, Error error) :: _ -> Error error
-          | (name, Ok value) :: rest -> (
-              match (one, fields) with
-              | None, [] -> collect (Some (name, value)) [] rest
-              | Some field, [] -> collect None [ (name, value); field ] rest
-              | None, fields -> collect None ((name, value) :: fields) rest
-              | Some _, _ -> assert false)
-        in
         {
-          fragment = collect None [] object_.fields;
-          has_error = object_.has_error;
+          piece = Interpreted_error (using, backtrace, error);
+          has_error = true;
         });
+    seal =
+      (fun object_ -> { piece = Object object_; has_error = object_.has_error });
   }
 
-let untyped_patch_fragment (patch : untyped_patch) = patch.fragment
+let materialize_untyped_patch (patch : untyped_patch) = materialize patch.piece
+let materialize_untyped value = materialize value
 let untyped_patch_has_error (patch : untyped_patch) = patch.has_error
 
 let untyped_patch_of_value = function
   | Value.Object _ as value ->
-      { fragment = Value.freeze value; has_error = false }
+      { piece = Untyped_value value; has_error = false }
   | _ ->
       invalid_arg
-        "Observe.Generated_runtime.untyped_value_patch: expected object"
+        "Observe.Ppx_runtime.Logs.untyped_value_patch: expected object"
+
+let untyped_message_of_value = function
+  | Value.Object _ as value -> Untyped (Untyped_value value)
+  | _ -> invalid_arg "Observe.Ppx_runtime.Logs.untyped_message: expected object"
 
 let builder =
   {
@@ -103,10 +122,9 @@ let builder =
     untyped = untyped_builder.untyped;
     field = untyped_builder.field;
     object_ = untyped_builder.object_;
-    seal = (fun object_ -> Untyped (untyped_builder.seal object_).fragment);
-    value = (fun value -> Value value);
+    seal = (fun object_ -> Untyped (Object object_));
     error =
       (fun ~using ?backtrace error ->
-        Untyped (Error.freeze using ?backtrace error));
+        Untyped (Interpreted_error (using, backtrace, error)));
     typed = (fun ~using value -> Typed (using, value));
   }

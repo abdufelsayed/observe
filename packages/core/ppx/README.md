@@ -41,12 +41,11 @@ Observe.Logs.info (fun m ->
   m.text ~tag:"auth" "user %d logged in" user_id)
 
 Observe.Logs.warn (fun m ->
-  m.value
-    (Observe.Value.object_
-       [
-         ("action", Observe.Value.string "retry");
-         ("attempt", Observe.Value.int 2);
-       ]))
+  let open Observe.Logs in
+  m.untyped
+  |+ m.field "action" Observe.Type.string "retry"
+  |+ m.field "attempt" Observe.Type.int 2
+  |> m.seal)
 
 Observe.Logs.error (fun m ->
   m.typed ~using:sync_failed_schema
@@ -86,9 +85,13 @@ The manual `Observe.Logs` API remains available and requires no PPX.
 let open_log = Observe.Logs.create ~name:"checkout" () in
 [%observe.set open_log
   {
-    cart_id = string cart_id;
+    cart_id = Observe.Type.string cart_id;
     phase = "started";
-    customer = { id = string customer_id; plan = string plan };
+    customer =
+      {
+        id = Observe.Type.string customer_id;
+        plan = Observe.Type.string plan;
+      };
   }];
 [%observe.info open_log "customer context collected"];
 
@@ -167,7 +170,6 @@ The three paths are therefore one API with different amounts of information:
 | --- | --- | --- |
 | `[@@deriving observe]` | Generated bounded freezer plus specialized direct projections | Normal types and record schemas |
 | `Observe.Type` combinators | Composed bounded freezer and direct projections | Hand-written descriptions |
-| `Observe.Type.of_repr` | Repr compatibility only; no implicit bounded freezer | Opaque Repr operations outside completed logs |
 
 The generated functions do not eagerly serialize a value. For an admitted
 point or active wide contribution, the bounded freezer projects directly into
@@ -298,10 +300,10 @@ let box_t item_t =
 
 The Repr-compatible constructor and central deconstructor build the machine
 description. The `~is` and `~project` functions let the manual Observe
-description compile the same direct JSON and pretty dispatch. The deriver
-supplies equivalent projectors automatically. Omitting them preserves
-compatibility with existing Repr-style description code, which then uses the
-generic compatibility path.
+description compile the same direct JSON, pretty, and bounded snapshot
+dispatch. The deriver supplies equivalent selectors automatically. Manual
+variants require them because Repr does not expose a safe structural traversal
+that Observe could use to construct its immutable snapshot.
 
 Recursive declarations use Repr's recursive machine description and generated
 recursive direct projections. Logging checks depth before descending into each
@@ -313,25 +315,13 @@ operations cycle-safe.
 
 `Observe.Type.repr description` exposes the underlying Repr description for
 decoding, equality, comparison, binary operations, schemas or another Repr
-consumer. `Observe.Type.of_repr repr` lifts an existing description for direct
-interoperability. Because Repr is abstract, that lift cannot supply Observe's
-bounded freezer. Such a value is withheld from completed logs rather than
-falling back to unbounded traversal or retaining a live value.
+consumer. This direction is always safe: an `Observe.Type.t` contains both the
+Repr machine and Observe's bounded semantic projection.
 
-If an integration already has a direct compact JSON writer, it can retain the
-opaque Repr description without paying for the generic encoder:
-
-```ocaml
-let description = Observe.Type.of_repr ~json:append_json existing_repr
-```
-
-The writer appends exactly one compact value to the supplied buffer and must
-use the same representation accepted by `existing_repr`'s decoder. It improves
-direct JSON compatibility; it does not establish canonical logging safety.
-
-`Observe.Type.to_json_string description value` is the allocating direct
-convenience API. Logging instead invokes the bounded freezer once and every
-formatter consumes the resulting immutable snapshot.
+The reverse direction is deliberately absent. A raw `Repr.t` does not expose
+enough structure to prove bounded snapshot construction. Use the corresponding
+`Observe.Type` combinators, deriving, or `Observe.Type.map` from an existing
+Observe description when a value needs to enter logging.
 
 The deriver targets `Observe.Type` as its default description library. It uses
 the Repr PPX engine for machine descriptions and package-owned generation for
@@ -349,19 +339,18 @@ without inline records retain the broader `ppx_repr` feature set.
 `[%observe.value ...]` accepts integer, float, string, and Boolean literals;
 record syntax as an object; list literals; and `Some` or `None`. The extension
 expands to an `Observe.Value.t`. It is the explicit compatibility and standalone
-value-construction surface; it is not nested inside a logging extension. To log
-one lazily, use the manual callback's explicit `m.value` path:
+value-construction surface; it is not nested inside a logging extension and is
+not a logging root. Log the equivalent object through the logging DSL:
 
 ```ocaml
-Observe.Logs.info (fun m ->
-  m.value
-    [%observe.value
-      {
-        action = "user_login";
-        user_id = 42;
-        methods = [ "oauth"; "passkey" ];
-        previous_user = None;
-      }])
+[%observe.info
+  untyped
+    {
+      action = "user_login";
+      user_id = 42;
+      methods = [ "oauth"; "passkey" ];
+      previous_user = None;
+    }]
 ```
 
 Record field names become object keys and must be unqualified identifiers.
@@ -373,14 +362,12 @@ description:
 
 ```ocaml
 let user_id = 42 in
-Observe.Logs.info (fun m ->
-  m.value
-    [%observe.value
-      {
-        action = "user_login";
-        user_id =
-          [%observe.value.embed (Observe.Type.int, user_id)];
-      }])
+[%observe.info
+  untyped
+    {
+      action = "user_login";
+      user_id = Observe.Type.int user_id;
+    }]
 ```
 
 The authoring `Observe.Value.t` temporarily retains the embedded value. An

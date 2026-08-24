@@ -155,7 +155,7 @@ let () =
   match if Array.length Sys.argv = 3 then Some Sys.argv.(2) else None with
   | None ->
       require bindings "event_t" 1;
-      require calls "Observe.Generated_runtime.with_plan" 1;
+      require calls "Observe.Ppx_runtime.Type.with_plan" 1;
       require calls "Observe.Type.sealv" 1;
       require calls "Observe.Type.|~" 2;
       require calls "Observe.Type.variant event" 1;
@@ -168,17 +168,18 @@ let () =
       require calls "Observe.Type.case0 Idle" 1
   | Some "recursive" ->
       require bindings "node_t" 1;
-      require calls "Observe.Generated_runtime.with_recursive_plan" 1;
-      require calls "Observe.Generated_runtime.constructor Leaf" 1;
-      require calls "Observe.Generated_runtime.constructor Branch" 1
+      require calls "Observe.Ppx_runtime.Type.with_recursive_plan" 1;
+      require calls "Observe.Ppx_runtime.Type.constructor Leaf" 1;
+      require calls "Observe.Ppx_runtime.Type.constructor Branch" 1
   | Some "logging" ->
       require calls "Observe.Logs.debug" 1;
       require calls "Observe.Logs.info" 1;
       require calls "Observe.Logs.warn" 1;
       require calls "Observe.Logs.error" 1;
       require calls "Observe.Logs.log" 1;
+      require calls "Observe.Ppx_runtime.Logs.untyped_message" 1;
       require fields "text" 2;
-      require fields "value" 1;
+      require fields "value" 0;
       require fields "untyped" 0;
       require fields "field" 0;
       require fields "seal" 0;

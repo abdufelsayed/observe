@@ -218,12 +218,14 @@ because PPX expansion occurs before OCaml type checking:
 
 ```ocaml
 let user_id = current_user_id () in
-[%observe.info untyped { action = "user_login"; user_id = int user_id }]
+[%observe.info
+  untyped { action = "user_login"; user_id = Observe.Type.int user_id }]
 ```
 
 Declared typed schemas are the annotation-free path for variable-rich data.
-`Observe.Value` remains available as an explicit compatibility and inspection
-surface through `m.value`.
+`Observe.Value` remains a standalone construction and inspection surface; it
+is not a second logging authoring API. Open logs use the field builder above or
+the equivalent PPX object syntax.
 
 Declared point logs have record roots. Deriving a record produces its complete
 description, schema witness, and sparse patch authoring support:
@@ -250,6 +252,29 @@ Observe.Logs.info (fun m ->
     { cart_id = "cart-1"; phase = Started })
 ```
 
+Code that does not use the deriver can construct the same validated schema
+from an ordinary record description and an explicit sparse-patch builder:
+
+```ocaml
+type checkout_builder = {
+  typed : checkout_event Observe.Schema.patch ->
+    checkout_event Observe.Schema.patch;
+  phase : phase -> checkout_event Observe.Schema.patch;
+}
+
+let checkout_event_schema =
+  Observe.Schema.record checkout_event_t ~builder:(fun patch ->
+    { typed = Fun.id
+    ; phase =
+        Observe.Schema.field patch "phase" phase_t
+    })
+```
+
+`Schema` owns this public construction boundary. `Observe.Ppx_runtime` is only
+the coordinated ABI used by generated code; its nested `Type`, `Schema`, and
+`Logs` modules keep generated responsibilities separate. Ordinary logging code
+does not construct values through it.
+
 `[%observe.debug ...]`, `[%observe.info ...]`, `[%observe.warn ...]`, and
 `[%observe.error ...]` accept text, untyped, typed, and explicit-error forms.
 For a dynamic level,
@@ -261,9 +286,8 @@ Observe.Logs.log ~level (fun m ->
 ```
 
 There is no computed-level PPX form: the fixed-level extensions remain short,
-while the manual call makes a runtime level explicit. `m.value value` accepts
-an already constructed `Observe.Value.t`; `m.untyped` starts the anonymous
-field builder shown above.
+while the manual call makes a runtime level explicit. `m.untyped` starts the
+anonymous field builder shown above.
 
 An explicitly supplied error can also be the complete point event:
 
@@ -285,7 +309,7 @@ emitted once:
 let checkout = Observe.Logs.create ~name:"checkout" () in
 
 [%observe.set checkout
-  { cart_id = string cart_id; phase = "started" }];
+  { cart_id = Observe.Type.string cart_id; phase = "started" }];
 
 [%observe.set checkout
   { payment = { status = "authorized" } }];
@@ -438,10 +462,10 @@ authoring directly into that format-neutral snapshot; JSON, pretty output,
 capture, and drains then consume the same completed value. Repr continues to
 own decoding, equality, comparison, binary operations, and other machine
 interoperability. Use `Observe.Type.repr` to pass an Observe description to Repr
-APIs. `Observe.Type.of_repr` remains useful for direct Repr interoperability,
-but an opaque lifted description cannot enter a completed log unless Observe
-has a bounded package-owned freezer for it; there is no live or unbounded
-fallback.
+APIs. A raw `Repr.t` remains a Repr description: turning it into an
+`Observe.Type.t` requires an Observe-owned bounded projection, normally by
+composing the corresponding `Observe.Type` description or adapting one with
+`Observe.Type.map`.
 
 ## Machine Output
 
@@ -544,14 +568,29 @@ output:
 
 ```ocaml
 let inspect log =
-  match Observe.Log.kind log, Observe.Log.operation log with
-  | Observe.Log.Point, None ->
-      Option.map Observe.Log.operation_reference_id
-        (Observe.Log.correlation log)
-  | Observe.Log.Wide, Some operation ->
+  match Observe.Log.kind log with
+  | Observe.Log.Point { correlation } ->
+      Option.map Observe.Log.operation_reference_id correlation
+  | Observe.Log.Wide { operation; annotations = _ } ->
       Some (Observe.Log.operation_id operation)
-  | Observe.Log.Point, Some _ | Observe.Log.Wide, None ->
-      assert false
+```
+
+Structured values can be traversed without parsing their JSON projection:
+
+```ocaml
+let cart_id log =
+  match Observe.Log.event log with
+  | Observe.Log.Text _ -> None
+  | Observe.Log.Structured { value; _ } ->
+      match Observe.Value.view value with
+      | `Object fields ->
+          List.find_map
+            (fun (name, value) ->
+              match name, Observe.Value.view value with
+              | "cart_id", `String id -> Some id
+              | _ -> None)
+            fields
+      | _ -> None
 ```
 
 A third-party formatter or drain receives this same public immutable value:

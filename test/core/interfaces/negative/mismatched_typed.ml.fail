@@ -11,7 +11,7 @@ type event_builder = {
 }
 
 let event_schema =
-  Observe.Generated_runtime.record_schema event_t
+  Observe.Schema.record event_t
     ~builder:(fun _ -> { typed = Fun.id })
 
 let _ =

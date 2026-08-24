@@ -12,6 +12,20 @@ type t =
 
 type frozen = Snapshot.t
 
+type integer =
+  [ `Int of int | `Int32 of int32 | `Int64 of int64 | `Decimal of string ]
+
+type frozen_view =
+  [ `Null
+  | `Bool of bool
+  | `Integer of integer
+  | `Float of float
+  | `String of string
+  | `Bytes of string
+  | `List of frozen list
+  | `Object of (string * frozen) list
+  | `Variant of string * bool * frozen option ]
+
 val null : t
 val bool : bool -> t
 val int : int -> t
@@ -35,8 +49,13 @@ val append_json : Buffer.t -> t -> (unit, json_error) result
 
 val append_pretty : Pretty.t -> Pretty.placement -> t -> unit
 val freeze : t -> (Snapshot.fragment, Snapshot.error) result
+
+val freeze_into :
+  t -> Snapshot.context -> depth:int -> (Snapshot.value, Snapshot.error) result
+
 val append_frozen_json : Buffer.t -> frozen -> unit
 val append_frozen_pretty : Pretty.t -> Pretty.placement -> frozen -> unit
+val view : frozen -> frozen_view
 val frozen_to_json_string : frozen -> string
 
 val to_json_string : t -> (string, json_error) result

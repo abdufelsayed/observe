@@ -387,6 +387,12 @@ let seal (context : context) value =
     shape = context.height;
   }
 
+let import context ~depth fragment =
+  let height = depth + fragment_height fragment in
+  match reserve context ~depth:height (resources_of fragment) with
+  | Error _ as error -> error
+  | Ok () -> Ok fragment.value
+
 let rec measure_value value =
   match value with
   | Null | Bool _ -> snapshot value (node_resources base_node_retained) 0
@@ -976,6 +982,40 @@ and compact_object = function
            indexed.order_rev)
 
 let complete fragment = compact_fragment_value fragment
+
+type view =
+  [ `Null
+  | `Bool of bool
+  | `Integer of integer
+  | `Float of float
+  | `String of string
+  | `Bytes of string
+  | `List of t list
+  | `Object of (string * t) list
+  | `Variant of string * bool * t option ]
+
+let object_values = function
+  | Flat fields -> fields
+  | Single (name, value) -> [ (name, value) ]
+  | Packed packed ->
+      List.map (fun (name, fragment) -> (name, fragment.value)) packed.fields
+  | Indexed indexed ->
+      List.rev_map
+        (fun (slot, name) -> (name, (Int_map.find slot indexed.values).value))
+        indexed.order_rev
+
+let view = function
+  | Null -> `Null
+  | Bool value -> `Bool value
+  | Integer value -> `Integer value
+  | Float value -> `Float value
+  | String value -> `String value
+  | Bytes value -> `Bytes value
+  | List values -> `List values
+  | Object fields -> `Object (object_values fields)
+  | Variant { name; polymorphic; payload } ->
+      `Variant (name, polymorphic, payload)
+
 let is_object = function Object _ -> true | _ -> false
 
 let root_field_count = function
@@ -1024,6 +1064,7 @@ module Object_accumulator = struct
     | _, _ -> Error Conversion_failed
 
   let as_fragment accumulator = accumulator
+  let as_value accumulator = accumulator.value
 end
 
 let append_integer buffer = function

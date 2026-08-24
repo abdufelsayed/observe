@@ -1,6 +1,19 @@
 module Observer = Observe.Make (Test_io.IO)
 
-let untyped make (builder : Observe.Logs.builder) = builder.value (make ())
+let untyped = Generated_logging.untyped
+
+let point_correlation log =
+  match Observe.Log.kind log with
+  | Observe.Log.Point { correlation } -> correlation
+  | Observe.Log.Wide _ -> Alcotest.fail "expected point log"
+
+let wide_facts log =
+  match Observe.Log.kind log with
+  | Observe.Log.Wide { operation; annotations } -> (operation, annotations)
+  | Observe.Log.Point _ -> Alcotest.fail "expected wide log"
+
+let wide_operation log = fst (wide_facts log)
+let wide_annotations log = snd (wide_facts log)
 
 module Raising_get_io = struct
   include Test_io.IO
@@ -116,8 +129,7 @@ type mutable_event_builder = {
 }
 
 let mutable_event_schema =
-  Observe.Generated_runtime.record_schema mutable_event_t ~builder:(fun _ ->
-      { typed = Fun.id })
+  Observe.Schema.record mutable_event_t ~builder:(fun _ -> { typed = Fun.id })
 
 let wide_lifecycle () =
   let observer = make_observer () in
@@ -136,25 +148,20 @@ let wide_lifecycle () =
          captured := Some capture));
   let capture = Option.get !captured in
   match Observe.Capture.logs capture with
-  | [ log ] -> (
-      Alcotest.(check bool)
-        "wide kind" true
-        (Observe.Log.kind log = Observe.Log.Wide);
+  | [ log ] ->
       Alcotest.(check bool)
         "final level" true
         (Observe.Level.equal Observe.Level.Warn (Observe.Log.level log));
-      match Observe.Log.operation log with
-      | None -> Alcotest.fail "wide observation has no operation envelope"
-      | Some operation ->
-          Alcotest.(check string)
-            "operation name" "checkout"
-            (Observe.Log.operation_name operation);
-          Alcotest.(check string)
-            "deterministic identifier" "operation-1"
-            (Observe.Log.operation_id operation);
-          Alcotest.(check int64)
-            "monotonic duration" 25L
-            (Observe.Log.operation_duration_ns operation))
+      let operation = wide_operation log in
+      Alcotest.(check string)
+        "operation name" "checkout"
+        (Observe.Log.operation_name operation);
+      Alcotest.(check string)
+        "deterministic identifier" "operation-1"
+        (Observe.Log.operation_id operation);
+      Alcotest.(check int64)
+        "monotonic duration" 25L
+        (Observe.Log.operation_duration_ns operation)
   | _ -> Alcotest.fail "expected one completed wide observation"
 
 let causal_children_and_correlation () =
@@ -188,14 +195,14 @@ let causal_children_and_correlation () =
           Alcotest.(check (option string))
             "point correlation" (Some expected)
             (Option.map Observe.Log.operation_reference_id
-               (Observe.Log.correlation log)))
+               (point_correlation log)))
         [
           (explicit, "operation-2");
           (parent_before, "operation-1");
           (child_inside, "operation-2");
           (parent_after, "operation-1");
         ];
-      let child_operation = Option.get (Observe.Log.operation child) in
+      let child_operation = wide_operation child in
       Alcotest.(check string)
         "child has fresh identity" "operation-2"
         (Observe.Log.operation_id child_operation);
@@ -206,7 +213,7 @@ let causal_children_and_correlation () =
       Alcotest.(check string)
         "typed child starts without copied parent fields" "{}"
         (structured_json child);
-      let parent_operation = Option.get (Observe.Log.operation parent) in
+      let parent_operation = wide_operation parent in
       Alcotest.(check (option string))
         "parent has no parent" None
         (Option.map Observe.Log.operation_reference_id
@@ -227,8 +234,7 @@ let current_operation_contract () =
   Alcotest.check_raises "no ambient fallback outside an operation" not_bound
     (fun () -> ignore (Observe.Logs.current ()));
   let other_schema =
-    Observe.Generated_runtime.record_schema mutable_event_t ~builder:(fun _ ->
-        { typed = Fun.id })
+    Observe.Schema.record mutable_event_t ~builder:(fun _ -> { typed = Fun.id })
   in
   ignore
     (Observer.with_capture observer ~config:(config ()) (fun _ ->
@@ -346,8 +352,7 @@ let operation_execution () =
   | [ point; success; result_error; failure; cancelled ] ->
       Alcotest.(check (option string))
         "point uses current operation identity" (Some "operation-1")
-        (Option.map Observe.Log.operation_reference_id
-           (Observe.Log.correlation point));
+        (Option.map Observe.Log.operation_reference_id (point_correlation point));
       Alcotest.(check bool)
         "success remains info" true
         (Observe.Level.equal Observe.Level.Info (Observe.Log.level success));
@@ -612,7 +617,7 @@ let wide_annotations () =
       Alcotest.(check bool)
         "explicit level wins over annotation-derived severity" true
         (Observe.Level.equal Observe.Level.Debug (Observe.Log.level explicit));
-      let annotations = Observe.Log.annotations explicit in
+      let annotations = wide_annotations explicit in
       Alcotest.(check (list string))
         "annotation contribution order" [ "started"; "retrying" ]
         (List.map Observe.Log.annotation_message annotations);
@@ -621,10 +626,12 @@ let wide_annotations () =
         (Observe.Level.equal Observe.Level.Warn (Observe.Log.level derived));
       Alcotest.(check int)
         "point logs have no embedded annotations" 0
-        (List.length (Observe.Log.annotations point));
+        (match Observe.Log.kind point with
+        | Observe.Log.Point _ -> 0
+        | Observe.Log.Wide { annotations; _ } -> List.length annotations);
       Alcotest.(check int)
         "correlated point is not copied into the wide operation" 0
-        (List.length (Observe.Log.annotations isolated))
+        (List.length (wide_annotations isolated))
   | _ -> Alcotest.fail "expected annotated, derived, point, and isolated logs"
 
 let wide_annotation_bound () =
@@ -846,8 +853,7 @@ let typed_box description value (builder : Observe.Logs.builder) =
     |> sealr
   in
   let schema =
-    Observe.Generated_runtime.record_schema event_t ~builder:(fun _ ->
-        { typed = Fun.id })
+    Observe.Schema.record event_t ~builder:(fun _ -> { typed = Fun.id })
   in
   builder.typed ~using:schema { value }
 
@@ -895,10 +901,15 @@ let canonical_bounds_and_failures () =
          Observe.Logs.info (untyped (fun () -> nested 66 Observe.Value.null));
          Observe.Logs.info
            (untyped (fun () ->
-                Observe.Value.list
-                  (List.init 1_000 (fun _ ->
-                       Observe.Value.list
-                         (List.init 100 (fun _ -> Observe.Value.null))))));
+                Observe.Value.object_
+                  [
+                    ( "nested",
+                      Observe.Value.list
+                        (List.init 1_000 (fun _ ->
+                             Observe.Value.list
+                               (List.init 100 (fun _ -> Observe.Value.null))))
+                    );
+                  ]));
          Observe.Logs.info
            (untyped (fun () ->
                 let dense_objects =
@@ -961,10 +972,9 @@ let failed_wide_contribution_seals () =
   ignore
     (Observer.with_capture observer ~config:(config ()) (fun capture ->
          let wide = Observe.Logs.create ~name:"failed-contribution" () in
-         let opaque = Observe.Type.of_repr Repr.int in
          Observe.Logs.set wide (fun m ->
              let open Observe.Logs in
-             m.untyped |+ m.field "opaque" opaque 1 |> m.seal);
+             m.untyped |+ m.field "invalid" Observe.Type.string "\255" |> m.seal);
          Observe.Logs.set wide (fun m ->
              incr authored_after_failure;
              m.seal m.untyped);
@@ -1158,19 +1168,8 @@ let formatting_failed () =
     "invalid authoring withheld before formatting" 1
     (Test_io.process_diagnostic_count
        Observe.Diagnostics.Canonical_freeze_failed);
-  let raising_json =
-    ((fun _ _ -> raise Exit), fun _ -> Error (`Msg "unused decoder"))
-  in
-  let raising_description =
-    Observe.Type.of_repr (Repr.like ~json:raising_json Repr.int)
-  in
-  Observe.Logs.info
-    (untyped (fun () ->
-         Observe.Value.object_
-           [ ("opaque", Observe.Value.embed raising_description 1) ]));
-  Alcotest.(check int) "raised output not delivered" 0 !console;
   Alcotest.(check int)
-    "opaque Repr description has no unsafe fallback" 2
+    "invalid value has no unsafe fallback" 1
     (Test_io.process_diagnostic_count
        Observe.Diagnostics.Canonical_freeze_failed)
 

@@ -80,6 +80,7 @@
   logging_unknown_form.ml
   logging_typed_without_schema.ml
   logging_reserved_field.ml
+  logging_typed_reserved_field.ml
   wide_error_missing_using.ml
   wide_redundant_untyped.ml
   untyped_nested_value.ml.fail
@@ -125,6 +126,12 @@
     %{dep:check_negative.sh}
     %{exe:ppx_driver.exe}
     %{dep:logging_reserved_field.ml}
+    "[%observe.info]: field [service] is reserved for Observe metadata")
+   (run
+    bash
+    %{dep:check_negative.sh}
+    %{exe:ppx_driver.exe}
+    %{dep:logging_typed_reserved_field.ml}
     "[%observe.info]: field [service] is reserved for Observe metadata")
    (run
     bash
@@ -193,7 +200,6 @@
   typed_unknown_field.ml.fail
   typed_wrong_field_value.ml.fail
   typed_different_schema.ml.fail
-  typed_schema_constructor_hidden.ml.fail
   untyped_wrong_description.ml.fail
   ppx_driver.exe
   %{lib:observe:observe.cmi})
@@ -239,14 +245,6 @@
     %{lib:observe:observe.cmi}
     %{dep:typed_different_schema.ml.fail}
     "first Observe.Schema.patch")
-   (run
-    bash
-    %{dep:check_compile_negative.sh}
-    %{bin:ocamlfind}
-    %{exe:ppx_driver.exe}
-    %{lib:observe:observe.cmi}
-    %{dep:typed_schema_constructor_hidden.ml.fail}
-    "Unbound value")
    (run
     bash
     %{dep:check_compile_negative.sh}

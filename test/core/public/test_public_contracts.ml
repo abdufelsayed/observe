@@ -220,11 +220,7 @@ let test_value_contract () =
 let test_type_interoperability () =
   Alcotest.(check string)
     "Observe description exposes Repr" "42"
-    (Repr.to_json_string ~minify:true (Observe.Type.repr Observe.Type.int) 42);
-  let description = Observe.Type.of_repr Repr.string in
-  Alcotest.(check string)
-    "raw Repr description remains machine-compatible" "\"value\""
-    (Observe.Type.to_json_string description "value")
+    (Repr.to_json_string ~minify:true (Observe.Type.repr Observe.Type.int) 42)
 
 let test_manual_description_json () =
   let check description value =

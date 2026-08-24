@@ -45,8 +45,8 @@ let bool buffer value =
 (* [caml_format_float] is the OCaml compiler-runtime primitive that backs
    [Printf] float formatting. Binding it directly skips per-call format
    parsing; ["%.16g"] matches the Jsonm encoder (and therefore Repr) byte for
-   byte, which keeps direct writers and compatibility projections on one
-   numeric contract. The primitive is part of the compiler runtime and changes
+   byte, which keeps every direct writer on one numeric contract. The
+   primitive is part of the compiler runtime and changes
    only with an OCaml release. *)
 external runtime_format_float : string -> float -> string = "caml_format_float"
 

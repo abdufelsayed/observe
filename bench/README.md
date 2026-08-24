@@ -47,8 +47,8 @@ amortized. Report schema version 3 adds this field.
   or pretty formatting.
 - `core` measures public logging calls with a controlled clock and no-op I/O.
   It covers filtering, routing, drain fan-out, JSON, true-color pretty
-  formatting, complete typed canonical points, anonymous point fields, opaque
-  compatibility failure, open wide fragments, typed sparse patches, and nested
+  formatting, complete typed canonical points, anonymous point fields, open
+  wide fragments, typed sparse patches, and nested
   typed patches. Operation scenarios separately measure open and typed current
   lookup, bounded success and failure, a point inside an operation, and child
   execution. These boundaries are named separately in the report; no latency

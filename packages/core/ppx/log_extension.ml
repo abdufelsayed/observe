@@ -21,77 +21,17 @@ let rec longident_last = function
   | Lident name | Ldot (_, name) -> name
   | Lapply (path, _) -> longident_last path
 
-let reserved_fields =
-  [
-    "service";
-    "environment";
-    "version";
-    "timestamp";
-    "level";
-    "operation";
-    "operation_id";
-    "parent_operation";
-    "parent_operation_id";
-    "duration_ms";
-    "tag";
-    "message";
-    "logs";
-  ]
-
 let reject_reserved_root_fields ~extension expression =
   match expression.pexp_desc with
   | Pexp_record (fields, None) ->
       List.iter
         (fun ({ txt = path; loc }, _) ->
           let name = longident_last path in
-          if List.mem name reserved_fields then
+          if Observe.Ppx_runtime.Logs.is_reserved_field name then
             extension_error ~loc extension
               "field [%s] is reserved for Observe metadata" name)
         fields
   | Pexp_record (_, Some _) | _ -> ()
-
-let qualify_description expression =
-  let builtins =
-    [
-      "unit";
-      "bool";
-      "char";
-      "int";
-      "int32";
-      "int63";
-      "int64";
-      "float";
-      "string";
-      "bytes";
-      "boxed";
-      "list";
-      "array";
-      "option";
-      "pair";
-      "triple";
-      "quad";
-      "result";
-      "seq";
-      "ref";
-      "lazy_t";
-      "queue";
-      "stack";
-      "hashtbl";
-    ]
-  in
-  rewrite_expression
-    (fun expression ->
-      match expression.pexp_desc with
-      | Pexp_ident { txt = Lident name; loc } when List.mem name builtins ->
-          Some
-            {
-              expression with
-              pexp_desc =
-                Pexp_ident
-                  { txt = Ldot (Ldot (Lident "Observe", "Type"), name); loc };
-            }
-      | _ -> None)
-    expression
 
 let described_value expression =
   let loc = expression.pexp_loc in
@@ -109,7 +49,7 @@ let described_value expression =
           in
           Some
             (eapply ~loc "Observe.Value.embed"
-               [ (Nolabel, qualify_description description); (Nolabel, value) ])
+               [ (Nolabel, description); (Nolabel, value) ])
       | _ -> None)
   | _ -> None
 
@@ -148,6 +88,7 @@ let error_arguments arguments =
 
 let rec typed_patch ~extension ~builder expression =
   let loc = expression.pexp_loc in
+  reject_reserved_root_fields ~extension expression;
   match expression.pexp_desc with
   | Pexp_record (fields, None) ->
       let contributions =
@@ -185,8 +126,7 @@ let body_expression ~extension ~builder expression =
       match (form, arguments) with
       | "untyped", [ (Nolabel, ({ pexp_desc = Pexp_record _; _ } as object_)) ]
         ->
-          pexp_apply ~loc
-            (builder_field ~loc builder "value")
+          eapply ~loc "Observe.Ppx_runtime.Logs.untyped_message"
             [ (Nolabel, anonymous_value ~extension object_) ]
       | "untyped", _ ->
           extension_error ~loc extension
@@ -194,6 +134,12 @@ let body_expression ~extension ~builder expression =
       | "typed", arguments -> (
           match typed_arguments arguments with
           | Some arguments ->
+              List.iter
+                (function
+                  | Nolabel, value ->
+                      reject_reserved_root_fields ~extension value
+                  | (Labelled _ | Optional _), _ -> ())
+                arguments;
               pexp_apply ~loc (builder_field ~loc builder "typed") arguments
           | None ->
               extension_error ~loc extension
@@ -282,7 +228,7 @@ let expand_set ~loc ~path:_ expression =
           (Nolabel, handle);
           ( Nolabel,
             pexp_fun ~loc Nolabel None (pvar ~loc builder)
-              (eapply ~loc "Observe.Generated_runtime.untyped_value_patch"
+              (eapply ~loc "Observe.Ppx_runtime.Logs.untyped_value_patch"
                  [ (Nolabel, anonymous_value ~extension object_) ]) );
         ]
   | Pexp_apply

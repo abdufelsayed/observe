@@ -1,5 +1,10 @@
 module Observer = Observe.Make (Test_io.IO)
 
+let wide_annotations log =
+  match Observe.Log.kind log with
+  | Observe.Log.Wide { annotations; _ } -> annotations
+  | Observe.Log.Point _ -> Alcotest.fail "expected wide log"
+
 let barrier participants =
   let mutex = Mutex.create () in
   let condition = Condition.create () in
@@ -332,7 +337,7 @@ let wide_annotation_emit_race work =
   in
   match Observe.Capture.logs capture with
   | [ log ] ->
-      let annotations = Observe.Log.annotations log in
+      let annotations = wide_annotations log in
       let committed = List.length annotations in
       let diagnostics = Observe.Capture.diagnostics capture in
       let rejected =

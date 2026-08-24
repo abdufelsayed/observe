@@ -19,5 +19,5 @@
   pretty
   type_shape
   value_extension)
- (libraries ppxlib ppx_repr.lib)
+ (libraries ppxlib ppx_repr.lib observe)
  (ppx_runtime_libraries observe))

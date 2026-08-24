@@ -36,7 +36,7 @@ let test_logging_extensions_lower_to_admitted_builders () =
               {
                 action = "retry";
                 attempt = 2;
-                request_id = string request_id;
+                request_id = Observe.Type.string request_id;
                 context = { cached = false; roles = [ "admin"; "billing" ] };
                 referral = Some "partner";
                 mixed = [ 1; "two"; false ];
@@ -128,6 +128,67 @@ let test_parameterized_patch_uses_exact_schema () =
       Alcotest.failf "expected one parameterized wide log, received %d"
         (List.length logs)
 
+let structured_json log =
+  match Observe.Log.event log with
+  | Observe.Log.Structured { value; _ } ->
+      Observe.Value.frozen_to_json_string value
+  | Observe.Log.Text _ -> Alcotest.fail "expected a structured log"
+
+let test_manual_and_ppx_open_authoring_are_equivalent () =
+  let capture =
+    match
+      Observer.with_capture observer ~config:(Test_io.config "open-parity")
+        (fun capture ->
+          Observe.Logs.info (fun m ->
+              let open Observe.Logs in
+              m.untyped
+              |+ m.field "action" Observe.Type.string "retry"
+              |+ m.field "attempt" Observe.Type.int 2
+              |+ m.object_ "context" (fun nested ->
+                  let open Observe.Logs in
+                  nested.untyped
+                  |+ nested.field "cached" Observe.Type.bool false
+                  |+ nested.field "roles"
+                       Observe.Type.(list string)
+                       [ "admin"; "billing" ]
+                  |> nested.seal)
+              |> m.seal);
+          [%observe.info
+            untyped
+              {
+                action = "retry";
+                attempt = 2;
+                context = { cached = false; roles = [ "admin"; "billing" ] };
+              }];
+          let manual = Observe.Logs.create ~name:"manual" () in
+          Observe.Logs.set manual (fun m ->
+              let open Observe.Logs in
+              m.untyped
+              |+ m.field "action" Observe.Type.string "retry"
+              |+ m.field "attempt" Observe.Type.int 2
+              |> m.seal);
+          Observe.Logs.emit manual;
+          let generated = Observe.Logs.create ~name:"generated" () in
+          [%observe.set generated { action = "retry"; attempt = 2 }];
+          Observe.Logs.emit generated;
+          Test_io.Direct.return capture)
+    with
+    | Ok capture -> capture
+    | Error _ -> Alcotest.fail "capture rejected open authoring parity test"
+  in
+  match Observe.Capture.logs capture with
+  | [ manual_point; generated_point; manual_wide; generated_wide ] ->
+      Alcotest.(check string)
+        "manual and PPX points complete to the same value"
+        (structured_json manual_point)
+        (structured_json generated_point);
+      Alcotest.(check string)
+        "manual and PPX wide contributions complete to the same value"
+        (structured_json manual_wide)
+        (structured_json generated_wide)
+  | logs ->
+      Alcotest.failf "expected four parity logs, received %d" (List.length logs)
+
 let () =
   Alcotest.run "observe-ppx-logging"
     [
@@ -137,5 +198,7 @@ let () =
             test_logging_extensions_lower_to_admitted_builders;
           Alcotest.test_case "parameterized sparse patch identity" `Quick
             test_parameterized_patch_uses_exact_schema;
+          Alcotest.test_case "manual and PPX open authoring parity" `Quick
+            test_manual_and_ppx_open_authoring_are_equivalent;
         ] );
     ]

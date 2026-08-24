@@ -178,6 +178,41 @@ let test_alias_field_omission () =
     "empty aliases encode as an empty record" "{}"
     (Observe.Type.to_json_string aliases_t { names = []; maybe_name = None })
 
+type mapped_optional = Mapped_optional of string option
+type mapped_record = Mapped_record of aliases
+type mapped_container = { optional : mapped_optional }
+
+let mapped_optional_t =
+  Observe.Type.map
+    (Observe.Type.option Observe.Type.string)
+    (fun value -> Mapped_optional value)
+    (fun (Mapped_optional value) -> value)
+
+let mapped_record_t =
+  Observe.Type.map aliases_t
+    (fun value -> Mapped_record value)
+    (fun (Mapped_record value) -> value)
+
+let mapped_container_t =
+  let open Observe.Type in
+  record "mapped_container" (fun optional -> { optional })
+  |+ field "optional" mapped_optional_t (fun value -> value.optional)
+  |> sealr
+
+let test_map_preserves_description_semantics () =
+  Alcotest.(check string)
+    "mapped optional keeps field omission" "{}"
+    (Observe.Type.to_json_string mapped_container_t
+       { optional = Mapped_optional None });
+  let schema =
+    Observe.Schema.record mapped_record_t ~builder:(fun patch_builder ->
+        fun aliases ->
+         Observe.Schema.field patch_builder "names" names_t aliases.names)
+  in
+  Alcotest.(check string)
+    "mapped record remains schema-eligible" "aliases"
+    (Observe.Schema.name schema)
+
 let () =
   Alcotest.run "observe-ppx-deriver"
     [
@@ -201,5 +236,7 @@ let () =
             test_specialized_json_matches_repr;
           Alcotest.test_case "alias field omission" `Quick
             test_alias_field_omission;
+          Alcotest.test_case "map preserves description semantics" `Quick
+            test_map_preserves_description_semantics;
         ] );
     ]

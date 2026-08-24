@@ -214,13 +214,34 @@ let text () (m : Observe.Logs.builder) = m.text ~tag:"auth" "user logged in"
 let filtered_text () (m : Observe.Logs.builder) = m.text ~tag:"auth" "ignored"
 
 let untyped_small () (m : Observe.Logs.builder) =
-  m.value (Payload.small_untyped ())
+  let open Observe.Logs in
+  m.untyped
+  |+ m.field "action" Observe.Type.string Payload.small.action
+  |+ m.field "user_id" Observe.Type.int Payload.small.user_id
+  |+ m.field "login_method" Observe.Type.string Payload.small.login_method
+  |+ m.field "remembered" Observe.Type.bool Payload.small.remembered
+  |+ m.field "provider" Observe.Type.string Payload.small.provider
+  |> m.seal
 
 let typed_small () (m : Observe.Logs.builder) =
   m.typed ~using:Payload.small_schema Payload.small
 
 let untyped_nested () (m : Observe.Logs.builder) =
-  m.value (Payload.nested_untyped ())
+  let open Observe.Logs in
+  m.untyped
+  |+ m.field "action" Observe.Type.string Payload.nested.action
+  |+ m.object_ "user" (fun n ->
+      n.untyped
+      |+ n.field "id" Observe.Type.int Payload.nested.user.id
+      |+ n.field "plan" Observe.Type.(option string) Payload.nested.user.plan
+      |+ n.field "roles" Observe.Type.(list string) Payload.nested.user.roles
+      |> n.seal)
+  |+ m.field "authentication" Payload.authentication_t
+       Payload.nested.authentication
+  |+ m.field "access" Payload.access_t Payload.nested.access
+  |+ m.field "remembered" Observe.Type.bool Payload.nested.remembered
+  |+ m.field "device_id" Observe.Type.(option string) Payload.nested.device_id
+  |> m.seal
 
 let typed_nested () (m : Observe.Logs.builder) =
   m.typed ~using:Payload.nested_schema Payload.nested
@@ -232,9 +253,6 @@ let open_small () (m : Observe.Logs.builder) =
   |+ m.field "user_id" Observe.Type.int 42
   |+ m.field "remembered" Observe.Type.bool true
   |> m.seal
-
-let opaque () (m : Observe.Logs.builder) =
-  m.value (Observe.Value.embed (Observe.Type.of_repr Repr.int) 42)
 
 let retained_wide_operation operation = retained_core_operation operation
 
@@ -699,9 +717,6 @@ let core_scenarios =
     make ~name:"core/canonical/open-point" ~suite:Core ~boundary:"open-fragment"
       ~payload:"open-small" (fun () ->
         retained_core_operation (fun () -> Observe.Logs.info (open_small ())));
-    make ~name:"core/canonical/opaque-compatibility" ~suite:Core
-      ~boundary:"opaque-compatibility" ~payload:"unsupported-int" (fun () ->
-        retained_core_operation (fun () -> Observe.Logs.info (opaque ())));
     make ~name:"core/wide/open-fragment" ~suite:Core
       ~boundary:"open-wide-fragment" ~payload:"open-small" (fun () ->
         retained_wide_operation open_wide);

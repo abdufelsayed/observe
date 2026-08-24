@@ -93,8 +93,10 @@ that JSON intentionally collapses, including strings versus nullary
 constructors and ordinary versus polymorphic constructors. Their bounded direct
 freezer creates format-neutral canonical meaning; official formatters consume
 only that result. Decoding, comparison, binary encoding, and the remaining
-machine operations stay with Repr. {!val:Observe.Type.of_repr} is an explicit
-compatibility path and does not imply a safe canonical freezer.
+machine operations stay with Repr.
+{!val:Observe.Type.repr} exposes that machine for Repr consumers. Raw Repr
+descriptions are not lifted into [Observe.Type.t] because they do not prove a
+bounded canonical freezer.
 
 The portable core owns no background writer or durability guarantee. The ready
 Lwt-Unix package owns a bounded serialized console worker and exposes explicit

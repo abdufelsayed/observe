@@ -12,32 +12,40 @@ let contains value fragment =
 
 let test_namespaced_value_respects_admission () =
   let forces = ref 0 in
-  let author (m : Observe.Logs.builder) =
-    m.value
-      [%observe.value
-        {
-          action = "user_login";
-          active = true;
-          attempts = [ 1; 2; 3 ];
-          method_ = Some "oauth";
-          previous = None;
-          nested = { source = "web"; score = 1.5 };
-          user_id =
-            [%observe.value.embed
-              Observe.Type.int,
-              (incr forces;
-               42)];
-        }]
-  in
-  Alcotest.(check int) "author has not run" 0 !forces;
   let observer = Observer.create (Test_io.Host.create ()) in
   let config = Test_io.config ~min_level:Observe.Level.Info "ppx-value" in
   let capture =
     match
       Observer.with_capture observer ~config (fun capture ->
-          Observe.Logs.debug author;
+          [%observe.debug
+            untyped
+              {
+                action = "user_login";
+                active = true;
+                attempts = [ 1; 2; 3 ];
+                method_ = Some "oauth";
+                previous = None;
+                nested = { source = "web"; score = 1.5 };
+                user_id =
+                  Observe.Type.int
+                    (incr forces;
+                     42);
+              }];
           Alcotest.(check int) "filtered value remains deferred" 0 !forces;
-          Observe.Logs.info author;
+          [%observe.info
+            untyped
+              {
+                action = "user_login";
+                active = true;
+                attempts = [ 1; 2; 3 ];
+                method_ = Some "oauth";
+                previous = None;
+                nested = { source = "web"; score = 1.5 };
+                user_id =
+                  Observe.Type.int
+                    (incr forces;
+                     42);
+              }];
           Test_io.Direct.return capture)
     with
     | Ok capture -> capture

@@ -132,7 +132,8 @@ let checkout_operation () =
               log
                 {
                   phase = "payment_declined";
-                  payment = { status = "declined"; code = string code };
+                  payment =
+                    { status = "declined"; code = Observe.Type.string code };
                 }];
             Observe.Logs.set_level log ~level:Observe.Level.Warn;
             Lwt.return_unit

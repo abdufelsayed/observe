@@ -1,10 +1,13 @@
 (** Completed admitted logs. *)
 
 type t
-type kind = Point | Wide
 type operation_reference
 type operation
 type annotation
+
+type kind =
+  | Point of { correlation : operation_reference option }
+  | Wide of { operation : operation; annotations : annotation list }
 
 type event =
   | Text of { tag : string; message : string }
@@ -20,19 +23,8 @@ val level : t -> Level.t
 val event : t -> event
 
 val kind : t -> kind
-(** Distinguish an auto-emitted point observation from a completed wide
-    operation without inspecting presentation output. *)
-
-val operation : t -> operation option
-(** The completed wide operation. Point observations return [None], including
-    correlated points. *)
-
-val correlation : t -> operation_reference option
-(** The current or explicitly associated operation on a separate point log. *)
-
-val annotations : t -> annotation list
-(** Explicit timestamped entries accumulated inside a wide operation. Point logs
-    have no annotations. *)
+(** Complete point or wide meaning. Impossible combinations such as a point
+    carrying wide-operation facts are not representable. *)
 
 val operation_reference_name : operation_reference -> string
 val operation_reference_id : operation_reference -> string
@@ -58,9 +50,7 @@ module Producer : sig
     ?version:string ->
     timestamp:Timestamp.t ->
     level:Level.t ->
-    ?correlation:operation_reference ->
-    ?operation:operation ->
-    ?annotations:annotation list ->
+    kind:kind ->
     event ->
     (t, Snapshot.error) result
 

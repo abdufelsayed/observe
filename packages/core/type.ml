@@ -4,7 +4,6 @@ type 'a t = {
   repr : 'a Repr.t;
   json : Buffer.t -> 'a -> unit;
   plan : 'a -> Pretty.rendered;
-  freeze_supported : bool;
   freeze :
     Snapshot.context ->
     depth:int ->
@@ -28,37 +27,16 @@ let add_field_name buffer ~first name =
   if not first then Buffer.add_char buffer ',';
   Json_writer.name buffer name
 
-let unsupported_freeze _ ~depth:_ _ = Result.Error Snapshot.Unsupported
-
 let guard_freeze freeze context ~depth value =
   match Snapshot.check_depth ~depth with
   | Error _ as error -> error
   | Ok () -> freeze context ~depth value
 
-let make ?omit_field ?freeze ?record_name ~plan repr json =
+let make ?omit_field ?record_name ~plan ~freeze repr json =
   let field_policy =
     match omit_field with None -> Required | Some omit -> Omit_if omit
   in
-  let freeze_supported, freeze =
-    match freeze with
-    | Some freeze -> (true, freeze)
-    | None -> (false, unsupported_freeze)
-  in
-  {
-    repr;
-    json;
-    plan;
-    freeze_supported;
-    freeze = guard_freeze freeze;
-    record_name;
-    field_policy;
-  }
-
-let compatibility ?omit_field repr json =
-  make ?omit_field
-    ~plan:(fun value ->
-      Repr_projection.plan_node (Repr_projection.of_repr repr value))
-    repr json
+  { repr; json; plan; freeze = guard_freeze freeze; record_name; field_policy }
 
 let write_field description buffer first name value =
   match description.field_policy with
@@ -72,7 +50,7 @@ let with_json description json = { description with json }
 let with_plan description plan = { description with plan }
 
 let with_freeze description freeze =
-  { description with freeze_supported = true; freeze = guard_freeze freeze }
+  { description with freeze = guard_freeze freeze }
 
 let with_repr description repr = { description with repr }
 
@@ -80,21 +58,15 @@ let freeze_into description context ~depth value =
   description.freeze context ~depth value
 
 let freeze description value =
-  if not description.freeze_supported then Error Snapshot.Unsupported
-  else
-    let context = Snapshot.create_context () in
-    match description.freeze context ~depth:0 value with
-    | Ok value -> Ok (Snapshot.seal context value)
-    | Error _ as error -> error
+  let context = Snapshot.create_context () in
+  match description.freeze context ~depth:0 value with
+  | Ok value -> Ok (Snapshot.seal context value)
+  | Error _ as error -> error
 
 let record_name description = description.record_name
 
 let repr_json repr buffer value =
   Buffer.add_string buffer (Repr.to_json_string ~minify:true repr value)
-
-let of_repr ?json repr =
-  let json = Option.value json ~default:(repr_json repr) in
-  compatibility repr json
 
 type 'a description = 'a t
 
@@ -565,7 +537,11 @@ let hashtbl key value =
 
 type empty = Repr.empty = |
 
-let empty = of_repr Repr.empty
+let empty =
+  make Repr.empty
+    (fun _ (value : empty) -> match value with _ -> .)
+    ~plan:(fun (value : empty) -> match value with _ -> .)
+    ~freeze:(fun _ ~depth:_ (value : empty) -> match value with _ -> .)
 
 type ('a, 'b, 'c) open_record = {
   record_name : string;
@@ -695,12 +671,12 @@ type 'a selected_case =
 
 type ('a, 'b, 'c) open_variant = {
   repr_variant : ('a, 'b, 'c) Repr.open_variant;
-  json_cases_rev : 'a json_case option list;
+  json_cases_rev : 'a json_case list;
 }
 
 type ('a, 'b) case = {
   repr_case : ('a, 'b) Repr.case;
-  json_case : 'a json_case option;
+  json_case : 'a json_case;
 }
 
 type 'a case_p = 'a Repr.case_p
@@ -708,20 +684,16 @@ type 'a case_p = 'a Repr.case_p
 let variant name deconstruct =
   { repr_variant = Repr.variant name deconstruct; json_cases_rev = [] }
 
-let case0 ?(polymorphic = false) ?is name value =
+let case0 ?(polymorphic = false) ~is name value =
   {
     repr_case = Repr.case0 name value;
-    json_case =
-      Option.map (fun matches -> Json0 { name; polymorphic; matches }) is;
+    json_case = Json0 { name; polymorphic; matches = is };
   }
 
-let case1 ?(polymorphic = false) ?project name description inject =
+let case1 ?(polymorphic = false) ~project name description inject =
   {
     repr_case = Repr.case1 name description.repr inject;
-    json_case =
-      Option.map
-        (fun project -> Json1 { name; polymorphic; description; project })
-        project;
+    json_case = Json1 { name; polymorphic; description; project };
   }
 
 let ( |~ ) variant case =
@@ -732,74 +704,55 @@ let ( |~ ) variant case =
 
 let sealv variant =
   let repr = Repr.sealv variant.repr_variant in
-  let rec collect selectors missing = function
-    | [] -> (selectors, missing)
-    | None :: rest -> collect selectors (missing + 1) rest
-    | Some _ :: rest -> collect (selectors + 1) missing rest
+  let cases = List.rev variant.json_cases_rev in
+  let rec find value = function
+    | [] -> None
+    | Json0 { name; polymorphic; matches } :: rest ->
+        if matches value then Some (Selected0 (name, polymorphic))
+        else find value rest
+    | Json1 { name; polymorphic; description; project } :: rest -> (
+        match project value with
+        | None -> find value rest
+        | Some payload ->
+            Some (Selected1 (name, polymorphic, description, payload)))
   in
-  let selectors, missing = collect 0 0 variant.json_cases_rev in
-  if selectors > 0 && missing > 0 then
-    invalid_arg
-      "Observe.Type.sealv: cases mix direct selectors and compatibility-only \
-       cases; pass ~is/~project for every case or for none";
-  let rec collect_cases collected = function
-    | [] -> Some collected
-    | None :: _ -> None
-    | Some case :: rest -> collect_cases (case :: collected) rest
+  let json buffer value =
+    match find value cases with
+    | None -> invalid_arg "Observe.Type.sealv: deconstructor matched no case"
+    | Some (Selected0 (name, _)) -> Json_writer.string buffer name
+    | Some (Selected1 (name, _, description, payload)) ->
+        Buffer.add_char buffer '{';
+        Json_writer.name buffer name;
+        description.json buffer payload;
+        Buffer.add_char buffer '}'
   in
-  match collect_cases [] variant.json_cases_rev with
-  | None -> compatibility repr (repr_json repr)
-  | Some cases ->
-      let rec find value = function
-        | [] -> None
-        | Json0 { name; polymorphic; matches } :: rest ->
-            if matches value then Some (Selected0 (name, polymorphic))
-            else find value rest
-        | Json1 { name; polymorphic; description; project } :: rest -> (
-            match project value with
-            | None -> find value rest
-            | Some payload ->
-                Some (Selected1 (name, polymorphic, description, payload)))
-      in
-      let json buffer value =
-        match find value cases with
-        | None ->
-            invalid_arg "Observe.Type.sealv: deconstructor matched no case"
-        | Some (Selected0 (name, _)) -> Json_writer.string buffer name
-        | Some (Selected1 (name, _, description, payload)) ->
-            Buffer.add_char buffer '{';
-            Json_writer.name buffer name;
-            description.json buffer payload;
-            Buffer.add_char buffer '}'
-      in
-      let plan value =
-        match find value cases with
-        | None -> raise (Pretty.Error Unsupported_value)
-        | Some (Selected0 (name, polymorphic)) ->
-            Scalar (fun renderer -> Pretty.variant renderer ~polymorphic name)
-        | Some (Selected1 (name, polymorphic, description, payload)) ->
-            Node
-              (fun renderer placement ->
-                let name = if polymorphic then "`" ^ name else name in
-                let nested = place renderer placement ~scalar:false in
-                render renderer
-                  (Constructor { last = true; name })
-                  (description.plan payload);
-                finish renderer nested)
-      in
-      let freeze context ~depth value =
-        match find value cases with
-        | None -> Result.Error Snapshot.Conversion_failed
-        | Some (Selected0 (name, polymorphic)) ->
-            Snapshot.variant context ~depth ~polymorphic name None
-        | Some (Selected1 (name, polymorphic, description, payload)) -> (
-            match description.freeze context ~depth:(depth + 1) payload with
-            | Result.Error _ as error -> error
-            | Ok payload ->
-                Snapshot.variant context ~depth ~polymorphic name (Some payload)
-            )
-      in
-      make ~plan ~freeze repr json
+  let plan value =
+    match find value cases with
+    | None -> raise (Pretty.Error Unsupported_value)
+    | Some (Selected0 (name, polymorphic)) ->
+        Scalar (fun renderer -> Pretty.variant renderer ~polymorphic name)
+    | Some (Selected1 (name, polymorphic, description, payload)) ->
+        Node
+          (fun renderer placement ->
+            let name = if polymorphic then "`" ^ name else name in
+            let nested = place renderer placement ~scalar:false in
+            render renderer
+              (Constructor { last = true; name })
+              (description.plan payload);
+            finish renderer nested)
+  in
+  let freeze context ~depth value =
+    match find value cases with
+    | None -> Result.Error Snapshot.Conversion_failed
+    | Some (Selected0 (name, polymorphic)) ->
+        Snapshot.variant context ~depth ~polymorphic name None
+    | Some (Selected1 (name, polymorphic, description, payload)) -> (
+        match description.freeze context ~depth:(depth + 1) payload with
+        | Result.Error _ as error -> error
+        | Ok payload ->
+            Snapshot.variant context ~depth ~polymorphic name (Some payload))
+  in
+  make ~plan ~freeze repr json
 
 let enum name cases =
   let repr = Repr.enum name cases in
@@ -860,7 +813,6 @@ let mu (type value) (make_description : value description -> value description)
             repr = machine;
             json = forward_json;
             plan = forward_plan;
-            freeze_supported = true;
             freeze = forward_freeze;
             record_name = None;
             field_policy = Required;
@@ -874,7 +826,6 @@ let mu (type value) (make_description : value description -> value description)
     repr;
     json = forward_json;
     plan = forward_plan;
-    freeze_supported = true;
     freeze = forward_freeze;
     record_name =
       (match !cell with
@@ -930,7 +881,6 @@ let mu2 (type left right)
             repr = left_machine;
             json = forward_json_left;
             plan = forward_plan_left;
-            freeze_supported = true;
             freeze = forward_freeze_left;
             record_name = None;
             field_policy = Required;
@@ -941,7 +891,6 @@ let mu2 (type left right)
             repr = right_machine;
             json = forward_json_right;
             plan = forward_plan_right;
-            freeze_supported = true;
             freeze = forward_freeze_right;
             record_name = None;
             field_policy = Required;
@@ -959,7 +908,6 @@ let mu2 (type left right)
       repr = left_repr;
       json = forward_json_left;
       plan = forward_plan_left;
-      freeze_supported = true;
       freeze = forward_freeze_left;
       record_name =
         (match !cell with
@@ -971,7 +919,6 @@ let mu2 (type left right)
       repr = right_repr;
       json = forward_json_right;
       plan = forward_plan_right;
-      freeze_supported = true;
       freeze = forward_freeze_right;
       record_name =
         (match !cell with
@@ -1033,29 +980,6 @@ let to_bin_string description = Repr.to_bin_string description.repr
 let of_bin_string description = Repr.of_bin_string description.repr
 let size_of description = Repr.size_of description.repr
 
-let like ?pp ?of_string ?json ?bin ?unboxed_bin ?equal ?compare ?short_hash
-    ?pre_hash description =
-  let repr =
-    Repr.like ?pp ?of_string ?json ?bin ?unboxed_bin ?equal ?compare ?short_hash
-      ?pre_hash description.repr
-  in
-  match json with
-  | None -> with_repr description repr
-  | Some _ ->
-      (* A custom Repr JSON machine is an opaque boundary: the direct writers
-         can no longer be assumed to agree with it. *)
-      compatibility repr (repr_json repr)
-
-let partially_abstract ~pp ~of_string ~json ~bin ~unboxed_bin ~equal ~compare
-    ~short_hash ~pre_hash description =
-  let repr =
-    Repr.partially_abstract ~pp ~of_string ~json ~bin ~unboxed_bin ~equal
-      ~compare ~short_hash ~pre_hash description.repr
-  in
-  match json with
-  | Structural -> with_repr description repr
-  | Custom _ | Undefined -> compatibility repr (repr_json repr)
-
 let map description decode encode =
   let repr = Repr.map description.repr decode encode in
   let json buffer value = description.json buffer (encode value) in
@@ -1063,9 +987,14 @@ let map description decode encode =
   let freeze context ~depth value =
     description.freeze context ~depth (encode value)
   in
-  make ~plan ~freeze repr json
+  let omit_field =
+    match description.field_policy with
+    | Required -> None
+    | Omit_if omit -> Some (fun value -> omit (encode value))
+  in
+  make ?omit_field ?record_name:description.record_name ~plan ~freeze repr json
 
-module Generated_runtime = struct
+module Ppx_runtime = struct
   type renderer = Pretty.t
   type placement = Pretty.placement
 
@@ -1083,8 +1012,7 @@ module Generated_runtime = struct
       let description =
         match !self with
         | Some description -> description
-        | None ->
-            invalid_arg "Observe.Generated_runtime: recursive plan unavailable"
+        | None -> invalid_arg "Observe.Ppx_runtime: recursive plan unavailable"
       in
       make_plan description value
     in
@@ -1099,8 +1027,7 @@ module Generated_runtime = struct
         match !self with
         | Some description -> description
         | None ->
-            invalid_arg
-              "Observe.Generated_runtime: recursive freezer unavailable"
+            invalid_arg "Observe.Ppx_runtime: recursive freezer unavailable"
       in
       make_freeze description context ~depth value
     in

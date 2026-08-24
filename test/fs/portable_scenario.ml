@@ -128,8 +128,7 @@ type sample_builder = {
 }
 
 let sample_schema =
-  Observe.Generated_runtime.record_schema sample_t ~builder:(fun _ ->
-      { typed = Fun.id })
+  Observe.Schema.record sample_t ~builder:(fun _ -> { typed = Fun.id })
 
 let mutation () =
   let writer = create () in
@@ -160,12 +159,11 @@ let projection () =
   install ~extra_drains:[ witness ] [ 0L; 1L; 2L; 3L; 4L ] (Writer.drain writer);
   emit "text" "text payload";
   Observe.Logs.info (fun m ->
-      m.value
-        (Observe.Value.object_
-           [
-             ("action", Observe.Value.string "untyped");
-             ("count", Observe.Value.int 2);
-           ]));
+      let open Observe.Logs in
+      m.untyped
+      |+ m.field "action" Observe.Type.string "untyped"
+      |+ m.field "count" Observe.Type.int 2
+      |> m.seal);
   Observe.Logs.info (fun m ->
       m.typed ~using:sample_schema { value = "typed payload" });
   let wide = Observe.Logs.create ~name:"filesystem-wide" () in

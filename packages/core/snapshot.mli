@@ -2,6 +2,23 @@ type value
 type fragment
 type t
 
+type integer =
+  | Int of int
+  | Int32 of int32
+  | Int64 of int64
+  | Decimal of string
+
+type view =
+  [ `Null
+  | `Bool of bool
+  | `Integer of integer
+  | `Float of float
+  | `String of string
+  | `Bytes of string
+  | `List of t list
+  | `Object of (string * t) list
+  | `Variant of string * bool * t option ]
+
 type error =
   | Limit_exceeded
   | Invalid_utf8
@@ -44,9 +61,15 @@ val variant :
   (value, error) result
 
 val seal : context -> value -> fragment
+
+val import : context -> depth:int -> fragment -> (value, error) result
+(** Import an already-owned fragment into a larger materialization while
+    charging its complete resources and rebasing its depth. *)
+
 val singleton_object_from_owned : string -> fragment -> (fragment, error) result
 val object_from_owned : (string * fragment) list -> (fragment, error) result
 val complete : fragment -> t
+val view : t -> view
 
 val is_object : t -> bool
 (** Whether the completed value has an object root. *)
@@ -68,6 +91,7 @@ module Object_accumulator : sig
   (** Merge one authored contribution while rejecting repeated root names. *)
 
   val as_fragment : state -> fragment
+  val as_value : state -> value
 end
 
 val validate_extension :

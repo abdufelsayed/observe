@@ -150,9 +150,10 @@ let prop_temporal_pipeline_obeys_stage_boundaries =
                 current_clock := event.clock;
                 Observe.Logs.log ~level:event.level (fun m ->
                     incr forced;
-                    m.value
-                      (Observe.Value.object_
-                         [ ("value", Observe.Value.int event.value) ])))
+                    let open Observe.Logs in
+                    m.untyped
+                    |+ m.field "value" Observe.Type.int event.value
+                    |> m.seal))
               case.events;
             capture)
       with

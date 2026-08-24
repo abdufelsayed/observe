@@ -9,7 +9,7 @@ let inline_error ~loc format =
   Location.raise_errorf ~loc ("[@@deriving observe]: " ^^ format)
 
 let for_ppx_call ~loc name arguments =
-  call ~loc ("Observe.Generated_runtime." ^ name) arguments
+  call ~loc ("Observe.Ppx_runtime.Type." ^ name) arguments
 
 let buffer_add_char ~loc buffer character =
   call ~loc "Buffer.add_char"

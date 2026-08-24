@@ -138,6 +138,72 @@ let inline_record_expression ~loc fields binders =
        fields binders)
     None
 
+type constructor_projection =
+  | Nullary_projection of { matched : pattern }
+  | Payload_projection of {
+      matched : pattern;
+      parameter : pattern;
+      value : expression;
+      argument : expression;
+    }
+
+let constructor_projection index constructor =
+  let loc = constructor.pcd_loc in
+  match constructor.pcd_args with
+  | Pcstr_tuple [] ->
+      Nullary_projection { matched = constructor_pattern ~loc constructor None }
+  | Pcstr_tuple types ->
+      let names =
+        List.mapi (fun field _ -> indexed2 "__observe_arg_" index field) types
+      in
+      let patterns = List.map (pvar ~loc) names in
+      let values = List.map (evar ~loc) names in
+      let parameter = tuple_pattern ~loc patterns in
+      let value = tuple_expression ~loc values in
+      Payload_projection
+        {
+          matched = constructor_pattern ~loc constructor (Some parameter);
+          parameter;
+          value;
+          argument = value;
+        }
+  | Pcstr_record fields ->
+      let binders = field_binders fields in
+      let parameter =
+        tuple_pattern ~loc (List.map (fun (_, _, pattern) -> pattern) binders)
+      in
+      let value =
+        tuple_expression ~loc
+          (List.map (fun (_, name, _) -> evar ~loc name) binders)
+      in
+      Payload_projection
+        {
+          matched =
+            constructor_pattern ~loc constructor
+              (Some (inline_record_pattern ~loc fields binders));
+          parameter;
+          value;
+          argument = inline_record_expression ~loc fields binders;
+        }
+
+let selector_match ~loc ~exhaustive ~pattern ~selected =
+  let value = "__observe_variant_value" in
+  lambda ~loc
+    [ pvar ~loc value ]
+    (pexp_match ~loc (evar ~loc value)
+       (case ~lhs:pattern ~guard:None ~rhs:selected
+       ::
+       (if exhaustive then []
+        else
+          [
+            case ~lhs:(ppat_any ~loc) ~guard:None
+              ~rhs:
+                (match selected.pexp_desc with
+                | Pexp_construct ({ txt = Lident "Some"; _ }, _) ->
+                    pexp_construct ~loc (lident ~loc "None") None
+                | _ -> ebool ~loc false);
+          ])))
+
 type generated_case = {
   binder : pattern;
   matched : pattern;
@@ -148,41 +214,37 @@ type generated_case = {
 let inline_variant_expression (module Engine : Ppx_repr_lib.Engine.S) ~library
     declaration constructors =
   let loc = declaration.ptype_loc in
+  let exhaustive = List.length constructors = 1 in
   let cases =
     List.mapi
       (fun index constructor ->
         let case_name = indexed "__observe_case_" index in
         let case_pattern = pvar ~loc:constructor.pcd_loc case_name in
-        match constructor.pcd_args with
-        | Pcstr_tuple [] ->
+        match constructor_projection index constructor with
+        | Nullary_projection { matched } ->
+            let is_case =
+              selector_match ~loc:constructor.pcd_loc ~exhaustive
+                ~pattern:matched
+                ~selected:(ebool ~loc:constructor.pcd_loc true)
+            in
             {
               binder = case_pattern;
-              matched =
-                constructor_pattern ~loc:constructor.pcd_loc constructor None;
+              matched;
               rhs = evar ~loc:constructor.pcd_loc case_name;
               repr =
-                call ~loc:constructor.pcd_loc
+                eapply ~loc:constructor.pcd_loc
                   (repr_path library "case0")
                   [
-                    estr ~loc:constructor.pcd_loc constructor.pcd_name.txt;
-                    constructor_value ~loc:constructor.pcd_loc constructor None;
+                    (Labelled "is", is_case);
+                    ( Nolabel,
+                      estr ~loc:constructor.pcd_loc constructor.pcd_name.txt );
+                    ( Nolabel,
+                      constructor_value ~loc:constructor.pcd_loc constructor
+                        None );
                   ];
             }
-        | Pcstr_tuple types ->
-            let binders =
-              List.mapi
-                (fun field_index _ ->
-                  indexed2 "__observe_arg_" index field_index)
-                types
-            in
-            let patterns = List.map (pvar ~loc:constructor.pcd_loc) binders in
-            let values = List.map (evar ~loc:constructor.pcd_loc) binders in
-            let payload_pattern =
-              tuple_pattern ~loc:constructor.pcd_loc patterns
-            in
-            let payload_value =
-              tuple_expression ~loc:constructor.pcd_loc values
-            in
+        | Payload_projection { matched; parameter; value = payload; argument }
+          ->
             let descriptor =
               match
                 constructor_payload (module Engine) ~library constructor
@@ -191,62 +253,31 @@ let inline_variant_expression (module Engine : Ppx_repr_lib.Engine.S) ~library
               | `Nullary -> assert false
             in
             let inject =
-              lambda ~loc:constructor.pcd_loc [ payload_pattern ]
+              lambda ~loc:constructor.pcd_loc [ parameter ]
                 (constructor_value ~loc:constructor.pcd_loc constructor
-                   (Some payload_value))
+                   (Some argument))
+            in
+            let project =
+              selector_match ~loc:constructor.pcd_loc ~exhaustive
+                ~pattern:matched
+                ~selected:
+                  (pexp_construct ~loc:constructor.pcd_loc
+                     (lident ~loc:constructor.pcd_loc "Some")
+                     (Some payload))
             in
             {
               binder = case_pattern;
-              matched =
-                constructor_pattern ~loc:constructor.pcd_loc constructor
-                  (Some payload_pattern);
-              rhs = call ~loc:constructor.pcd_loc case_name [ payload_value ];
+              matched;
+              rhs = call ~loc:constructor.pcd_loc case_name [ payload ];
               repr =
-                call ~loc:constructor.pcd_loc
+                eapply ~loc:constructor.pcd_loc
                   (repr_path library "case1")
                   [
-                    estr ~loc:constructor.pcd_loc constructor.pcd_name.txt;
-                    descriptor;
-                    inject;
-                  ];
-            }
-        | Pcstr_record fields ->
-            let binders = field_binders fields in
-            let payload_pattern =
-              tuple_pattern ~loc:constructor.pcd_loc
-                (List.map (fun (_, _, p) -> p) binders)
-            in
-            let payload_value =
-              tuple_expression ~loc:constructor.pcd_loc
-                (List.map
-                   (fun (_, name, _) -> evar ~loc:constructor.pcd_loc name)
-                   binders)
-            in
-            let descriptor =
-              inline_payload_repr (module Engine) ~library constructor fields
-            in
-            let inject =
-              lambda ~loc:constructor.pcd_loc [ payload_pattern ]
-                (constructor_value ~loc:constructor.pcd_loc constructor
-                   (Some
-                      (inline_record_expression ~loc:constructor.pcd_loc fields
-                         binders)))
-            in
-            {
-              binder = case_pattern;
-              matched =
-                constructor_pattern ~loc:constructor.pcd_loc constructor
-                  (Some
-                     (inline_record_pattern ~loc:constructor.pcd_loc fields
-                        binders));
-              rhs = call ~loc:constructor.pcd_loc case_name [ payload_value ];
-              repr =
-                call ~loc:constructor.pcd_loc
-                  (repr_path library "case1")
-                  [
-                    estr ~loc:constructor.pcd_loc constructor.pcd_name.txt;
-                    descriptor;
-                    inject;
+                    (Labelled "project", project);
+                    ( Nolabel,
+                      estr ~loc:constructor.pcd_loc constructor.pcd_name.txt );
+                    (Nolabel, descriptor);
+                    (Nolabel, inject);
                   ];
             })
       constructors
@@ -278,24 +309,27 @@ let inline_variant_expression (module Engine : Ppx_repr_lib.Engine.S) ~library
   in
   call ~loc (repr_path library "sealv") [ variant ]
 
-let for_ppx_call ~loc name arguments =
-  call ~loc ("Observe.Generated_runtime." ^ name) arguments
+let for_type_call ~loc name arguments =
+  call ~loc ("Observe.Ppx_runtime.Type." ^ name) arguments
+
+let for_schema_call ~loc name arguments =
+  call ~loc ("Observe.Ppx_runtime.Schema." ^ name) arguments
 
 let rendered ~loc ~scalar writer =
   pexp_ifthenelse ~loc scalar
     (pexp_construct ~loc
-       (lident ~loc "Observe.Generated_runtime.Scalar")
+       (lident ~loc "Observe.Ppx_runtime.Type.Scalar")
        (Some
           (lambda ~loc
              [ pvar ~loc "__observe_renderer" ]
              (apply ~loc writer
                 [
                   evar ~loc "__observe_renderer";
-                  evar ~loc "Observe.Generated_runtime.inline";
+                  evar ~loc "Observe.Ppx_runtime.Type.inline";
                 ]))))
     (Some
        (pexp_construct ~loc
-          (lident ~loc "Observe.Generated_runtime.Node")
+          (lident ~loc "Observe.Ppx_runtime.Type.Node")
           (Some writer)))
 
 let descriptor_parameters declaration =
@@ -349,7 +383,7 @@ let variant_freezer (module Engine : Ppx_repr_lib.Engine.S) ~library ~recursive
     let error = "__observe_freeze_error" in
     let attempted =
       pexp_apply ~loc
-        (evar ~loc "Observe.Generated_runtime.freeze")
+        (evar ~loc "Observe.Ppx_runtime.Type.freeze")
         [
           (Nolabel, descriptor ~apply_parameters description);
           (Nolabel, evar ~loc context);
@@ -388,7 +422,7 @@ let variant_freezer (module Engine : Ppx_repr_lib.Engine.S) ~library ~recursive
                   ~rhs:
                     (pexp_apply ~loc:constructor_loc
                        (evar ~loc:constructor_loc
-                          "Observe.Generated_runtime.frozen_variant")
+                          "Observe.Ppx_runtime.Type.frozen_variant")
                        [
                          (Nolabel, evar ~loc:constructor_loc context);
                          (Labelled "depth", evar ~loc:constructor_loc depth);
@@ -423,7 +457,7 @@ let variant_freezer (module Engine : Ppx_repr_lib.Engine.S) ~library ~recursive
                 let variant frozen =
                   pexp_apply ~loc:constructor_loc
                     (evar ~loc:constructor_loc
-                       "Observe.Generated_runtime.frozen_variant_payload")
+                       "Observe.Ppx_runtime.Type.frozen_variant_payload")
                     [
                       (Nolabel, evar ~loc:constructor_loc context);
                       (Labelled "depth", evar ~loc:constructor_loc depth);
@@ -464,7 +498,7 @@ let variant_freezer (module Engine : Ppx_repr_lib.Engine.S) ~library ~recursive
                 let variant frozen =
                   pexp_apply ~loc:constructor_loc
                     (evar ~loc:constructor_loc
-                       "Observe.Generated_runtime.frozen_variant_payload")
+                       "Observe.Ppx_runtime.Type.frozen_variant_payload")
                     [
                       (Nolabel, evar ~loc:constructor_loc context);
                       (Labelled "depth", evar ~loc:constructor_loc depth);
@@ -519,7 +553,7 @@ let polymorphic_variant_freezer (module Engine : Ppx_repr_lib.Engine.S) ~library
               ~guard:None
               ~rhs:
                 (pexp_apply ~loc:row_loc
-                   (evar ~loc:row_loc "Observe.Generated_runtime.frozen_variant")
+                   (evar ~loc:row_loc "Observe.Ppx_runtime.Type.frozen_variant")
                    [
                      (Nolabel, evar ~loc:row_loc context);
                      (Labelled "depth", evar ~loc:row_loc depth);
@@ -547,7 +581,7 @@ let polymorphic_variant_freezer (module Engine : Ppx_repr_lib.Engine.S) ~library
             let error = "__observe_freeze_error" in
             let attempted =
               pexp_apply ~loc:row_loc
-                (evar ~loc:row_loc "Observe.Generated_runtime.freeze")
+                (evar ~loc:row_loc "Observe.Ppx_runtime.Type.freeze")
                 [
                   (Nolabel, descriptor payload_type);
                   (Nolabel, evar ~loc:row_loc context);
@@ -575,7 +609,7 @@ let polymorphic_variant_freezer (module Engine : Ppx_repr_lib.Engine.S) ~library
                 ~rhs:
                   (pexp_apply ~loc:row_loc
                      (evar ~loc:row_loc
-                        "Observe.Generated_runtime.frozen_variant_payload")
+                        "Observe.Ppx_runtime.Type.frozen_variant_payload")
                      [
                        (Nolabel, evar ~loc:row_loc context);
                        (Labelled "depth", evar ~loc:row_loc depth);
@@ -624,7 +658,7 @@ let with_generated (module Engine : Ppx_repr_lib.Engine.S) ~library ~recursive
     else Nonrecursive
   in
   let description =
-    for_ppx_call ~loc "with_json" [ description; evar ~loc encoder ]
+    for_type_call ~loc "with_json" [ description; evar ~loc encoder ]
   in
   let description =
     match declaration.ptype_kind with
@@ -633,8 +667,8 @@ let with_generated (module Engine : Ppx_repr_lib.Engine.S) ~library ~recursive
           variant_freezer (module Engine) ~library ~recursive declaration
         in
         if recursive then
-          for_ppx_call ~loc "with_recursive_freeze" [ description; freezer ]
-        else for_ppx_call ~loc "with_freeze" [ description; freezer ]
+          for_type_call ~loc "with_recursive_freeze" [ description; freezer ]
+        else for_type_call ~loc "with_freeze" [ description; freezer ]
     | Ptype_abstract -> (
         match declaration.ptype_manifest with
         | Some { ptyp_desc = Ptyp_variant (rows, Closed, _); _ } ->
@@ -644,8 +678,9 @@ let with_generated (module Engine : Ppx_repr_lib.Engine.S) ~library ~recursive
                 ~library ~recursive declaration rows
             in
             if recursive then
-              for_ppx_call ~loc "with_recursive_freeze" [ description; freezer ]
-            else for_ppx_call ~loc "with_freeze" [ description; freezer ]
+              for_type_call ~loc "with_recursive_freeze"
+                [ description; freezer ]
+            else for_type_call ~loc "with_freeze" [ description; freezer ]
         | Some _ | None -> description)
     | Ptype_record _ | Ptype_open -> description
   in
@@ -723,11 +758,11 @@ let with_generated (module Engine : Ppx_repr_lib.Engine.S) ~library ~recursive
     let attach =
       if recursive then
         apply ~loc
-          (evar ~loc "Observe.Generated_runtime.with_recursive_plan")
+          (evar ~loc "Observe.Ppx_runtime.Type.with_recursive_plan")
           [ description; lambda ~loc [ pvar ~loc plan_self ] plan ]
       else
         apply ~loc
-          (evar ~loc "Observe.Generated_runtime.with_plan")
+          (evar ~loc "Observe.Ppx_runtime.Type.with_plan")
           [ description; plan ]
     in
     let generated = pexp_let ~loc Nonrecursive bindings attach in
@@ -819,12 +854,13 @@ let description_core_type ~loc type_ =
 
 let fragment_core_type ~loc =
   type_path ~loc
-    (Ldot (Ldot (Lident "Observe", "Generated_runtime"), "fragment"))
+    (Ldot (Ldot (Ldot (Lident "Observe", "Ppx_runtime"), "Schema"), "fragment"))
     []
 
 let patch_field_core_type ~loc =
   type_path ~loc
-    (Ldot (Ldot (Lident "Observe", "Generated_runtime"), "patch_field"))
+    (Ldot
+       (Ldot (Ldot (Lident "Observe", "Ppx_runtime"), "Schema"), "patch_field"))
     []
 
 let patch_declaration declaration =
@@ -1154,7 +1190,7 @@ let fragment_expression (module Engine : Ppx_repr_lib.Engine.S) ~library
       let description =
         expanded_descriptor (module Engine) ~library ~local_descriptions type_
       in
-      for_ppx_call ~loc "fragment" [ description; value ]
+      for_schema_call ~loc "fragment" [ description; value ]
 
 let author_fragment_expression (module Engine : Ppx_repr_lib.Engine.S) ~library
     ~atomic_type_names ~local_descriptions type_ value =
@@ -1190,8 +1226,9 @@ let patch_structure_items (module Engine : Ppx_repr_lib.Engine.S) ~library ~path
   let fragment_value = "__observe_patch_value" in
   let fragment_body =
     if is_record declaration then
-      for_ppx_call ~loc "patch_fragment" [ evar ~loc fragment_value ]
-    else for_ppx_call ~loc "fragment" [ description; evar ~loc fragment_value ]
+      for_schema_call ~loc "patch_fragment" [ evar ~loc fragment_value ]
+    else
+      for_schema_call ~loc "fragment" [ description; evar ~loc fragment_value ]
   in
   let fragment_binding =
     value_binding ~loc
@@ -1206,7 +1243,7 @@ let patch_structure_items (module Engine : Ppx_repr_lib.Engine.S) ~library ~path
       let schema_name = schema_value_name declaration.ptype_name.txt in
       let schema_identity_parameter = "__observe_schema_identity" in
       let identified_patch field_fragment =
-        for_ppx_call ~loc "identified_record_patch_fields"
+        for_schema_call ~loc "identified_record_patch_fields"
           [ evar ~loc schema_identity_parameter; elist ~loc [ field_fragment ] ]
       in
       let builder_field field =
@@ -1219,7 +1256,7 @@ let patch_structure_items (module Engine : Ppx_repr_lib.Engine.S) ~library ~path
             (evar ~loc:field_loc value_name)
         in
         let field_fragment =
-          for_ppx_call ~loc:field_loc "patch_field"
+          for_schema_call ~loc:field_loc "patch_field"
             [ estr ~loc:field_loc field.pld_name.txt; fragment ]
         in
         ( Located.mk ~loc:field_loc
@@ -1238,7 +1275,7 @@ let patch_structure_items (module Engine : Ppx_repr_lib.Engine.S) ~library ~path
             (evar ~loc:field_loc value_name)
         in
         let field_fragment =
-          for_ppx_call ~loc:field_loc "patch_field"
+          for_schema_call ~loc:field_loc "patch_field"
             [ estr ~loc:field_loc field.pld_name.txt; fragment ]
         in
         ( Located.mk ~loc:field_loc
@@ -1255,7 +1292,7 @@ let patch_structure_items (module Engine : Ppx_repr_lib.Engine.S) ~library ~path
         let error_value = "__observe_error_value" in
         let error_fragment =
           pexp_apply ~loc
-            (evar ~loc "Observe.Generated_runtime.error_fragment")
+            (evar ~loc "Observe.Ppx_runtime.Schema.error_fragment")
             [
               (Nolabel, evar ~loc interpretation);
               (Optional "backtrace", evar ~loc backtrace);
@@ -1266,7 +1303,7 @@ let patch_structure_items (module Engine : Ppx_repr_lib.Engine.S) ~library ~path
           pexp_fun ~loc (Labelled "using") None (pvar ~loc interpretation)
             (pexp_fun ~loc (Optional "backtrace") None (pvar ~loc backtrace)
                (pexp_fun ~loc Nolabel None (pvar ~loc error_value)
-                  (for_ppx_call ~loc "identified_error_patch"
+                  (for_schema_call ~loc "identified_error_patch"
                      [ evar ~loc schema_identity_parameter; error_fragment ])))
         in
         pexp_record ~loc
@@ -1276,14 +1313,14 @@ let patch_structure_items (module Engine : Ppx_repr_lib.Engine.S) ~library ~path
           :: (Located.mk ~loc (Lident "error"), error_function)
           :: ( Located.mk ~loc (Lident "__observe_combine"),
                pexp_fun ~loc Nolabel None (pvar ~loc patches_value)
-                 (for_ppx_call ~loc "combine_identified_patches"
+                 (for_schema_call ~loc "combine_identified_patches"
                     [
                       evar ~loc schema_identity_parameter;
                       evar ~loc patches_value;
                     ]) )
           :: ( Located.mk ~loc (Lident "__observe_make_patch_fields"),
                pexp_fun ~loc Nolabel None (pvar ~loc patches_value)
-                 (for_ppx_call ~loc "identified_record_patch_fields"
+                 (for_schema_call ~loc "identified_record_patch_fields"
                     [
                       evar ~loc schema_identity_parameter;
                       evar ~loc patches_value;
@@ -1300,7 +1337,7 @@ let patch_structure_items (module Engine : Ppx_repr_lib.Engine.S) ~library ~path
       let schema_expression =
         let identity = declared_identity ~path declaration.ptype_name.txt in
         pexp_apply ~loc
-          (evar ~loc "Observe.Generated_runtime.record_schema")
+          (evar ~loc "Observe.Ppx_runtime.Schema.record_schema")
           [
             (Labelled "name", estr ~loc identity);
             (Labelled "builder", builder_factory);
@@ -1372,7 +1409,7 @@ let patch_structure_items (module Engine : Ppx_repr_lib.Engine.S) ~library ~path
           [
             value_binding ~loc
               ~pat:(pvar ~loc patch_builder_value)
-              ~expr:(for_ppx_call ~loc "schema_builder" [ patch_schema ]);
+              ~expr:(for_schema_call ~loc "schema_builder" [ patch_schema ]);
           ]
           patch_body
       in
@@ -1404,7 +1441,7 @@ let patch_structure_items (module Engine : Ppx_repr_lib.Engine.S) ~library ~path
         pexp_apply ~loc (evar ~loc author_value)
           [
             ( Nolabel,
-              for_ppx_call ~loc "schema_builder"
+              for_schema_call ~loc "schema_builder"
                 [ apply ~loc (evar ~loc schema_name) parameter_values ] );
           ]
       in
@@ -1415,7 +1452,7 @@ let patch_structure_items (module Engine : Ppx_repr_lib.Engine.S) ~library ~path
           ~expr:
             (lambda ~loc
                (parameter_patterns @ [ pvar ~loc author_value ])
-               (for_ppx_call ~loc "patch_fragment" [ authored_patch ]))
+               (for_schema_call ~loc "patch_fragment" [ authored_patch ]))
       in
       [
         pstr_type ~loc Nonrecursive [ patch_declaration declaration ];
@@ -1483,6 +1520,225 @@ let normalize_recursive_parameter_application declaration expression =
       | _ -> None)
     expression
 
+type selector_kind = Nullary | Payload
+
+type generated_selector = {
+  kind : selector_kind;
+  expression : expression;
+  polymorphic : bool;
+}
+
+let constructor_selector ~exhaustive index constructor =
+  let loc = constructor.pcd_loc in
+  match constructor_projection index constructor with
+  | Nullary_projection { matched } ->
+      {
+        kind = Nullary;
+        expression =
+          selector_match ~loc ~exhaustive ~pattern:matched
+            ~selected:(ebool ~loc true);
+        polymorphic = false;
+      }
+  | Payload_projection { matched; value; _ } ->
+      {
+        kind = Payload;
+        expression =
+          selector_match ~loc ~exhaustive ~pattern:matched
+            ~selected:(pexp_construct ~loc (lident ~loc "Some") (Some value));
+        polymorphic = false;
+      }
+
+let row_selector ~exhaustive index row =
+  let loc = row.prf_loc in
+  match row.prf_desc with
+  | Rtag (label, _, []) ->
+      Some
+        {
+          kind = Nullary;
+          expression =
+            selector_match ~loc ~exhaustive
+              ~pattern:(ppat_variant ~loc label.txt None)
+              ~selected:(ebool ~loc true);
+          polymorphic = true;
+        }
+  | Rtag (label, _, [ _ ]) ->
+      let name = indexed "__observe_arg_" index in
+      Some
+        {
+          kind = Payload;
+          expression =
+            selector_match ~loc ~exhaustive
+              ~pattern:(ppat_variant ~loc label.txt (Some (pvar ~loc name)))
+              ~selected:
+                (pexp_construct ~loc (lident ~loc "Some")
+                   (Some (evar ~loc name)));
+          polymorphic = true;
+        }
+  | Rtag (_, _, _ :: _ :: _) | Rinherit _ -> None
+
+let declaration_selectors declaration =
+  match declaration.ptype_kind with
+  | Ptype_variant constructors ->
+      List.mapi
+        (constructor_selector ~exhaustive:(List.length constructors = 1))
+        constructors
+  | Ptype_abstract -> (
+      match declaration.ptype_manifest with
+      | Some { ptyp_desc = Ptyp_variant (rows, Closed, _); _ } ->
+          List.filter_map Fun.id
+            (List.mapi (row_selector ~exhaustive:(List.length rows = 1)) rows)
+      | Some _ | None -> [])
+  | Ptype_record _ | Ptype_open -> []
+
+let attach_generated_selectors declarations expression =
+  let remaining = ref (List.concat_map declaration_selectors declarations) in
+  let case_kind expression =
+    match expression.pexp_desc with
+    | Pexp_ident { txt = Lident "case0" | Ldot (_, "case0"); _ } ->
+        Some (Nullary, "is")
+    | Pexp_ident { txt = Lident "case1" | Ldot (_, "case1"); _ } ->
+        Some (Payload, "project")
+    | _ -> None
+  in
+  let attach expression =
+    match expression.pexp_desc with
+    | Pexp_apply (function_, arguments) -> (
+        match case_kind function_ with
+        | Some (kind, label)
+          when not
+                 (List.exists
+                    (fun (argument_label, _) -> argument_label = Labelled label)
+                    arguments) -> (
+            match !remaining with
+            | selector :: rest when selector.kind = kind ->
+                remaining := rest;
+                let arguments =
+                  (Labelled label, selector.expression)
+                  ::
+                  (if selector.polymorphic then
+                     [
+                       ( Labelled "polymorphic",
+                         ebool ~loc:expression.pexp_loc true );
+                     ]
+                   else [])
+                  @ arguments
+                in
+                {
+                  expression with
+                  pexp_desc = Pexp_apply (function_, arguments);
+                }
+            | _ -> expression)
+        | None | Some _ -> expression)
+    | _ -> expression
+  in
+  let rec map_expression expression =
+    let expression = attach expression in
+    let map_option map = Option.map map in
+    let map_case case =
+      {
+        case with
+        pc_guard = map_option map_expression case.pc_guard;
+        pc_rhs = map_expression case.pc_rhs;
+      }
+    in
+    let map_binding binding =
+      { binding with pvb_expr = map_expression binding.pvb_expr }
+    in
+    let map_binding_op binding =
+      { binding with pbop_exp = map_expression binding.pbop_exp }
+    in
+    let pexp_desc =
+      match expression.pexp_desc with
+      | Pexp_let (flag, bindings, body) ->
+          Pexp_let (flag, List.map map_binding bindings, map_expression body)
+      | Pexp_function (parameters, constraint_, body) ->
+          let body =
+            match body with
+            | Pfunction_body body -> Pfunction_body (map_expression body)
+            | Pfunction_cases (cases, loc, attributes) ->
+                Pfunction_cases (List.map map_case cases, loc, attributes)
+          in
+          Pexp_function (parameters, constraint_, body)
+      | Pexp_apply (function_, arguments) ->
+          Pexp_apply
+            ( map_expression function_,
+              List.map
+                (fun (label, argument) -> (label, map_expression argument))
+                arguments )
+      | Pexp_match (value, cases) ->
+          Pexp_match (map_expression value, List.map map_case cases)
+      | Pexp_try (value, cases) ->
+          Pexp_try (map_expression value, List.map map_case cases)
+      | Pexp_tuple values -> Pexp_tuple (List.map map_expression values)
+      | Pexp_construct (name, value) ->
+          Pexp_construct (name, map_option map_expression value)
+      | Pexp_variant (name, value) ->
+          Pexp_variant (name, map_option map_expression value)
+      | Pexp_record (fields, base) ->
+          Pexp_record
+            ( List.map (fun (name, value) -> (name, map_expression value)) fields,
+              map_option map_expression base )
+      | Pexp_field (value, name) -> Pexp_field (map_expression value, name)
+      | Pexp_setfield (record, name, value) ->
+          Pexp_setfield (map_expression record, name, map_expression value)
+      | Pexp_array values -> Pexp_array (List.map map_expression values)
+      | Pexp_ifthenelse (condition, then_, else_) ->
+          Pexp_ifthenelse
+            ( map_expression condition,
+              map_expression then_,
+              map_option map_expression else_ )
+      | Pexp_sequence (first, second) ->
+          Pexp_sequence (map_expression first, map_expression second)
+      | Pexp_while (condition, body) ->
+          Pexp_while (map_expression condition, map_expression body)
+      | Pexp_for (pattern, first, last, direction, body) ->
+          Pexp_for
+            ( pattern,
+              map_expression first,
+              map_expression last,
+              direction,
+              map_expression body )
+      | Pexp_constraint (value, type_) ->
+          Pexp_constraint (map_expression value, type_)
+      | Pexp_coerce (value, from, into) ->
+          Pexp_coerce (map_expression value, from, into)
+      | Pexp_send (value, label) -> Pexp_send (map_expression value, label)
+      | Pexp_setinstvar (name, value) ->
+          Pexp_setinstvar (name, map_expression value)
+      | Pexp_override fields ->
+          Pexp_override
+            (List.map
+               (fun (name, value) -> (name, map_expression value))
+               fields)
+      | Pexp_letmodule (name, module_, body) ->
+          Pexp_letmodule (name, module_, map_expression body)
+      | Pexp_letexception (constructor, body) ->
+          Pexp_letexception (constructor, map_expression body)
+      | Pexp_assert value -> Pexp_assert (map_expression value)
+      | Pexp_lazy value -> Pexp_lazy (map_expression value)
+      | Pexp_poly (value, type_) -> Pexp_poly (map_expression value, type_)
+      | Pexp_newtype (name, body) -> Pexp_newtype (name, map_expression body)
+      | Pexp_open (open_, body) -> Pexp_open (open_, map_expression body)
+      | Pexp_letop letop ->
+          Pexp_letop
+            {
+              let_ = map_binding_op letop.let_;
+              ands = List.map map_binding_op letop.ands;
+              body = map_expression letop.body;
+            }
+      | ( Pexp_ident _ | Pexp_constant _ | Pexp_new _ | Pexp_object _
+        | Pexp_pack _ | Pexp_extension _ | Pexp_unreachable ) as unchanged ->
+          unchanged
+    in
+    { expression with pexp_desc }
+  in
+  let expression = map_expression expression in
+  match !remaining with
+  | [] -> expression
+  | _ ->
+      inline_error ~loc:expression.pexp_loc
+        "generated variant selector count does not match the Repr description"
+
 let add_generated (module Engine : Ppx_repr_lib.Engine.S) ~library ~recursive
     declaration items =
   match items with
@@ -1493,6 +1749,7 @@ let add_generated (module Engine : Ppx_repr_lib.Engine.S) ~library ~recursive
           normalize_recursive_parameter_application declaration binding.pvb_expr
         else binding.pvb_expr
       in
+      let machine = attach_generated_selectors [ declaration ] machine in
       let expression =
         wrap_descriptor_parameters declaration
           (with_generated (module Engine) ~library ~recursive declaration)
@@ -1521,7 +1778,7 @@ let add_group_generated (module Engine : Ppx_repr_lib.Engine.S) ~library
       let machine_binding =
         value_binding ~loc
           ~pat:(tuple_pattern ~loc (List.map (pvar ~loc) machine_names))
-          ~expr:binding.pvb_expr
+          ~expr:(attach_generated_selectors declarations binding.pvb_expr)
       in
       let wrapped =
         if recursive then
@@ -1550,7 +1807,7 @@ let add_group_generated (module Engine : Ppx_repr_lib.Engine.S) ~library
           let values =
             List.map2
               (fun declaration machine ->
-                for_ppx_call ~loc "with_json"
+                for_type_call ~loc "with_json"
                   [ evar ~loc machine; evar ~loc (encoder_name declaration) ])
               declarations machine_names
             |> tuple_expression ~loc

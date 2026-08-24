@@ -1,6 +1,6 @@
 (** Process-wide static logging authoring. *)
 
-type message
+type message = Message.t
 type object_ = Message.object_
 type field = Message.field
 type untyped_patch = Message.untyped_patch
@@ -24,7 +24,6 @@ type builder = private {
   field : 'a. string -> 'a Type.t -> 'a -> field;
   object_ : string -> (untyped_builder -> untyped_patch) -> field;
   seal : object_ -> message;
-  value : Value.t -> message;
   error :
     'error.
     using:'error Error.t ->

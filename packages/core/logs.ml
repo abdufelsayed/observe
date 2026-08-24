@@ -22,7 +22,6 @@ type builder = Message.builder = {
   field : 'a. string -> 'a Type.t -> 'a -> field;
   object_ : string -> (untyped_builder -> untyped_patch) -> field;
   seal : object_ -> message;
-  value : Value.t -> message;
   error :
     'error.
     using:'error Error.t ->
@@ -37,7 +36,7 @@ type author = builder -> message
 type ('builder, 'patch) t = {
   wide : Engine.wide;
   mode : mode;
-  builder : 'builder;
+  builder : unit -> 'builder;
   materialize : 'patch -> Engine.contribution;
   error_materialize :
     'error.
@@ -85,10 +84,10 @@ let open_handle wide =
   {
     wide;
     mode = Open;
-    builder = Message.untyped_builder;
+    builder = (fun () -> Message.untyped_builder);
     materialize =
       (fun patch ->
-        match Message.untyped_patch_fragment patch with
+        match Message.materialize_untyped_patch patch with
         | Ok body ->
             Engine.Contribution (body, Message.untyped_patch_has_error patch)
         | Error error -> Engine.Invalid_contribution error);
@@ -105,11 +104,16 @@ let typed_handle wide schema =
   {
     wide;
     mode = Typed (Schema.identity schema);
-    builder = Schema.builder schema;
+    builder = (fun () -> Schema.builder schema);
     materialize =
       (fun patch ->
-        match Schema.body schema patch with
-        | Ok body -> Engine.Contribution (body, Schema.has_error patch)
+        let context = Snapshot.create_context () in
+        match
+          Schema.materialize (Schema.body schema patch) context ~depth:0
+        with
+        | Ok value ->
+            Engine.Contribution
+              (Snapshot.seal context value, Schema.has_error patch)
         | Error error -> Engine.Invalid_contribution error);
     error_materialize = materialize_error;
   }
@@ -140,7 +144,7 @@ let current_typed ~using =
 let set handle author =
   ignore
     (Engine.contribute_wide handle.wide (fun () ->
-         handle.materialize (author handle.builder)))
+         handle.materialize (author (handle.builder ()))))
 
 let contribute_error handle interpretation ?backtrace error =
   Engine.contribute_wide handle.wide (fun () ->

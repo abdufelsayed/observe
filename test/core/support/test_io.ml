@@ -238,7 +238,5 @@ let text_payload log =
 let text ~tag message (builder : Observe.Logs.builder) =
   builder.text ~tag "%s" message
 
-let untyped value (builder : Observe.Logs.builder) = builder.value value
-
 let typed description value (builder : Observe.Logs.builder) =
   builder.typed ~using:description value

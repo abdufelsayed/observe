@@ -64,7 +64,7 @@ let capture_one level message =
   | logs, _ ->
       Alcotest.failf "expected one captured log, received %d" (List.length logs)
 
-let untyped make (builder : Observe.Logs.builder) = builder.value (make ())
+let untyped = Generated_logging.untyped
 
 type 'a described_event = { value : 'a }
 
@@ -82,8 +82,7 @@ let typed description value (builder : Observe.Logs.builder) =
     |> sealr
   in
   let schema =
-    Observe.Generated_runtime.record_schema event_t ~builder:(fun _ ->
-        { typed = Fun.id })
+    Observe.Schema.record event_t ~builder:(fun _ -> { typed = Fun.id })
   in
   builder.typed ~using:schema { value }
 
@@ -475,9 +474,7 @@ let test_canonical_failures_are_withheld () =
            [ ("service", Observe.Value.string "consumer-value") ]));
   check_withheld "reserved typed root metadata" (fun builder ->
       builder.typed ~using:reserved_event_schema { service = "consumer-value" });
-  let opaque = Observe.Type.of_repr (Observe.Type.repr deployment_t) in
-  check_withheld "opaque Repr without bounded projection"
-    (typed opaque `Development)
+  ()
 
 let test_ansi_16_text () =
   timestamp := Observe.Timestamp.of_unix_ns 37_425_612_000_000L;

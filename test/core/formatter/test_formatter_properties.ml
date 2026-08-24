@@ -128,7 +128,8 @@ let capture message =
 let capture_text tag message = capture (Test_io.text ~tag message)
 
 let capture_value value =
-  capture (fun m -> m.value (Observe.Value.object_ [ ("value", value) ]))
+  capture
+    (Generated_logging.of_value (Observe.Value.object_ [ ("value", value) ]))
 
 let format formatter log = Observe.Formatter.format formatter log
 let pretty style log = format (Observe.Formatter.pretty style) log
@@ -232,7 +233,7 @@ let canonical_failure diagnostics =
     diagnostics
 
 let withheld value =
-  match capture_outcome (fun m -> m.value value) with
+  match capture_outcome (Generated_logging.of_value value) with
   | [], diagnostics -> canonical_failure diagnostics
   | _ -> false
 
@@ -250,7 +251,8 @@ let test_non_finite_floats_are_withheld () =
     (fun value ->
       Alcotest.(check bool)
         "canonical freezing rejects non-finite float" true
-        (withheld (Observe.Value.float value)))
+        (withheld
+           (Observe.Value.object_ [ ("value", Observe.Value.float value) ])))
     [ Float.nan; Float.infinity; Float.neg_infinity ]
 
 let test_finite_float_matches_repr_precision () =

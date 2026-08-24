@@ -76,8 +76,7 @@ let render_point_correlation renderer reference =
   render_text_field renderer ~last:true ~name:"operation"
     (operation_label reference)
 
-let render_structured_point renderer log value =
-  let correlation = Log.correlation log in
+let render_structured_point renderer correlation value =
   let event_fields = Snapshot.root_field_count value in
   Pretty.newline renderer;
   Option.iter
@@ -132,21 +131,19 @@ let pretty_with_line_feed line_feed style =
           | Structured _ ->
               Pretty.create ~capacity:(pretty_capacity style) style
         in
-        (match (Log.operation log, Log.event log) with
-        | None, Text { tag; message } ->
+        (match (Log.kind log, Log.event log) with
+        | Point { correlation }, Text { tag; message } ->
             add_header renderer ~scope:tag log;
             Pretty.space renderer;
             Pretty.trusted_text renderer message;
-            Option.iter
-              (render_point_correlation renderer)
-              (Log.correlation log)
-        | None, Structured { value; _ } ->
+            Option.iter (render_point_correlation renderer) correlation
+        | Point { correlation }, Structured { value; _ } ->
             add_header renderer ~scope:(Log.service log) log;
-            render_structured_point renderer log value
-        | Some operation, Structured { value; _ } ->
+            render_structured_point renderer correlation value
+        | Wide { operation; annotations }, Structured { value; _ } ->
             add_header renderer ~scope:(Log.operation_name operation) log;
-            render_wide renderer operation value (Log.annotations log)
-        | Some _, Text _ -> assert false);
+            render_wide renderer operation value annotations
+        | Wide _, Text _ -> raise (Invalid_argument "wide text event"));
         if line_feed then Pretty.newline renderer;
         Ok (Pretty.contents renderer)
       with
@@ -275,14 +272,16 @@ let append_json_object buffer log =
   let first =
     append_named_string buffer ~first "level" (Level.to_string (Log.level log))
   in
-  let first =
-    match (Log.operation log, Log.correlation log) with
-    | Some operation, _ -> append_operation_fields buffer ~first operation
-    | None, Some reference -> append_correlation_fields buffer ~first reference
-    | None, None -> first
+  let first, annotations =
+    match Log.kind log with
+    | Log.Wide { operation; annotations } ->
+        (append_operation_fields buffer ~first operation, annotations)
+    | Log.Point { correlation = Some reference } ->
+        (append_correlation_fields buffer ~first reference, [])
+    | Log.Point { correlation = None } -> (first, [])
   in
   let first = append_event_fields buffer ~first (Log.event log) in
-  ignore (append_annotations buffer ~first (Log.annotations log));
+  ignore (append_annotations buffer ~first annotations);
   Buffer.add_char buffer '}'
 
 let encode_json ~line_feed log =

@@ -3,7 +3,7 @@ open Ast_builder.Default
 open Generated_ast
 
 let for_ppx ~loc name arguments =
-  pexp_apply ~loc (evar ~loc ("Observe.Generated_runtime." ^ name)) arguments
+  pexp_apply ~loc (evar ~loc ("Observe.Ppx_runtime.Type." ^ name)) arguments
 
 let field_binders fields =
   Generated_ast.field_binders ~prefix:"__observe_pretty_field_" fields

@@ -1,34 +1,14 @@
 module Type = Type
-module Schema = Schema
-module Error = Error
+module Schema_internal = Schema
 
-module Generated_runtime = struct
-  type 'a description = 'a Type.t
+module Schema = struct
+  include Schema_internal
 
-  include Type.Generated_runtime
-
-  type fragment = Schema.fragment
-  type patch_field = Schema.field
-  type untyped_patch = Message.untyped_patch
-
-  let fragment = Schema.fragment
-
-  let error_fragment interpretation ?backtrace error =
-    Schema.fragment_of_result (Error.freeze interpretation ?backtrace error)
-
-  let patch_fragment = Schema.patch_fragment
-  let patch_field = Schema.field
-  let record_patch = Schema.make_patch
-  let record_patch_fields = Schema.make_patch_fields
-  let identified_record_patch = Schema.make_identified_patch
-  let identified_record_patch_fields = Schema.make_identified_patch_fields
-  let identified_error_patch = Schema.make_identified_error_patch
-  let combine_identified_patches = Schema.combine_identified_patches
-  let record_schema = Schema.record
-  let schema_builder = Schema.builder
-  let untyped_value_patch = Message.untyped_patch_of_value
+  let field = field_patch
+  let nested = nested_patch
 end
 
+module Error = Error
 module Level = Level
 module Timestamp = Timestamp
 module Value = Value
@@ -39,6 +19,53 @@ module Formatter = Formatter
 module Capture = Capture
 module Config = Config
 module Logs = Logs
+
+module Ppx_runtime = struct
+  type 'a type_description = 'a Type.t
+  type logs_message = Logs.message
+  type logs_untyped_patch = Logs.untyped_patch
+
+  module Type = struct
+    type 'a description = 'a type_description
+
+    include Type.Ppx_runtime
+  end
+
+  module Schema = struct
+    type fragment = Schema_internal.fragment
+    type patch_field = Schema_internal.field
+
+    let fragment = Schema_internal.fragment
+
+    let error_fragment interpretation ?backtrace error =
+      Schema_internal.fragment_of_value
+        (Error.value interpretation ?backtrace error)
+
+    let patch_fragment = Schema_internal.patch_fragment
+    let patch_field = Schema_internal.field
+    let record_patch = Schema_internal.make_patch
+    let record_patch_fields = Schema_internal.make_patch_fields
+    let identified_record_patch = Schema_internal.make_identified_patch
+
+    let identified_record_patch_fields =
+      Schema_internal.make_identified_patch_fields
+
+    let identified_error_patch = Schema_internal.make_identified_error_patch
+    let combine_identified_patches = Schema_internal.combine_identified_patches
+    let record_schema = Schema_internal.record
+    let schema_builder = Schema_internal.builder
+  end
+
+  module Logs = struct
+    type message = logs_message
+    type untyped_patch = logs_untyped_patch
+
+    let untyped_value_patch = Message.untyped_patch_of_value
+    let untyped_message = Message.untyped_message_of_value
+    let is_reserved_field = Log_envelope.is_reserved_field
+  end
+end
+
 module IO = Io
 
 type init_error = Observer.init_error =

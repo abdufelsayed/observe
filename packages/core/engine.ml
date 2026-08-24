@@ -106,34 +106,34 @@ let admitted t level =
 let evaluate_author t author =
   match
     contain ~is_control_exception:t.is_control_exception (fun () ->
+        let materialize materializer =
+          let context = Snapshot.create_context () in
+          match materializer context ~depth:0 with
+          | Ok value -> Ok (Snapshot.seal context value)
+          | Error _ as error -> error
+        in
         match author Message.builder with
         | Message.Text { tag; message } ->
             Ok (Log.Producer.Text { tag; message })
-        | Message.Value value ->
-            Result.map
-              (fun value ->
-                Log.Producer.Structured { origin = Log.Open; value })
-              (Value.freeze value)
         | Message.Untyped value ->
             Result.map
               (fun value ->
                 Log.Producer.Structured { origin = Log.Open; value })
-              value
+              (Message.materialize_untyped value)
         | Message.Typed (schema, value) ->
             Result.map
               (fun value ->
                 Log.Producer.Structured
                   { origin = Log.Declared (Schema.name schema); value })
-              (Schema.freeze_complete schema value))
+              (materialize (Schema.freeze_complete schema value)))
   with
   | Raised -> Raised
   | Returned result -> Returned result
 
-let create_log t level timestamp ?correlation ?operation ?annotations event =
+let create_log t level timestamp ~kind event =
   Log.Producer.make ~service:(Config.service t.config)
     ?environment:(Config.environment t.config)
-    ?version:(Config.version t.config) ~timestamp ~level ?correlation ?operation
-    ?annotations event
+    ?version:(Config.version t.config) ~timestamp ~level ~kind event
 
 let offer_capture t capture log = ignore (Capture.offer capture log)
 
@@ -199,7 +199,8 @@ let emit_point t ?correlation level author =
         | Returned (Error _) ->
             record_diagnostic t Diagnostics.Canonical_freeze_failed
         | Returned (Ok body) -> (
-            match create_log t level timestamp ?correlation body with
+            let kind = Log.Point { correlation } in
+            match create_log t level timestamp ~kind body with
             | Ok log -> dispatch t log
             | Error _ -> record_diagnostic t Diagnostics.Canonical_freeze_failed
             ))
@@ -582,8 +583,8 @@ let emit_wide wide =
                         in
                         match
                           contained_call engine (fun () ->
-                              create_log engine level timestamp ~operation
-                                ~annotations
+                              create_log engine level timestamp
+                                ~kind:(Log.Wide { operation; annotations })
                                 (Log.Producer.Structured
                                    { origin = wide.origin; value = body }))
                         with

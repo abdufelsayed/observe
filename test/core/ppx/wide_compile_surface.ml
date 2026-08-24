@@ -89,6 +89,10 @@ let anonymous_point () =
         referral = None;
       }]
 
+let lexical_description_is_not_rewritten () =
+  let string = Observe.Type.int in
+  [%observe.info untyped { attempts = string 2 }]
+
 let () =
   ignore Custom_description_name.description;
   ignore Custom_description_name.patch;
@@ -99,4 +103,5 @@ let () =
   ignore Patch_type_name_collision.domain;
   ignore manual;
   ignore open_wide;
-  ignore anonymous_point
+  ignore anonymous_point;
+  ignore lexical_description_is_not_rewritten

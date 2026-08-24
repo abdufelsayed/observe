@@ -53,16 +53,24 @@ let event_t =
 
 type event_builder = {
   typed : event Observe.Schema.patch -> event Observe.Schema.patch;
+  value : int -> event Observe.Schema.patch;
 }
 
 let event_schema =
-  Observe.Generated_runtime.record_schema event_t ~builder:(fun _ ->
-      { typed = Fun.id })
+  Observe.Schema.record event_t ~builder:(fun patch ->
+      {
+        typed = Fun.id;
+        value = Observe.Schema.field patch "value" Observe.Type.int;
+      })
 
 let config = Observe.Config.create_exn ~service:"consumer" ()
 let observer = Observer.create ()
 let text = fun (m : Observe.Logs.builder) -> m.text ~tag:"consumer" "message"
-let untyped = fun (m : Observe.Logs.builder) -> m.value (Observe.Value.int 1)
+
+let untyped =
+ fun (m : Observe.Logs.builder) ->
+  let open Observe.Logs in
+  m.untyped |+ m.field "value" Observe.Type.int 1 |> m.seal
 
 let typed =
  fun (m : Observe.Logs.builder) -> m.typed ~using:event_schema { value = 1 }
@@ -91,18 +99,21 @@ let inspect log =
         in
         `Structured (origin, Observe.Value.frozen_to_json_string value)
   in
-  let operation =
-    Option.map
-      (fun operation ->
-        ( Observe.Log.operation_name operation,
-          Observe.Log.operation_id operation,
-          Option.map Observe.Log.operation_reference_id
-            (Observe.Log.operation_parent operation),
-          Observe.Log.operation_duration_ns operation ))
-      (Observe.Log.operation log)
+  let correlation, operation =
+    match Observe.Log.kind log with
+    | Observe.Log.Point { correlation } ->
+        (Option.map Observe.Log.operation_reference_id correlation, None)
+    | Observe.Log.Wide { operation; annotations = _ } ->
+        ( None,
+          Some
+            ( Observe.Log.operation_name operation,
+              Observe.Log.operation_id operation,
+              Option.map Observe.Log.operation_reference_id
+                (Observe.Log.operation_parent operation),
+              Observe.Log.operation_duration_ns operation ) )
   in
   ( Observe.Log.kind log,
-    Option.map Observe.Log.operation_reference_id (Observe.Log.correlation log),
+    correlation,
     operation,
     Observe.Log.timestamp log,
     Observe.Log.level log,

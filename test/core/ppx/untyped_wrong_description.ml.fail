@@ -1,2 +1,3 @@
 let attempts = 2
-let _ = [%observe.info untyped { attempts = string attempts }]
+let _ =
+  [%observe.info untyped { attempts = Observe.Type.string attempts }]

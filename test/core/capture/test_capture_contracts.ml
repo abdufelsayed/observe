@@ -1,5 +1,15 @@
 module Observer = Observe.Make (Test_io.IO)
 
+let point_correlation log =
+  match Observe.Log.kind log with
+  | Observe.Log.Point { correlation } -> correlation
+  | Observe.Log.Wide _ -> Alcotest.fail "expected point log"
+
+let wide_operation log =
+  match Observe.Log.kind log with
+  | Observe.Log.Wide { operation; _ } -> operation
+  | Observe.Log.Point _ -> Alcotest.fail "expected wide log"
+
 let take label values =
   match !values with
   | value :: rest ->
@@ -29,19 +39,23 @@ type int_event_builder = {
   typed : int_event Observe.Schema.patch -> int_event Observe.Schema.patch;
 }
 
+let int_event_patch_builder = ref None
+
 let int_event_schema =
-  Observe.Generated_runtime.record_schema int_event_t ~builder:(fun _ ->
+  Observe.Schema.record int_event_t ~builder:(fun patch_builder ->
+      int_event_patch_builder := Some patch_builder;
       { typed = Fun.id })
 
 let int_event_patch ?value () =
-  Observe.Generated_runtime.record_patch int_event_schema
-    [
-      Option.map
-        (fun value ->
-          Observe.Generated_runtime.patch_field "value"
-            (Observe.Generated_runtime.fragment Observe.Type.int value))
-        value;
-    ]
+  let patch_builder =
+    match !int_event_patch_builder with
+    | Some patch_builder -> patch_builder
+    | None -> Alcotest.fail "int event schema builder was not initialized"
+  in
+  match value with
+  | None -> Observe.Schema.combine patch_builder []
+  | Some value ->
+      Observe.Schema.field patch_builder "value" Observe.Type.int value
 
 type reference_event = { reference : int ref }
 
@@ -57,8 +71,7 @@ type reference_event_builder = {
 }
 
 let reference_event_schema =
-  Observe.Generated_runtime.record_schema reference_event_t ~builder:(fun _ ->
-      { typed = Fun.id })
+  Observe.Schema.record reference_event_t ~builder:(fun _ -> { typed = Fun.id })
 
 let structured_json log =
   match Observe.Log.event log with
@@ -90,12 +103,11 @@ let test_bodies_and_metadata () =
     capture config (fun capture ->
         Observe.Logs.info (Test_io.text ~tag:"auth" "signed in");
         Observe.Logs.warn (fun m ->
-            m.value
-              (Observe.Value.object_
-                 [
-                   ("attempt", Observe.Value.int 2);
-                   ("ok", Observe.Value.bool true);
-                 ]));
+            let open Observe.Logs in
+            m.untyped
+            |+ m.field "attempt" Observe.Type.int 2
+            |+ m.field "ok" Observe.Type.bool true
+            |> m.seal);
         Observe.Logs.error (fun m ->
             m.typed ~using:int_event_schema { value = 7 });
         capture)
@@ -118,6 +130,18 @@ let test_bodies_and_metadata () =
       Alcotest.(check string)
         "anonymous snapshot" "{\"attempt\":2,\"ok\":true}"
         (structured_json untyped);
+      (match Observe.Log.event untyped with
+      | Observe.Log.Structured { value; _ } -> (
+          match Observe.Value.view value with
+          | `Object [ ("attempt", attempt); ("ok", ok) ] ->
+              Alcotest.(check bool)
+                "semantic integer view" true
+                (Observe.Value.view attempt = `Integer (`Int 2));
+              Alcotest.(check bool)
+                "semantic Boolean view" true
+                (Observe.Value.view ok = `Bool true)
+          | _ -> Alcotest.fail "unexpected semantic object view")
+      | Observe.Log.Text _ -> Alcotest.fail "expected structured view");
       match Observe.Log.event typed with
       | Observe.Log.Structured { origin = Observe.Log.Declared "int_event"; _ }
         ->
@@ -180,7 +204,8 @@ let test_admission_and_diagnostics () =
             m.text ~tag:"admission" "rejected");
         Observe.Logs.debug (fun m ->
             incr untyped_calls;
-            m.value (Observe.Value.int 0));
+            let open Observe.Logs in
+            m.untyped |+ m.field "value" Observe.Type.int 0 |> m.seal);
         Observe.Logs.debug (fun m ->
             incr typed_calls;
             m.typed ~using:int_event_schema { value = 0 });
@@ -190,7 +215,8 @@ let test_admission_and_diagnostics () =
         Observe.Logs.warn (Test_io.text ~tag:"overflow" "withheld");
         Observe.Logs.error (fun m ->
             incr untyped_calls;
-            m.value (failwith "authoring"));
+            ignore m;
+            failwith "authoring");
         capture)
   in
   Alcotest.(check int) "text authored only after admission" 1 !text_calls;
@@ -230,12 +256,11 @@ let test_duplicate_fields_are_rejected_per_contribution () =
   let capture =
     capture (Test_io.config "duplicate-fields") (fun capture ->
         Observe.Logs.info (fun m ->
-            m.value
-              (Observe.Value.object_
-                 [
-                   ("duplicate", Observe.Value.int 1);
-                   ("duplicate", Observe.Value.int 2);
-                 ]));
+            let open Observe.Logs in
+            m.untyped
+            |+ m.field "duplicate" Observe.Type.int 1
+            |+ m.field "duplicate" Observe.Type.int 2
+            |> m.seal);
         Observe.Logs.info (fun m ->
             let open Observe.Logs in
             m.untyped
@@ -289,7 +314,7 @@ let test_typed_patches_require_schema_identity () =
   identities := [ "op-schema-mismatch" ];
   monotonic := [ 0L; 1L ];
   let same_named_schema =
-    Observe.Generated_runtime.record_schema int_event_t ~builder:(fun _ ->
+    Observe.Schema.record int_event_t ~builder:(fun _ ->
         ({ typed = Fun.id } : int_event_builder))
   in
   let capture =
@@ -337,21 +362,14 @@ let test_point_and_wide_semantic_capture () =
   in
   match logs with
   | [ point; correlated; child; parent ] ->
-      Alcotest.(check bool)
-        "point kind" true
-        (Observe.Log.kind point = Observe.Log.Point);
       Alcotest.(check (option string))
         "ordinary point has no correlation" None
-        (Option.map Observe.Log.operation_reference_id
-           (Observe.Log.correlation point));
+        (Option.map Observe.Log.operation_reference_id (point_correlation point));
       Alcotest.(check (option string))
         "correlated point identity" (Some "op_parent")
         (Option.map Observe.Log.operation_reference_id
-           (Observe.Log.correlation correlated));
-      Alcotest.(check bool)
-        "correlated observation remains a point" true
-        (Observe.Log.kind correlated = Observe.Log.Point);
-      let child_operation = Option.get (Observe.Log.operation child) in
+           (point_correlation correlated));
+      let child_operation = wide_operation child in
       Alcotest.(check string)
         "child name" "validate-cart"
         (Observe.Log.operation_name child_operation);
@@ -373,7 +391,7 @@ let test_point_and_wide_semantic_capture () =
             (Observe.Value.frozen_to_json_string value)
       | Observe.Log.Text _ | Observe.Log.Structured _ ->
           Alcotest.fail "expected declared child body");
-      let parent_operation = Option.get (Observe.Log.operation parent) in
+      let parent_operation = wide_operation parent in
       Alcotest.(check string)
         "parent name" "checkout"
         (Observe.Log.operation_name parent_operation);

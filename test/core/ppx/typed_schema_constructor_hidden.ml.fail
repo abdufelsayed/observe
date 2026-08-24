@@ -1,1 +1,0 @@
-let _ = Observe.Schema.record Observe.Type.int ~builder:(fun _ -> Fun.id)

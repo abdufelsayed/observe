@@ -15,11 +15,11 @@
   json_writer
   level
   log
+  log_envelope
   logs
   message
   observer
   pretty
-  repr_projection
   schema
   snapshot
   type
