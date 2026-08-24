@@ -64,6 +64,9 @@ automatic formatted output. {!module:Observe.Drain} values are additional
 application-owned outputs that receive completed {!type:Observe.Log.t} values.
 [Config.Silent] suppresses the console, not drains. [Config.Auto] chooses
 pretty development output or production NDJSON from the environment.
+[Config.create] accepts each configured behavior as a named value of its own
+type. Omitting [~min_level] admits [Info] and above. The default does not guess
+which application values are sensitive or activate sensitivity rules.
 
 {1 I/O composition and capture}
 

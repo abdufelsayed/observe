@@ -120,6 +120,10 @@ let test_config_contract () =
   Alcotest.(check bool)
     "explicit silent" true
     (Observe.Config.console explicit = Observe.Config.Silent);
+  Alcotest.(check bool)
+    "explicit minimum level" true
+    (Observe.Level.equal Observe.Level.Error
+       (Observe.Config.min_level explicit));
   let development =
     Observe.Config.create_exn ~service:"api" ~environment:"development" ()
   in

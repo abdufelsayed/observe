@@ -73,7 +73,7 @@ Initialize Observe once at the process composition root:
 let config =
   Observe.Config.create_exn ~service:"orders"
     ~environment:"development"
-    ~min_level:Observe.Level.Debug ()
+    ()
 
 let main () =
   [%observe.info text ~tag:"startup" "service ready"];
@@ -82,6 +82,17 @@ let main () =
 let () =
   Observe_lwt_unix.init_exn config;
   Lwt_main.run (Lwt.finalize main Observe_lwt_unix.shutdown)
+```
+
+The default configuration admits `Info` and above. It does not guess which
+application values are sensitive or activate sensitivity rules. Override only
+the behavior the application needs to change:
+
+```ocaml
+let config =
+  Observe.Config.create_exn ~service:"orders"
+    ~min_level:Observe.Level.Debug
+    ()
 ```
 
 The initializer installs Lwt callback-local context, the Unix wall clock,
