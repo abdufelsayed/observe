@@ -71,13 +71,11 @@ let render_annotations renderer annotations =
     annotations;
   Pretty.finish renderer nested
 
-let render_point_correlation renderer reference =
-  Pretty.newline renderer;
-  render_text_field renderer ~last:true ~name:"operation"
-    (operation_label reference)
+let render_point_correlation renderer ~last reference =
+  render_text_field renderer ~last ~name:"operation" (operation_label reference)
 
-let render_structured_point renderer correlation value =
-  let event_fields = Snapshot.root_field_count value in
+let render_structured_point renderer correlation fields =
+  let event_fields = Snapshot.root_field_count fields in
   Pretty.newline renderer;
   Option.iter
     (fun reference ->
@@ -89,14 +87,14 @@ let render_structured_point renderer correlation value =
     let nested = Pretty.place renderer Pretty.Root ~scalar:true in
     Pretty.empty_record renderer;
     Pretty.finish renderer nested)
-  else Snapshot.append_root_pretty_fields renderer ~trailing:0 value
+  else Snapshot.append_root_pretty_fields renderer ~trailing:0 fields
 
-let render_wide renderer operation value annotations =
+let render_wide renderer operation fields annotations =
   Pretty.space renderer;
   Pretty.duration renderer (Log.operation_duration_ns operation);
   Pretty.newline renderer;
   let parent = Log.operation_parent operation in
-  let event_fields = Snapshot.root_field_count value in
+  let event_fields = Snapshot.root_field_count fields in
   let has_logs = annotations <> [] in
   let after_id =
     (if Option.is_some parent then 1 else 0)
@@ -117,7 +115,7 @@ let render_wide renderer operation value annotations =
     Pretty.newline renderer;
     Snapshot.append_root_pretty_fields renderer
       ~trailing:(if has_logs then 1 else 0)
-      value);
+      fields);
   if has_logs then (
     Pretty.newline renderer;
     render_annotations renderer annotations)
@@ -136,13 +134,23 @@ let pretty_with_line_feed line_feed style =
             add_header renderer ~scope:tag log;
             Pretty.space renderer;
             Pretty.trusted_text renderer message;
-            Option.iter (render_point_correlation renderer) correlation
-        | Point { correlation }, Structured { value; _ } ->
+            let fields = Log.fields log in
+            let event_fields = Snapshot.root_field_count fields in
+            if Option.is_some correlation || event_fields > 0 then (
+              Pretty.newline renderer;
+              Option.iter
+                (render_point_correlation renderer ~last:(event_fields = 0))
+                correlation;
+              if Option.is_some correlation && event_fields > 0 then
+                Pretty.newline renderer;
+              if event_fields > 0 then
+                Snapshot.append_root_pretty_fields renderer ~trailing:0 fields)
+        | Point { correlation }, Structured _ ->
             add_header renderer ~scope:(Log.service log) log;
-            render_structured_point renderer correlation value
-        | Wide { operation; annotations }, Structured { value; _ } ->
+            render_structured_point renderer correlation (Log.fields log)
+        | Wide { operation; annotations }, Structured _ ->
             add_header renderer ~scope:(Log.operation_name operation) log;
-            render_wide renderer operation value annotations
+            render_wide renderer operation (Log.fields log) annotations
         | Wide _, Text _ -> raise (Invalid_argument "wide text event"));
         if line_feed then Pretty.newline renderer;
         Ok (Pretty.contents renderer)
@@ -221,12 +229,15 @@ let append_correlation_fields buffer ~first reference =
   append_named_string buffer ~first "operation_id"
     (Log.operation_reference_id reference)
 
-let append_event_fields buffer ~first = function
-  | Log.Text { tag; message } ->
-      let first = append_named_string buffer ~first "tag" tag in
-      append_named_string buffer ~first "message" message
-  | Log.Structured { value; _ } ->
-      Snapshot.append_root_json_fields buffer ~first value
+let append_event_fields buffer ~first log =
+  let first =
+    match Log.event log with
+    | Log.Text { tag; message } ->
+        let first = append_named_string buffer ~first "tag" tag in
+        append_named_string buffer ~first "message" message
+    | Log.Structured _ -> first
+  in
+  Snapshot.append_root_json_fields buffer ~first (Log.fields log)
 
 let append_annotations buffer ~first annotations =
   if annotations = [] then first
@@ -280,7 +291,7 @@ let append_json_object buffer log =
         (append_correlation_fields buffer ~first reference, [])
     | Log.Point { correlation = None } -> (first, [])
   in
-  let first = append_event_fields buffer ~first (Log.event log) in
+  let first = append_event_fields buffer ~first log in
   ignore (append_annotations buffer ~first annotations);
   Buffer.add_char buffer '}'
 

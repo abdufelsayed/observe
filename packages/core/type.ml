@@ -11,6 +11,10 @@ type 'a t = {
     (Snapshot.value, Snapshot.error) result;
   record_name : string option;
   field_policy : 'a field_policy;
+  (* Atomic freezers either reserve their own footprint in one operation or
+     delegate to a freezer that already owns rollback. They cannot leave
+     partial context state when a reservation fails. *)
+  atomic_freeze : bool;
 }
 (** A description keeps the Repr machine for interoperability together with
     Observe's direct writers. [plan] classifies and projects a value exactly
@@ -27,16 +31,28 @@ let add_field_name buffer ~first name =
   if not first then Buffer.add_char buffer ',';
   Json_writer.name buffer name
 
-let guard_freeze freeze context ~depth value =
-  match Snapshot.check_depth ~depth with
+let guard_freeze ~atomic_freeze freeze context ~depth value =
+  match Snapshot.check_depth context ~depth with
+  | Error Snapshot.Limit_exceeded ->
+      Snapshot.truncated context ~depth Snapshot.Depth
   | Error _ as error -> error
-  | Ok () -> freeze context ~depth value
+  | Ok () when atomic_freeze -> freeze context ~depth value
+  | Ok () -> Snapshot.localize_apply context ~depth freeze value
 
-let make ?omit_field ?record_name ~plan ~freeze repr json =
+let make ?omit_field ?record_name ?(atomic_freeze = false) ~plan ~freeze repr
+    json =
   let field_policy =
     match omit_field with None -> Required | Some omit -> Omit_if omit
   in
-  { repr; json; plan; freeze = guard_freeze freeze; record_name; field_policy }
+  {
+    repr;
+    json;
+    plan;
+    freeze = guard_freeze ~atomic_freeze freeze;
+    record_name;
+    field_policy;
+    atomic_freeze;
+  }
 
 let write_field description buffer first name value =
   match description.field_policy with
@@ -50,15 +66,15 @@ let with_json description json = { description with json }
 let with_plan description plan = { description with plan }
 
 let with_freeze description freeze =
-  { description with freeze = guard_freeze freeze }
+  { description with freeze = guard_freeze ~atomic_freeze:false freeze }
 
 let with_repr description repr = { description with repr }
 
 let freeze_into description context ~depth value =
   description.freeze context ~depth value
 
-let freeze description value =
-  let context = Snapshot.create_context () in
+let freeze ?limits description value =
+  let context = Snapshot.create_context ?limits () in
   match description.freeze context ~depth:0 value with
   | Ok value -> Ok (Snapshot.seal context value)
   | Error _ as error -> error
@@ -73,7 +89,7 @@ type 'a description = 'a t
 open Pretty
 
 let scalar_description ?omit_field ~freeze repr json append =
-  make ?omit_field ~freeze
+  make ?omit_field ~atomic_freeze:true ~freeze
     ~plan:(fun value -> Scalar (fun renderer -> append renderer value))
     repr json
 
@@ -180,29 +196,42 @@ let plan_list description values =
           finish renderer nested)
 
 let freeze_list_values description context ~depth values =
-  let rec collect count frozen = function
-    | [] -> Snapshot.list context ~depth (List.rev frozen)
-    | _ when count >= Snapshot.width_limit ->
-        Result.Error Snapshot.Limit_exceeded
-    | value :: rest -> (
-        match description.freeze context ~depth:(depth + 1) value with
-        | Result.Error _ as error -> error
-        | Ok value -> collect (count + 1) (value :: frozen) rest)
-  in
-  collect 0 [] values
+  Result.bind (Snapshot.List_builder.create context ~depth) (fun builder ->
+      let rec collect = function
+        | [] -> Snapshot.List_builder.finish builder
+        | value :: rest -> (
+            match Snapshot.List_builder.prepare builder with
+            | Snapshot.Stop -> Snapshot.List_builder.finish builder
+            | Snapshot.Ready -> (
+                match description.freeze context ~depth:(depth + 1) value with
+                | Result.Error _ as error -> error
+                | Ok value -> (
+                    match Snapshot.List_builder.add builder value with
+                    | Snapshot.Stop -> Snapshot.List_builder.finish builder
+                    | Snapshot.Ready -> collect rest)))
+      in
+      collect values)
 
 let freeze_sequence_values description context ~depth values =
-  let rec collect count frozen values =
-    match values () with
-    | Seq.Nil -> Snapshot.list context ~depth (List.rev frozen)
-    | Seq.Cons _ when count >= Snapshot.width_limit ->
-        Result.Error Snapshot.Limit_exceeded
-    | Seq.Cons (value, rest) -> (
-        match description.freeze context ~depth:(depth + 1) value with
-        | Result.Error _ as error -> error
-        | Ok value -> collect (count + 1) (value :: frozen) rest)
-  in
-  collect 0 [] values
+  Result.bind (Snapshot.List_builder.create context ~depth) (fun builder ->
+      let rec collect values =
+        if not (Snapshot.List_builder.has_capacity builder) then
+          Snapshot.List_builder.finish builder
+        else
+          match values () with
+          | Seq.Nil -> Snapshot.List_builder.finish builder
+          | Seq.Cons (value, rest) -> (
+              match Snapshot.List_builder.prepare builder with
+              | Snapshot.Stop -> Snapshot.List_builder.finish builder
+              | Snapshot.Ready -> (
+                  match description.freeze context ~depth:(depth + 1) value with
+                  | Result.Error _ as error -> error
+                  | Ok value -> (
+                      match Snapshot.List_builder.add builder value with
+                      | Snapshot.Stop -> Snapshot.List_builder.finish builder
+                      | Snapshot.Ready -> collect rest)))
+      in
+      collect values)
 
 let list ?len description =
   make
@@ -227,26 +256,50 @@ let array ?len description =
             finish renderer nested)
   in
   let freeze context ~depth values =
-    let length = Array.length values in
-    if length > Snapshot.width_limit then Result.Error Snapshot.Limit_exceeded
-    else
-      let rec collect index frozen =
-        if index = length then Snapshot.list context ~depth (List.rev frozen)
-        else
-          match
-            description.freeze context ~depth:(depth + 1) values.(index)
-          with
-          | Result.Error _ as error -> error
-          | Ok value -> collect (index + 1) (value :: frozen)
-      in
-      collect 0 []
+    Result.bind (Snapshot.List_builder.create context ~depth) (fun builder ->
+        let length = Array.length values in
+        let rec collect index =
+          if index = length then Snapshot.List_builder.finish builder
+          else
+            match Snapshot.List_builder.prepare builder with
+            | Snapshot.Stop -> Snapshot.List_builder.finish builder
+            | Snapshot.Ready -> (
+                match
+                  description.freeze context ~depth:(depth + 1) values.(index)
+                with
+                | Result.Error _ as error -> error
+                | Ok value -> (
+                    match Snapshot.List_builder.add builder value with
+                    | Snapshot.Stop -> Snapshot.List_builder.finish builder
+                    | Snapshot.Ready -> collect (index + 1)))
+        in
+        collect 0)
   in
   make ~plan ~freeze
     (Repr.array ?len description.repr)
     (Json_writer.array description.json)
 
+let freeze_fixed_values context ~depth
+    (materializers :
+      (unit -> (Snapshot.value, Snapshot.error) Stdlib.result) list) =
+  Result.bind (Snapshot.List_builder.create context ~depth) (fun builder ->
+      let rec collect = function
+        | [] -> Snapshot.List_builder.finish builder
+        | materialize :: rest -> (
+            match Snapshot.List_builder.prepare builder with
+            | Snapshot.Stop -> Snapshot.List_builder.finish builder
+            | Snapshot.Ready -> (
+                match materialize () with
+                | Result.Error _ as error -> error
+                | Result.Ok value -> (
+                    match Snapshot.List_builder.add builder value with
+                    | Snapshot.Stop -> Snapshot.List_builder.finish builder
+                    | Snapshot.Ready -> collect rest)))
+      in
+      collect materializers)
+
 let option description =
-  make
+  make ~atomic_freeze:true
     ~omit_field:(function None -> true | Some _ -> false)
     ~plan:(function
       | None -> Scalar (fun renderer -> null renderer)
@@ -277,13 +330,11 @@ let pair left right =
           finish renderer nested)
   in
   let freeze context ~depth (left_value, right_value) =
-    match left.freeze context ~depth:(depth + 1) left_value with
-    | Result.Error _ as error -> error
-    | Ok left_value -> (
-        match right.freeze context ~depth:(depth + 1) right_value with
-        | Result.Error _ as error -> error
-        | Ok right_value ->
-            Snapshot.list context ~depth [ left_value; right_value ])
+    freeze_fixed_values context ~depth
+      [
+        (fun () -> left.freeze context ~depth:(depth + 1) left_value);
+        (fun () -> right.freeze context ~depth:(depth + 1) right_value);
+      ]
   in
   make ~plan ~freeze (Repr.pair left.repr right.repr) json
 
@@ -309,15 +360,12 @@ let triple first second third =
           finish renderer nested)
   in
   let freeze context ~depth (a, b, c) =
-    match first.freeze context ~depth:(depth + 1) a with
-    | Result.Error _ as error -> error
-    | Ok a -> (
-        match second.freeze context ~depth:(depth + 1) b with
-        | Result.Error _ as error -> error
-        | Ok b -> (
-            match third.freeze context ~depth:(depth + 1) c with
-            | Result.Error _ as error -> error
-            | Ok c -> Snapshot.list context ~depth [ a; b; c ]))
+    freeze_fixed_values context ~depth
+      [
+        (fun () -> first.freeze context ~depth:(depth + 1) a);
+        (fun () -> second.freeze context ~depth:(depth + 1) b);
+        (fun () -> third.freeze context ~depth:(depth + 1) c);
+      ]
   in
   make ~plan ~freeze (Repr.triple first.repr second.repr third.repr) json
 
@@ -345,18 +393,13 @@ let quad first second third fourth =
           finish renderer nested)
   in
   let freeze context ~depth (a, b, c, d) =
-    match first.freeze context ~depth:(depth + 1) a with
-    | Result.Error _ as error -> error
-    | Ok a -> (
-        match second.freeze context ~depth:(depth + 1) b with
-        | Result.Error _ as error -> error
-        | Ok b -> (
-            match third.freeze context ~depth:(depth + 1) c with
-            | Result.Error _ as error -> error
-            | Ok c -> (
-                match fourth.freeze context ~depth:(depth + 1) d with
-                | Result.Error _ as error -> error
-                | Ok d -> Snapshot.list context ~depth [ a; b; c; d ])))
+    freeze_fixed_values context ~depth
+      [
+        (fun () -> first.freeze context ~depth:(depth + 1) a);
+        (fun () -> second.freeze context ~depth:(depth + 1) b);
+        (fun () -> third.freeze context ~depth:(depth + 1) c);
+        (fun () -> fourth.freeze context ~depth:(depth + 1) d);
+      ]
   in
   make ~plan ~freeze
     (Repr.quad first.repr second.repr third.repr fourth.repr)
@@ -391,15 +434,13 @@ let result ok error =
               (error.plan value);
             finish renderer nested)
   in
+  let freeze_case context ~depth name description value =
+    Snapshot.build_object_single context ~depth name (fun () ->
+        description.freeze context ~depth:(depth + 1) value)
+  in
   let freeze context ~depth = function
-    | Ok value -> (
-        match ok.freeze context ~depth:(depth + 1) value with
-        | Result.Error _ as error -> error
-        | Ok value -> Snapshot.object_ context ~depth [ ("ok", value) ])
-    | Error value -> (
-        match error.freeze context ~depth:(depth + 1) value with
-        | Result.Error _ as error -> error
-        | Ok value -> Snapshot.object_ context ~depth [ ("error", value) ])
+    | Ok value -> freeze_case context ~depth "ok" ok value
+    | Error value -> freeze_case context ~depth "error" error value
   in
   make ~plan ~freeze (Repr.result ok.repr error.repr) json
 
@@ -453,7 +494,7 @@ let seq description =
   make ~plan ~freeze repr json
 
 let ref description =
-  make
+  make ~atomic_freeze:true
     ~plan:(fun value -> description.plan !value)
     ~freeze:(fun context ~depth value ->
       description.freeze context ~depth !value)
@@ -461,7 +502,7 @@ let ref description =
     (fun buffer value -> description.json buffer !value)
 
 let lazy_t description =
-  make
+  make ~atomic_freeze:true
     ~plan:(fun value -> description.plan (Lazy.force value))
     ~freeze:(fun context ~depth value ->
       description.freeze context ~depth (Lazy.force value))
@@ -543,28 +584,32 @@ let empty =
     ~plan:(fun (value : empty) -> match value with _ -> .)
     ~freeze:(fun _ ~depth:_ (value : empty) -> match value with _ -> .)
 
+type 'record freeze_record_field =
+  | Freeze_record_field : {
+      name : (string, Snapshot.error) result;
+      project : 'record -> 'field;
+      omitted : 'field -> bool;
+      freeze :
+        Snapshot.context ->
+        depth:int ->
+        'field ->
+        (Snapshot.value, Snapshot.error) result;
+    }
+      -> 'record freeze_record_field
+
 type ('a, 'b, 'c) open_record = {
   record_name : string;
   repr_record : ('a, 'b, 'c) Repr.open_record;
   json_fields_rev : (Buffer.t -> first:bool -> 'a -> bool) list;
   plan_fields_rev : ('a -> string * Pretty.rendered) list;
-  freeze_fields_rev :
-    (Snapshot.context ->
-    depth:int ->
-    'a ->
-    ((string * Snapshot.value) option, Snapshot.error) result)
-    list;
+  freeze_fields_rev : 'a freeze_record_field list;
 }
 
 type ('a, 'b) field = {
   repr_field : ('a, 'b) Repr.field;
   json_record_field : Buffer.t -> first:bool -> 'a -> bool;
   plan_record_field : 'a -> string * Pretty.rendered;
-  freeze_record_field :
-    Snapshot.context ->
-    depth:int ->
-    'a ->
-    ((string * Snapshot.value) option, Snapshot.error) result;
+  freeze_record_field : 'a freeze_record_field;
 }
 
 let record name constructor =
@@ -585,17 +630,16 @@ let field name description getter =
         write_field description buffer first name (getter record));
     plan_record_field = (fun record -> (name, description.plan (getter record)));
     freeze_record_field =
-      (fun context ~depth record ->
-        match owned_name with
-        | Error _ as error -> error
-        | Ok name -> (
-            let value = getter record in
-            match description.field_policy with
-            | Omit_if omit when omit value -> Ok None
-            | Required | Omit_if _ ->
-                Result.map
-                  (fun value -> Some (name, value))
-                  (description.freeze context ~depth value)));
+      Freeze_record_field
+        {
+          name = owned_name;
+          project = getter;
+          omitted =
+            (match description.field_policy with
+            | Required -> fun _ -> false
+            | Omit_if omit -> omit);
+          freeze = description.freeze;
+        };
   }
 
 let ( |+ ) record field =
@@ -642,16 +686,39 @@ let sealr record =
             finish renderer nested)
   in
   let freeze context ~depth value =
-    let rec collect fields frozen =
-      match fields with
-      | [] -> Snapshot.object_with_owned_names context ~depth (List.rev frozen)
-      | field :: rest -> (
-          match field context ~depth:(depth + 1) value with
-          | Result.Error _ as error -> error
-          | Ok None -> collect rest frozen
-          | Ok (Some field) -> collect rest (field :: frozen))
-    in
-    collect freeze_fields []
+    Result.bind (Snapshot.Object_builder.create context ~depth) (fun builder ->
+        let rec collect = function
+          | [] -> Snapshot.Object_builder.finish builder
+          | Freeze_record_field field :: rest -> (
+              if not (Snapshot.Object_builder.has_capacity builder) then
+                Snapshot.Object_builder.finish builder
+              else
+                match field.name with
+                | Error _ as error -> error
+                | Ok name -> (
+                    let projected = field.project value in
+                    if field.omitted projected then collect rest
+                    else
+                      match
+                        Snapshot.Object_builder.prepare_owned builder name
+                      with
+                      | Error _ as error -> error
+                      | Ok Snapshot.Stop ->
+                          Snapshot.Object_builder.finish builder
+                      | Ok Snapshot.Ready -> (
+                          match
+                            field.freeze context ~depth:(depth + 1) projected
+                          with
+                          | Error _ as error -> error
+                          | Ok value -> (
+                              match
+                                Snapshot.Object_builder.add builder value
+                              with
+                              | Snapshot.Stop ->
+                                  Snapshot.Object_builder.finish builder
+                              | Snapshot.Ready -> collect rest))))
+        in
+        collect freeze_fields)
   in
   make ~plan ~freeze ~record_name:record.record_name repr json
 
@@ -777,7 +844,7 @@ let enum name cases =
         Snapshot.variant context ~depth ~polymorphic:false name None
     | None -> Result.Error Snapshot.Conversion_failed
   in
-  make ~plan ~freeze repr json
+  make ~atomic_freeze:true ~plan ~freeze repr json
 
 (* [mu] forwards through one coherent writer record. [Repr.mu] may re-invoke
    the builder when a generic that unrolls (pretty printing, equality, size,
@@ -802,9 +869,14 @@ let mu (type value) (make_description : value description -> value description)
     | None -> used_too_early "pretty plan"
   in
   let forward_freeze context ~depth value =
-    match !cell with
-    | Some description -> description.freeze context ~depth value
-    | None -> used_too_early "freezer"
+    match Snapshot.enter context with
+    | Error Snapshot.Limit_exceeded ->
+        Snapshot.truncated context ~depth Snapshot.Nodes
+    | Error _ as error -> error
+    | Ok () -> (
+        match !cell with
+        | Some description -> description.freeze context ~depth value
+        | None -> used_too_early "freezer")
   in
   let repr =
     Repr.mu (fun machine ->
@@ -813,9 +885,10 @@ let mu (type value) (make_description : value description -> value description)
             repr = machine;
             json = forward_json;
             plan = forward_plan;
-            freeze = forward_freeze;
+            freeze = guard_freeze ~atomic_freeze:false forward_freeze;
             record_name = None;
             field_policy = Required;
+            atomic_freeze = false;
           }
         in
         let description = make_description recursive in
@@ -826,12 +899,13 @@ let mu (type value) (make_description : value description -> value description)
     repr;
     json = forward_json;
     plan = forward_plan;
-    freeze = forward_freeze;
+    freeze = guard_freeze ~atomic_freeze:false forward_freeze;
     record_name =
       (match !cell with
       | Some description -> description.record_name
       | None -> None);
     field_policy = Required;
+    atomic_freeze = false;
   }
 
 let mu2 (type left right)
@@ -865,14 +939,24 @@ let mu2 (type left right)
     | None -> used_too_early "right pretty plan"
   in
   let forward_freeze_left context ~depth value =
-    match !cell with
-    | Some (description, _) -> description.freeze context ~depth value
-    | None -> used_too_early "left freezer"
+    match Snapshot.enter context with
+    | Error Snapshot.Limit_exceeded ->
+        Snapshot.truncated context ~depth Snapshot.Nodes
+    | Error _ as error -> error
+    | Ok () -> (
+        match !cell with
+        | Some (description, _) -> description.freeze context ~depth value
+        | None -> used_too_early "left freezer")
   in
   let forward_freeze_right context ~depth value =
-    match !cell with
-    | Some (_, description) -> description.freeze context ~depth value
-    | None -> used_too_early "right freezer"
+    match Snapshot.enter context with
+    | Error Snapshot.Limit_exceeded ->
+        Snapshot.truncated context ~depth Snapshot.Nodes
+    | Error _ as error -> error
+    | Ok () -> (
+        match !cell with
+        | Some (_, description) -> description.freeze context ~depth value
+        | None -> used_too_early "right freezer")
   in
   let left_repr, right_repr =
     Repr.mu2 (fun left_machine right_machine ->
@@ -881,9 +965,10 @@ let mu2 (type left right)
             repr = left_machine;
             json = forward_json_left;
             plan = forward_plan_left;
-            freeze = forward_freeze_left;
+            freeze = guard_freeze ~atomic_freeze:false forward_freeze_left;
             record_name = None;
             field_policy = Required;
+            atomic_freeze = false;
           }
         in
         let right_recursive =
@@ -891,9 +976,10 @@ let mu2 (type left right)
             repr = right_machine;
             json = forward_json_right;
             plan = forward_plan_right;
-            freeze = forward_freeze_right;
+            freeze = guard_freeze ~atomic_freeze:false forward_freeze_right;
             record_name = None;
             field_policy = Required;
+            atomic_freeze = false;
           }
         in
         let left_description, right_description =
@@ -908,23 +994,25 @@ let mu2 (type left right)
       repr = left_repr;
       json = forward_json_left;
       plan = forward_plan_left;
-      freeze = forward_freeze_left;
+      freeze = guard_freeze ~atomic_freeze:false forward_freeze_left;
       record_name =
         (match !cell with
         | Some (description, _) -> description.record_name
         | None -> None);
       field_policy = Required;
+      atomic_freeze = false;
     },
     {
       repr = right_repr;
       json = forward_json_right;
       plan = forward_plan_right;
-      freeze = forward_freeze_right;
+      freeze = guard_freeze ~atomic_freeze:false forward_freeze_right;
       record_name =
         (match !cell with
         | Some (_, description) -> description.record_name
         | None -> None);
       field_policy = Required;
+      atomic_freeze = false;
     } )
 
 type +'a staged = 'a Repr.staged
@@ -992,7 +1080,8 @@ let map description decode encode =
     | Required -> None
     | Omit_if omit -> Some (fun value -> omit (encode value))
   in
-  make ?omit_field ?record_name:description.record_name ~plan ~freeze repr json
+  make ?omit_field ?record_name:description.record_name ~atomic_freeze:true
+    ~plan ~freeze repr json
 
 module Ppx_runtime = struct
   type renderer = Pretty.t
@@ -1023,13 +1112,18 @@ module Ppx_runtime = struct
   let with_recursive_freeze description make_freeze =
     let self = Stdlib.ref None in
     let freeze context ~depth value =
-      let description =
-        match !self with
-        | Some description -> description
-        | None ->
-            invalid_arg "Observe.Ppx_runtime: recursive freezer unavailable"
-      in
-      make_freeze description context ~depth value
+      match Snapshot.enter context with
+      | Error Snapshot.Limit_exceeded ->
+          Snapshot.truncated context ~depth Snapshot.Nodes
+      | Error _ as error -> error
+      | Ok () ->
+          let description =
+            match !self with
+            | Some description -> description
+            | None ->
+                invalid_arg "Observe.Ppx_runtime: recursive freezer unavailable"
+          in
+          make_freeze description context ~depth value
     in
     let description = with_freeze description freeze in
     self := Some description;

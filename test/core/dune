@@ -6,6 +6,7 @@
   (alias formatter/observe-formatter-contracts)
   (alias capture/observe-capture-contracts)
   (alias observer/observe-observer-state)
+  (alias enrichment/observe-enrichment-contracts)
   (alias concurrency/observe-concurrency-smoke)
   (alias workload/observe-workload-laws)
   (alias ppx/observe-ppx-contracts)))

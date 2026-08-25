@@ -95,6 +95,71 @@ let config =
     ()
 ```
 
+Reusable enrichers add structured context to the same completed fields as the
+caller. Their callbacks remain lazy until an admitted point log is completed or
+a wide log is sealed:
+
+```ocaml
+let deployment =
+  Observe.Logs.Enricher.create_exn ~name:"deployment" (fun () ->
+      Observe.Value.object_
+        [ "region", Observe.Value.string "eu-west-1"
+        ; "release", Observe.Value.string release_id
+        ])
+
+let trace =
+  Observe.Logs.Enricher.create_exn ~name:"trace"
+    ~authoritative_fields:["trace_id"]
+    (fun () ->
+      Observe.Value.object_
+        ["trace_id", Observe.Value.string (current_trace_id ())])
+
+let limits =
+  Observe.Logs.Limits.create_exn
+    ~max_depth:32
+    ~max_object_fields:256
+    ~max_collection_length:512
+    ()
+
+let config =
+  Observe.Config.create_exn ~service:"orders"
+    ~enrichers:[deployment; trace]
+    ~limits
+    ()
+```
+
+Caller-authored fields win ordinary collisions. Explicit authority applies
+only to the listed non-reserved root fields; conflicting authority and duplicate
+enricher names are rejected when the configuration is created. One raising,
+invalid, or reserved-field contribution is omitted and diagnosed without
+changing application control flow for ordinary callback failures. Enricher
+callbacks are synchronous and may run concurrently for different observations,
+so they must be safe for concurrent invocation and must not recursively emit
+Observe logs. Configured limit exhaustion becomes bounded truncation or
+omission; runtime control exceptions propagate unchanged. Enricher list order
+never chooses a collision winner.
+
+`Observe.Logs.Limits.default` supplies finite bounds for depth, object fields,
+collections, individual strings and byte values, total nodes, and deterministic
+materialized size. A custom value can tighten or raise those finite bounds;
+there is no unbounded mode. When safe, Observe preserves the completed prefix
+and marks the affected value as truncated. The total-size value charges 32 bytes
+per value node, 144 bytes plus its UTF-8 name per object field, 24 bytes per list
+entry, string and byte payloads, 16 bytes plus its UTF-8 name per variant, 16
+bytes for a partial truncation marker, and the UTF-8 bytes of completed-log
+metadata. Metadata includes service, environment, version, text or schema
+identity, operation names and identifiers, parent references, and annotation
+messages. The per-string bound also covers field names, constructor names, and
+metadata strings. The node bound limits both retained value nodes and productive
+recursive traversal steps. This is a stable Observe accounting budget, not an
+exact OCaml heap measurement.
+
+Capture exposes truncation through `Observe.Value.view`. JSON and pretty output
+render a stable `<truncated:reason>` marker. A truncated list appends that marker
+after its safe prefix. A truncated object adds `_observe_truncated`; if the
+caller already owns that name, Observe appends underscores until the marker name
+is collision-free.
+
 Linking `observe-lwt-unix` allocates no writer and starts no background work.
 The initializer installs Lwt callback-local context, the Unix wall clock,
 cryptographically random UUID v4 operation identities, and automatic output on
@@ -591,18 +656,17 @@ Structured values can be traversed without parsing their JSON projection:
 
 ```ocaml
 let cart_id log =
-  match Observe.Log.event log with
-  | Observe.Log.Text _ -> None
-  | Observe.Log.Structured { value; _ } ->
-      match Observe.Value.view value with
-      | `Object fields ->
-          List.find_map
-            (fun (name, value) ->
-              match name, Observe.Value.view value with
-              | "cart_id", `String id -> Some id
-              | _ -> None)
-            fields
-      | _ -> None
+  let fields =
+    match Observe.Value.view (Observe.Log.fields log) with
+    | `Object fields | `Truncated_object (fields, _) -> fields
+    | _ -> []
+  in
+  List.find_map
+    (fun (name, value) ->
+      match name, Observe.Value.view value with
+      | "cart_id", `String id -> Some id
+      | _ -> None)
+    fields
 ```
 
 A third-party formatter or drain receives this same public immutable value:

@@ -22,8 +22,9 @@ let barrier participants =
       done;
     Mutex.unlock mutex
 
-let config ?console ?drains () =
-  Test_io.config ?console ?drains ~min_level:Observe.Level.Debug "concurrency"
+let config ?console ?drains ?limits () =
+  Test_io.config ?console ?drains ?limits ~min_level:Observe.Level.Debug
+    "concurrency"
 
 let contains text fragment =
   let text_length = String.length text in
@@ -238,8 +239,8 @@ let wide_contribution_and_seal work =
       let json =
         match Observe.Log.event log with
         | Observe.Log.Text _ -> Alcotest.fail "wide body was text"
-        | Observe.Log.Structured { value; _ } ->
-            Observe.Value.frozen_to_json_string value
+        | Observe.Log.Structured _ ->
+            Observe.Value.frozen_to_json_string (Observe.Log.fields log)
       in
       let separators =
         String.fold_left
@@ -254,6 +255,88 @@ let wide_contribution_and_seal work =
            (Observe.Capture.diagnostics capture)
            Observe.Diagnostics.Post_seal_emit)
   | _ -> Alcotest.fail "concurrent emit published more than once"
+
+let wide_bounded_rejection_race () =
+  let limits = Observe.Logs.Limits.create_exn ~max_total_bytes:300 () in
+  let observer = Observer.create (Test_io.Host.create ()) in
+  let result =
+    Observer.with_capture observer ~config:(config ~limits ()) (fun capture ->
+        let wide = Observe.Logs.create ~name:"bounded-wide" () in
+        Observe.Logs.set wide (fun m ->
+            let open Observe.Logs in
+            m.untyped |+ m.field "first" Observe.Type.bool true |> m.seal);
+        let entered = Atomic.make false in
+        let release = Atomic.make false in
+        let setter =
+          Thread.create
+            (fun () ->
+              Observe.Logs.set wide (fun m ->
+                  Atomic.set entered true;
+                  while not (Atomic.get release) do
+                    Thread.yield ()
+                  done;
+                  let open Observe.Logs in
+                  m.untyped |+ m.field "second" Observe.Type.bool true |> m.seal))
+            ()
+        in
+        let rec wait_for_entered attempts =
+          if Atomic.get entered then true
+          else if attempts = 0 then false
+          else (
+            Thread.yield ();
+            wait_for_entered (attempts - 1))
+        in
+        Alcotest.(check bool)
+          "bounded author reserves before emission" true
+          (wait_for_entered 1_000_000);
+        let emitter_returned = Atomic.make false in
+        let emitter =
+          Thread.create
+            (fun () ->
+              Observe.Logs.emit wide;
+              Atomic.set emitter_returned true)
+            ()
+        in
+        let rec wait_for_emitter attempts =
+          Atomic.get emitter_returned
+          || attempts > 0
+             &&
+             (Thread.yield ();
+              wait_for_emitter (attempts - 1))
+        in
+        Alcotest.(check bool)
+          "emit returns while bounded author is still materializing" true
+          (wait_for_emitter 1_000_000);
+        Atomic.set release true;
+        Thread.join setter;
+        Thread.join emitter;
+        Test_io.Direct.return capture)
+  in
+  let capture =
+    match result with
+    | Ok capture -> capture
+    | Error _ -> Alcotest.fail "bounded rejection capture was rejected"
+  in
+  match Observe.Capture.logs capture with
+  | [ log ] ->
+      let json =
+        match Observe.Log.event log with
+        | Observe.Log.Text _ -> Alcotest.fail "bounded wide body was text"
+        | Observe.Log.Structured _ ->
+            Observe.Value.frozen_to_json_string (Observe.Log.fields log)
+      in
+      Alcotest.(check bool)
+        "safe earlier body survives bounded contribution" true
+        (contains json "\"first\":true");
+      Alcotest.(check bool)
+        "bounded contribution is omitted" false
+        (contains json "\"second\":true");
+      Alcotest.(check int)
+        "bounded contribution is diagnosed" 1
+        (Test_io.diagnostic_count
+           (Observe.Capture.diagnostics capture)
+           Observe.Diagnostics.Canonical_freeze_failed)
+  | _ -> Alcotest.fail "bounded rejection did not publish exactly once"
 
 let wide_set_level_emit_race work =
   let work = max 2 work in
@@ -311,8 +394,8 @@ let wide_set_level_emit_race work =
       let json =
         match Observe.Log.event log with
         | Observe.Log.Text _ -> Alcotest.fail "full wide race body was text"
-        | Observe.Log.Structured { value; _ } ->
-            Observe.Value.frozen_to_json_string value
+        | Observe.Log.Structured _ ->
+            Observe.Value.frozen_to_json_string (Observe.Log.fields log)
       in
       let error_committed = contains json "\"error\":" in
       let ordinary_committed =
@@ -505,8 +588,8 @@ let wide_authoring_linearization () =
       let json =
         match Observe.Log.event log with
         | Observe.Log.Text _ -> Alcotest.fail "wide body was text"
-        | Observe.Log.Structured { value; _ } ->
-            Observe.Value.frozen_to_json_string value
+        | Observe.Log.Structured _ ->
+            Observe.Value.frozen_to_json_string (Observe.Log.fields log)
       in
       Alcotest.(check bool)
         "a pre-seal reserved callback contributes before completion" true
@@ -572,8 +655,8 @@ let wide_parallel_materialization () =
       let json =
         match Observe.Log.event log with
         | Observe.Log.Text _ -> Alcotest.fail "wide body was text"
-        | Observe.Log.Structured { value; _ } ->
-            Observe.Value.frozen_to_json_string value
+        | Observe.Log.Structured _ ->
+            Observe.Value.frozen_to_json_string (Observe.Log.fields log)
       in
       Alcotest.(check bool)
         "both parallel contributions complete before emission" true
@@ -612,6 +695,7 @@ let () =
   | "diagnostic-counting" -> diagnostic_counting work
   | "producer-close-race" -> producer_close_race ()
   | "wide-contribution-and-seal" -> wide_contribution_and_seal work
+  | "wide-bounded-rejection-race" -> wide_bounded_rejection_race ()
   | "wide-set-level-emit-race" -> wide_set_level_emit_race work
   | "wide-annotation-emit-race" -> wide_annotation_emit_race work
   | "wide-authoring-linearization" -> wide_authoring_linearization ()

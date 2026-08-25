@@ -91,13 +91,14 @@ let inspect log =
   let body =
     match Observe.Log.event log with
     | Observe.Log.Text { tag; message } -> `Text (tag, message)
-    | Observe.Log.Structured { origin; value } ->
+    | Observe.Log.Structured { origin; _ } ->
         let origin =
           match origin with
           | Observe.Log.Open -> `Open
           | Observe.Log.Declared name -> `Declared name
         in
-        `Structured (origin, Observe.Value.frozen_to_json_string value)
+        `Structured
+          (origin, Observe.Value.frozen_to_json_string (Observe.Log.fields log))
   in
   let correlation, operation =
     match Observe.Log.kind log with

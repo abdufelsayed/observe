@@ -11,7 +11,7 @@ type kind =
 
 type event =
   | Text of { tag : string; message : string }
-  | Structured of { origin : structured_origin; value : Value.frozen }
+  | Structured of { origin : structured_origin }
 
 and structured_origin = Open | Declared of string
 
@@ -21,6 +21,7 @@ val version : t -> string option
 val timestamp : t -> Timestamp.t
 val level : t -> Level.t
 val event : t -> event
+val fields : t -> Value.frozen
 
 val kind : t -> kind
 (** Complete point or wide meaning. Impossible combinations such as a point
@@ -41,8 +42,8 @@ val annotation_message : annotation -> string
 
 module Producer : sig
   type event =
-    | Text of { tag : string; message : string }
-    | Structured of { origin : structured_origin; value : Snapshot.fragment }
+    | Text of { tag : string; message : string; fields : Snapshot.fragment }
+    | Structured of { origin : structured_origin; fields : Snapshot.fragment }
 
   val make :
     service:string ->
@@ -51,6 +52,7 @@ module Producer : sig
     timestamp:Timestamp.t ->
     level:Level.t ->
     kind:kind ->
+    ?limits:Log_limits.t ->
     event ->
     (t, Snapshot.error) result
 

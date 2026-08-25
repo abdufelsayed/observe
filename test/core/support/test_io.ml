@@ -217,9 +217,10 @@ module Inherited_io = struct
   end
 end
 
-let config ?environment ?version ?enabled ?console ?min_level ?drains service =
+let config ?environment ?version ?enabled ?console ?min_level ?drains ?enrichers
+    ?limits service =
   Observe.Config.create_exn ~service ?environment ?version ?enabled ?console
-    ?min_level ?drains ()
+    ?min_level ?drains ?enrichers ?limits ()
 
 let diagnostic_count entries kind =
   List.fold_left

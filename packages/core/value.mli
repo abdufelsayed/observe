@@ -15,6 +15,15 @@ type frozen = Snapshot.t
 type integer =
   [ `Int of int | `Int32 of int32 | `Int64 of int64 | `Decimal of string ]
 
+type truncation =
+  | Depth
+  | Object_fields
+  | Collection
+  | String_bytes
+  | Bytes_length
+  | Nodes
+  | Total_bytes
+
 type frozen_view =
   [ `Null
   | `Bool of bool
@@ -22,6 +31,9 @@ type frozen_view =
   | `Float of float
   | `String of string
   | `Bytes of string
+  | `Truncated of truncation
+  | `Truncated_list of frozen list * truncation
+  | `Truncated_object of (string * frozen) list * truncation
   | `List of frozen list
   | `Object of (string * frozen) list
   | `Variant of string * bool * frozen option ]
@@ -48,7 +60,9 @@ val append_json : Buffer.t -> t -> (unit, json_error) result
     its length at entry. *)
 
 val append_pretty : Pretty.t -> Pretty.placement -> t -> unit
-val freeze : t -> (Snapshot.fragment, Snapshot.error) result
+
+val freeze :
+  ?limits:Log_limits.t -> t -> (Snapshot.fragment, Snapshot.error) result
 
 val freeze_into :
   t -> Snapshot.context -> depth:int -> (Snapshot.value, Snapshot.error) result

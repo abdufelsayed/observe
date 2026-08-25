@@ -86,8 +86,8 @@ let check_capture_tags name expected capture =
 let structured_json log =
   match Observe.Log.event log with
   | Observe.Log.Text _ -> Alcotest.fail "expected a structured body"
-  | Observe.Log.Structured { value; _ } ->
-      Observe.Value.frozen_to_json_string value
+  | Observe.Log.Structured _ ->
+      Observe.Value.frozen_to_json_string (Observe.Log.fields log)
 
 let contains value fragment =
   let value_length = String.length value in
@@ -653,8 +653,17 @@ let wide_annotation_bound () =
          captured := Some capture));
   let capture = Option.get !captured in
   Alcotest.(check int)
-    "annotation overflow withholds the wide event" 0
+    "annotation overflow preserves the wide event" 1
     (List.length (Observe.Capture.logs capture));
+  let retained =
+    match Observe.Capture.logs capture with
+    | [ log ] -> (
+        match Observe.Log.kind log with
+        | Observe.Log.Wide { annotations; _ } -> List.length annotations
+        | Observe.Log.Point _ -> Alcotest.fail "expected wide event")
+    | _ -> Alcotest.fail "expected one preserved wide event"
+  in
+  Alcotest.(check int) "annotation limit retains the safe prefix" 1_024 retained;
   Alcotest.(check int)
     "annotation overflow is diagnosed once" 1
     (Test_io.diagnostic_count
@@ -954,11 +963,29 @@ let canonical_bounds_and_failures () =
          Observe.Logs.info (typed_box raising_map ());
          captured := Some capture));
   let capture = Option.get !captured in
+  let rec contains_marker value =
+    match Observe.Value.view value with
+    | `Truncated _ -> true
+    | `Truncated_list _ | `Truncated_object _ -> true
+    | `Object fields ->
+        List.exists (fun (_, value) -> contains_marker value) fields
+    | `List values -> List.exists contains_marker values
+    | `Variant (_, _, Some value) -> contains_marker value
+    | `Variant (_, _, None)
+    | `Null | `Bool _ | `Integer _ | `Float _ | `String _ | `Bytes _ ->
+        false
+  in
+  let logs = Observe.Capture.logs capture in
   Alcotest.(check int)
-    "unsafe observations are withheld" 0
-    (List.length (Observe.Capture.logs capture));
+    "bounded observations retain safe snapshots" 8 (List.length logs);
+  Alcotest.(check bool)
+    "each expected bounded region has a package marker" true
+    (List.length logs >= 6
+    && List.for_all
+         (fun log -> contains_marker (Observe.Log.fields log))
+         (List.filteri (fun index _ -> index < 6) logs));
   Alcotest.(check int)
-    "each independent canonical bound is diagnosed" 8
+    "localized bounds are not diagnosed as whole failures" 0
     (Test_io.diagnostic_count
        (Observe.Capture.diagnostics capture)
        Observe.Diagnostics.Canonical_freeze_failed);
@@ -1030,18 +1057,35 @@ let aggregate_wide_bound () =
          Observe.Logs.emit wide;
          captured := Some capture));
   let capture = Option.get !captured in
+  let rec contains_marker value =
+    match Observe.Value.view value with
+    | `Truncated _ -> true
+    | `Truncated_list _ | `Truncated_object _ -> true
+    | `Object fields ->
+        List.exists (fun (_, value) -> contains_marker value) fields
+    | `List values -> List.exists contains_marker values
+    | `Variant (_, _, Some value) -> contains_marker value
+    | `Variant (_, _, None)
+    | `Null | `Bool _ | `Integer _ | `Float _ | `String _ | `Bytes _ ->
+        false
+  in
+  let logs = Observe.Capture.logs capture in
   Alcotest.(check int)
-    "aggregate width failure publishes nothing" 0
-    (List.length (Observe.Capture.logs capture));
+    "aggregate width preserves a bounded observation" 1 (List.length logs);
+  Alcotest.(check bool)
+    "aggregate width carries a localized marker" true
+    (match logs with
+    | [ log ] -> contains_marker (Observe.Log.fields log)
+    | _ -> false);
   Alcotest.(check int)
-    "aggregate width is checked after every merge" 1
+    "aggregate width is localized rather than withholding" 0
     (Test_io.diagnostic_count
        (Observe.Capture.diagnostics capture)
        Observe.Diagnostics.Canonical_freeze_failed);
   Alcotest.(check int)
-    "aggregate failure seals before later authoring" 0 !authored_after_failure;
+    "aggregate limit keeps later authoring available" 1 !authored_after_failure;
   Alcotest.(check int)
-    "post-failure set is diagnosed" 1
+    "aggregate limit does not diagnose a post-seal set" 0
     (Test_io.diagnostic_count
        (Observe.Capture.diagnostics capture)
        Observe.Diagnostics.Post_seal_set)

@@ -1,6 +1,6 @@
 type event =
   | Text of { tag : string; message : string }
-  | Structured of { origin : structured_origin; value : Value.frozen }
+  | Structured of { origin : structured_origin }
 
 and structured_origin = Open | Declared of string
 
@@ -25,6 +25,7 @@ type t = {
   timestamp : Timestamp.t;
   level : Level.t;
   event : event;
+  fields : Value.frozen;
   kind : kind;
 }
 
@@ -34,6 +35,7 @@ let version log = log.version
 let timestamp log = log.timestamp
 let level log = log.level
 let event log = log.event
+let fields log = log.fields
 let kind log = log.kind
 let operation_reference_name reference = reference.name
 let operation_reference_id reference = reference.id
@@ -45,78 +47,149 @@ let annotation_timestamp (annotation : annotation) = annotation.timestamp
 let annotation_level (annotation : annotation) = annotation.level
 let annotation_message (annotation : annotation) = annotation.message
 let completed_text ~tag ~message = Text { tag; message }
-let completed_structured ~origin ~value = Structured { origin; value }
+let completed_structured ~origin = Structured { origin }
 
 module Producer = struct
   type event =
-    | Text of { tag : string; message : string }
-    | Structured of { origin : structured_origin; value : Snapshot.fragment }
+    | Text of { tag : string; message : string; fields : Snapshot.fragment }
+    | Structured of { origin : structured_origin; fields : Snapshot.fragment }
 
   let copy_string value = Bytes.unsafe_to_string (Bytes.of_string value)
-  let option_valid = Option.fold ~none:true ~some:Snapshot.valid_text
+
+  let add_lengths left right =
+    if right > max_int - left then max_int else left + right
+
+  let text_valid limits value =
+    String.length value <= Log_limits.max_string_bytes limits
+    && Snapshot.valid_text value
+
+  let text_length_valid limits value =
+    String.length value <= Log_limits.max_string_bytes limits
+
+  let option_valid limits = function
+    | None -> true
+    | Some value -> text_valid limits value
+
+  let option_length_valid limits = function
+    | None -> true
+    | Some value -> text_length_valid limits value
+
   let option_length = Option.fold ~none:0 ~some:String.length
 
-  let reference_valid reference =
-    Snapshot.valid_text reference.name && Snapshot.valid_text reference.id
+  let reference_valid limits reference =
+    text_valid limits reference.name && text_valid limits reference.id
+
+  let reference_length_valid limits reference =
+    text_length_valid limits reference.name
+    && text_length_valid limits reference.id
 
   let reference_length reference =
-    String.length reference.name + String.length reference.id
+    add_lengths (String.length reference.name) (String.length reference.id)
 
-  let operation_valid operation =
-    reference_valid operation.reference
-    && Option.fold ~none:true ~some:reference_valid operation.parent
+  let operation_valid limits operation =
+    reference_valid limits operation.reference
+    && (match operation.parent with
+      | None -> true
+      | Some parent -> reference_valid limits parent)
     && Int64.compare operation.duration_ns 0L >= 0
 
-  let operation_length operation =
-    reference_length operation.reference
-    + Option.fold ~none:0 ~some:reference_length operation.parent
+  let operation_length_valid limits operation =
+    reference_length_valid limits operation.reference
+    &&
+    match operation.parent with
+    | None -> true
+    | Some parent -> reference_length_valid limits parent
 
-  let event_valid = function
-    | Text { tag; message } ->
-        Snapshot.valid_text tag && Snapshot.valid_text message
-    | Structured { origin = Open; _ } -> true
-    | Structured { origin = Declared name; _ } -> Snapshot.valid_text name
+  let operation_length operation =
+    add_lengths
+      (reference_length operation.reference)
+      (Option.fold ~none:0 ~some:reference_length operation.parent)
+
+  let event_valid limits = function
+    | Text { tag; message; fields = _ } ->
+        text_valid limits tag && text_valid limits message
+    | Structured { origin = Open; fields = _ } -> true
+    | Structured { origin = Declared name; fields = _ } ->
+        text_valid limits name
+
+  let event_length_valid limits = function
+    | Text { tag; message; fields = _ } ->
+        text_length_valid limits tag && text_length_valid limits message
+    | Structured { origin = Open; fields = _ } -> true
+    | Structured { origin = Declared name; fields = _ } ->
+        text_length_valid limits name
 
   let event_length = function
-    | Text { tag; message } -> String.length tag + String.length message
-    | Structured { origin = Open; _ } -> 0
-    | Structured { origin = Declared name; _ } -> String.length name
+    | Text { tag; message; fields = _ } ->
+        add_lengths (String.length tag) (String.length message)
+    | Structured { origin = Open; fields = _ } -> 0
+    | Structured { origin = Declared name; fields = _ } -> String.length name
 
   let event_snapshot = function
-    | Text _ -> None
-    | Structured { value; _ } -> Some value
+    | Text { fields; _ } | Structured { fields; _ } -> fields
 
-  let annotation_valid annotation = Snapshot.valid_text annotation.message
+  let annotation_valid limits annotation = text_valid limits annotation.message
+
+  let annotation_length_valid limits annotation =
+    text_length_valid limits annotation.message
 
   let annotations_length annotations =
     List.fold_left
-      (fun length annotation -> length + String.length annotation.message)
+      (fun length annotation ->
+        add_lengths length (String.length annotation.message))
       0 annotations
 
   let owns_reserved_field =
     Snapshot.root_has_field_matching Log_envelope.is_reserved_field
 
-  let own_event = function
-    | Text { tag; message } ->
-        Ok
-          (completed_text ~tag:(copy_string tag) ~message:(copy_string message))
-    | Structured { origin; value } ->
-        let value = Snapshot.complete value in
-        if (not (Snapshot.is_object value)) || owns_reserved_field value then
+  let own_event fields = function
+    | Text { tag; message; fields = _ } ->
+        if (not (Snapshot.is_object fields)) || owns_reserved_field fields then
           Error Snapshot.Conversion_failed
-        else Ok (completed_structured ~origin ~value)
+        else
+          Ok
+            (completed_text ~tag:(copy_string tag)
+               ~message:(copy_string message))
+    | Structured { origin; fields = _ } ->
+        if (not (Snapshot.is_object fields)) || owns_reserved_field fields then
+          Error Snapshot.Conversion_failed
+        else Ok (completed_structured ~origin)
 
-  let kind_valid = function
-    | Point { correlation } ->
-        Option.fold ~none:true ~some:reference_valid correlation
+  let kind_valid limits = function
+    | Point { correlation = None } -> true
+    | Point { correlation = Some correlation } ->
+        reference_valid limits correlation
     | Wide { operation; annotations } ->
-        operation_valid operation && List.for_all annotation_valid annotations
+        operation_valid limits operation
+        &&
+        let rec valid = function
+          | [] -> true
+          | annotation :: rest ->
+              annotation_valid limits annotation && valid rest
+        in
+        valid annotations
+
+  let kind_length_valid limits = function
+    | Point { correlation = None } -> true
+    | Point { correlation = Some correlation } ->
+        reference_length_valid limits correlation
+    | Wide { operation; annotations } ->
+        operation_length_valid limits operation
+        &&
+        let rec valid = function
+          | [] -> true
+          | annotation :: rest ->
+              annotation_length_valid limits annotation && valid rest
+        in
+        valid annotations
 
   let kind_length = function
     | Point { correlation } ->
         Option.fold ~none:0 ~some:reference_length correlation
     | Wide { operation; annotations } ->
-        operation_length operation + annotations_length annotations
+        add_lengths
+          (operation_length operation)
+          (annotations_length annotations)
 
   let annotation_count = function
     | Point _ -> 0
@@ -127,33 +200,49 @@ module Producer = struct
     | Point _, (Text _ | Structured _) | Wide _, Structured _ -> true
     | Wide _, Text _ -> false
 
-  let make ~service ?environment ?version ~timestamp ~level ~kind event =
-    if annotation_count kind > Snapshot.width_limit then
+  let make ~service ?environment ?version ~timestamp ~level ~kind
+      ?(limits = Log_limits.default) event =
+    if annotation_count kind > Log_limits.max_collection_length limits then
       Error Snapshot.Limit_exceeded
     else if
       not
-        (Snapshot.valid_text service
-        && option_valid environment
-        && option_valid version
-        && kind_valid kind
+        (text_valid limits service
+        && option_valid limits environment
+        && option_valid limits version
+        && kind_valid limits kind
         && kind_accepts_event kind event
-        && event_valid event)
-    then Error Snapshot.Invalid_utf8
+        && event_valid limits event)
+    then
+      (* The successful path validates each string once. Only malformed input
+         needs the second, length-only pass to preserve the public distinction
+         between a configured limit and invalid UTF-8. *)
+      if
+        text_length_valid limits service
+        && option_length_valid limits environment
+        && option_length_valid limits version
+        && kind_length_valid limits kind
+        && event_length_valid limits event
+      then Error Snapshot.Invalid_utf8
+      else Error Snapshot.Limit_exceeded
     else
       let string_bytes =
-        String.length service
-        + option_length environment
-        + option_length version
-        + kind_length kind
-        + event_length event
+        add_lengths
+          (add_lengths
+             (add_lengths
+                (add_lengths (String.length service)
+                   (option_length environment))
+                (option_length version))
+             (kind_length kind))
+          (event_length event)
       in
       match
-        Snapshot.validate_extension (event_snapshot event) ~nodes:0
-          ~string_bytes ~byte_bytes:0 ~retained_bytes:string_bytes
+        Snapshot.fit_object_extension ~limits (event_snapshot event)
+          ~retained_bytes:string_bytes
       with
       | Error _ as error -> error
-      | Ok () -> (
-          match own_event event with
+      | Ok fields_fragment -> (
+          let fields = Snapshot.complete fields_fragment in
+          match own_event fields event with
           | Error _ as error -> error
           | Ok event ->
               Ok
@@ -167,6 +256,7 @@ module Producer = struct
                   timestamp;
                   level;
                   event;
+                  fields;
                   kind;
                 })
 

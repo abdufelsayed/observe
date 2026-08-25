@@ -36,8 +36,8 @@ let value interpret ?backtrace error =
   in
   Value.object_ [ ("error", Value.object_ fields) ]
 
-let freeze interpret ?backtrace error =
-  Value.freeze (value interpret ?backtrace error)
+let freeze ?limits interpret ?backtrace error =
+  Value.freeze ?limits (value interpret ?backtrace error)
 
 let freeze_into interpret ?backtrace error context ~depth =
   Value.freeze_into (value interpret ?backtrace error) context ~depth

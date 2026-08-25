@@ -9,6 +9,7 @@ let commit =
 
 let baseline = ref None
 let worker = ref None
+let scenario_filter = ref None
 let list_scenarios = ref false
 
 let options =
@@ -35,6 +36,9 @@ let options =
     ( "--compare",
       Arg.String (fun path -> baseline := Some path),
       "PATH Compare the new measurements with a prior JSON report" );
+    ( "--scenario",
+      Arg.String (fun name -> scenario_filter := Some name),
+      "NAME Run one named scenario" );
     ( "--list",
       Arg.Set list_scenarios,
       " List available scenarios without running them" );
@@ -60,7 +64,19 @@ let selected_scenarios () =
     | "fs-lwt-unix" -> Scenario.suite scenario = Scenario.Fs_lwt_unix
     | value -> fail ("unknown suite: " ^ value)
   in
-  List.filter matches Scenario.all
+  let matches_name scenario =
+    Option.fold ~none:true
+      ~some:(fun name -> String.equal name (Scenario.name scenario))
+      !scenario_filter
+  in
+  let selected =
+    List.filter
+      (fun scenario -> matches scenario && matches_name scenario)
+      Scenario.all
+  in
+  if Option.is_some !scenario_filter && selected = [] then
+    fail ("unknown scenario: " ^ Option.get !scenario_filter)
+  else selected
 
 let process_succeeded = function Unix.WEXITED 0 -> true | _ -> false
 

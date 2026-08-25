@@ -65,6 +65,7 @@ val create_wide :
   wide
 
 val wide_reference : wide -> Log.operation_reference option
+val wide_limits : wide -> Log_limits.t
 val contribute_wide : wide -> (unit -> contribution) -> bool
 val annotate_wide : wide -> Level.t -> (unit -> string) -> bool
 val set_wide_level : wide -> Level.t -> unit

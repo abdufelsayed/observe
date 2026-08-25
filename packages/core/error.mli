@@ -25,6 +25,7 @@ val exn : exn t
 val value : 'error t -> ?backtrace:Printexc.raw_backtrace -> 'error -> Value.t
 
 val freeze :
+  ?limits:Log_limits.t ->
   'error t ->
   ?backtrace:Printexc.raw_backtrace ->
   'error ->

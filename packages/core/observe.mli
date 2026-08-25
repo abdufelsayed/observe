@@ -183,6 +183,15 @@ module Value : sig
   type integer =
     [ `Int of int | `Int32 of int32 | `Int64 of int64 | `Decimal of string ]
 
+  type truncation =
+    | Depth
+    | Object_fields
+    | Collection
+    | String_bytes
+    | Bytes_length
+    | Nodes
+    | Total_bytes
+
   type frozen_view =
     [ `Null
     | `Bool of bool
@@ -190,6 +199,9 @@ module Value : sig
     | `Float of float
     | `String of string
     | `Bytes of string
+    | `Truncated of truncation
+    | `Truncated_list of frozen list * truncation
+    | `Truncated_object of (string * frozen) list * truncation
     | `List of frozen list
     | `Object of (string * frozen) list
     | `Variant of string * bool * frozen option ]
@@ -197,9 +209,16 @@ module Value : sig
   val view : frozen -> frozen_view
   (** Inspect already completed structured meaning without parsing JSON or
       receiving mutable snapshot internals. Children remain [frozen] and are
-      traversed recursively through [view]. *)
+      traversed recursively through [view]. [Truncated_list] and
+      [Truncated_object] retain the safe completed prefix beside the reason;
+      [Truncated] represents a region with no retainable prefix. *)
 
   val frozen_to_json_string : frozen -> string
+  (** Project completed meaning as compact JSON. Truncated regions use the
+      stable scalar [<truncated:reason>]. A truncated list appends that marker
+      after its safe prefix. A truncated object adds an [_observe_truncated]
+      field, appending underscores until the name does not collide with a caller
+      field. *)
 
   val to_json_string : t -> (string, json_error) result
   (** Encode one compact JSON value with Observe's direct writer. *)
@@ -238,7 +257,7 @@ module Log : sig
 
   type event =
     | Text of { tag : string; message : string }
-    | Structured of { origin : structured_origin; value : Value.frozen }
+    | Structured of { origin : structured_origin }
 
   and structured_origin = Open | Declared of string
 
@@ -256,6 +275,10 @@ module Log : sig
   val timestamp : t -> Timestamp.t
   val level : t -> Level.t
   val event : t -> event
+
+  val fields : t -> Value.frozen
+  (** The one immutable bounded structured field root shared by text and
+      structured events. *)
 
   val kind : t -> kind
   (** Complete point or wide meaning. Correlation exists only on point logs;
@@ -289,6 +312,10 @@ module Diagnostics : sig
     | Monotonic_clock_raised
     | Message_evaluation_raised
     | Canonical_freeze_failed
+    | Enricher_raised
+    | Enricher_invalid
+    | Enricher_conflict
+    | Enricher_reserved_field
     | Post_seal_set
     | Post_seal_annotate
     | Post_seal_set_level
@@ -378,52 +405,107 @@ module Capture : sig
   val diagnostics : t -> Diagnostics.entry list
 end
 
-module Config : sig
-  type t
-  type console = Auto | Pretty | Ndjson | Silent
-  type field = Service | Environment | Version
-  type problem = Empty | Invalid_utf8
-  type error = { field : field; problem : problem }
-
-  exception Invalid_configuration of error
-
-  val create :
-    service:string ->
-    ?environment:string ->
-    ?version:string ->
-    ?enabled:bool ->
-    ?console:console ->
-    ?min_level:Level.t ->
-    ?drains:Drain.t list ->
-    unit ->
-    (t, error) result
-  (** Construct validated logging behavior. [Auto] selects pretty output when
-      [environment] is absent, [dev], or [development], and NDJSON otherwise.
-      The other console policies explicitly override that selection. *)
-
-  val create_exn :
-    service:string ->
-    ?environment:string ->
-    ?version:string ->
-    ?enabled:bool ->
-    ?console:console ->
-    ?min_level:Level.t ->
-    ?drains:Drain.t list ->
-    unit ->
-    t
-  (** Like {!create}, but raises [Invalid_configuration error]. *)
-
-  val service : t -> string
-  val environment : t -> string option
-  val version : t -> string option
-  val enabled : t -> bool
-  val console : t -> console
-  val min_level : t -> Level.t
-  val drains : t -> Drain.t list
-  val pp_error : Format.formatter -> error -> unit
-end
-
 module Logs : sig
+  (** Process-wide logging composition values and authoring. *)
+
+  module Enricher : sig
+    (** Reusable structured context for completed point and wide logs. *)
+
+    type t
+    type error
+
+    exception Invalid_enricher of error
+
+    val create :
+      name:string ->
+      ?authoritative_fields:string list ->
+      (unit -> Value.t) ->
+      (t, error) result
+
+    val create_exn :
+      name:string -> ?authoritative_fields:string list -> (unit -> Value.t) -> t
+    (** Construct a named lazy object contribution. Caller-authored fields win
+        ordinary collisions. [authoritative_fields] grants replacement only for
+        those non-reserved root fields. The callback runs after admission as a
+        synchronous context producer and may run concurrently for different
+        observations; it must be safe for concurrent invocation and must not
+        recursively emit Observe logs. Ordinary callback exceptions and invalid
+        contributions are contained and diagnosed. Configured limit exhaustion
+        becomes bounded truncation or omission; runtime control exceptions
+        propagate unchanged. *)
+
+    val name : t -> string
+    val authoritative_fields : t -> string list
+    val pp_error : Format.formatter -> error -> unit
+  end
+
+  module Limits : sig
+    (** Finite canonical-materialization policy. *)
+
+    type t
+
+    type field =
+      | Max_depth
+      | Max_object_fields
+      | Max_collection_length
+      | Max_string_bytes
+      | Max_bytes_length
+      | Max_nodes
+      | Max_total_bytes
+
+    type problem = Non_positive
+    type error = { field : field; value : int; problem : problem }
+
+    exception Invalid_limits of error
+
+    val default : t
+    (** The finite policy used when [Config.create] omits [~limits]. *)
+
+    val create :
+      ?max_depth:int ->
+      ?max_object_fields:int ->
+      ?max_collection_length:int ->
+      ?max_string_bytes:int ->
+      ?max_bytes_length:int ->
+      ?max_nodes:int ->
+      ?max_total_bytes:int ->
+      unit ->
+      (t, error) result
+    (** Every constructor argument is a finite positive bound. String and byte
+        limits apply per value. [max_total_bytes] uses deterministic retained
+        accounting: 32 bytes per value node, 144 bytes plus its UTF-8 name per
+        object field, 24 bytes per list entry, payload bytes for strings and
+        byte values, 16 bytes plus its UTF-8 constructor name per variant, 16
+        bytes for a partial truncation marker, and the UTF-8 bytes of
+        completed-log metadata. Metadata includes service, environment, version,
+        text tag/message or declared schema name, operation names/identifiers
+        and parent reference, and annotation messages. [max_string_bytes] also
+        bounds each field name, constructor name, and metadata string.
+        [max_nodes] bounds both retained value nodes and productive recursive
+        traversal steps. This is a stable Observe budget, not exact OCaml heap
+        measurement. *)
+
+    val create_exn :
+      ?max_depth:int ->
+      ?max_object_fields:int ->
+      ?max_collection_length:int ->
+      ?max_string_bytes:int ->
+      ?max_bytes_length:int ->
+      ?max_nodes:int ->
+      ?max_total_bytes:int ->
+      unit ->
+      t
+
+    val max_depth : t -> int
+    val max_object_fields : t -> int
+    val max_collection_length : t -> int
+    val max_string_bytes : t -> int
+    val max_bytes_length : t -> int
+    val max_nodes : t -> int
+    val max_total_bytes : t -> int
+    val pp_error : Format.formatter -> error -> unit
+  end
+
   (** Process-wide admission-first logging. Every level function checks the
       active route and configured level before invoking its authoring callback:
 
@@ -521,7 +603,9 @@ module Logs : sig
   val set : ('builder, 'patch) t -> ('builder -> 'patch) -> unit
   (** Lazily contribute one record-shaped patch while the handle is active.
       Objects merge recursively and later non-object values replace earlier
-      values. Failed contributions seal and withhold the lifecycle. *)
+      values. Expected limit exhaustion omits only that contribution and keeps
+      the earlier safe body. Invalid or unsafe canonical contributions seal and
+      withhold the lifecycle. *)
 
   val set_level : ('builder, 'patch) t -> level:Level.t -> unit
   (** Replace the explicit level. The last explicit value wins over derived
@@ -554,6 +638,66 @@ module Logs : sig
     using:('record, 'builder) Schema.t -> ('builder, 'record Schema.patch) t
   (** Return the schema-locked wide log bound by the innermost operation scope.
       The supplied schema must be the same instance used to start it. *)
+end
+
+module Config : sig
+  type t
+  type console = Auto | Pretty | Ndjson | Silent
+  type field = Service | Environment | Version | Enrichers
+
+  type problem =
+    | Empty
+    | Invalid_utf8
+    | Duplicate_enricher_name of string
+    | Overlapping_authoritative_field of string
+
+  type error = { field : field; problem : problem }
+
+  exception Invalid_configuration of error
+
+  val create :
+    service:string ->
+    ?environment:string ->
+    ?version:string ->
+    ?enabled:bool ->
+    ?console:console ->
+    ?min_level:Level.t ->
+    ?drains:Drain.t list ->
+    ?enrichers:Logs.Enricher.t list ->
+    ?limits:Logs.Limits.t ->
+    unit ->
+    (t, error) result
+  (** Construct validated logging behavior. [Auto] selects pretty output when
+      [environment] is absent, [dev], or [development], and NDJSON otherwise.
+      The other console policies explicitly override that selection. Omitted
+      enrichment is empty and omitted limits use [Logs.Limits.default].
+      Duplicate enricher names and overlapping authoritative ownership are
+      rejected here, so list order never chooses a collision winner. *)
+
+  val create_exn :
+    service:string ->
+    ?environment:string ->
+    ?version:string ->
+    ?enabled:bool ->
+    ?console:console ->
+    ?min_level:Level.t ->
+    ?drains:Drain.t list ->
+    ?enrichers:Logs.Enricher.t list ->
+    ?limits:Logs.Limits.t ->
+    unit ->
+    t
+  (** Like {!create}, but raises [Invalid_configuration error]. *)
+
+  val service : t -> string
+  val environment : t -> string option
+  val version : t -> string option
+  val enabled : t -> bool
+  val console : t -> console
+  val min_level : t -> Level.t
+  val drains : t -> Drain.t list
+  val enrichers : t -> Logs.Enricher.t list
+  val limits : t -> Logs.Limits.t
+  val pp_error : Format.formatter -> error -> unit
 end
 
 module Ppx_runtime : sig

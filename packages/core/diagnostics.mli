@@ -13,6 +13,10 @@ type kind =
   | Monotonic_clock_raised
   | Message_evaluation_raised
   | Canonical_freeze_failed
+  | Enricher_raised
+  | Enricher_invalid
+  | Enricher_conflict
+  | Enricher_reserved_field
   | Post_seal_set
   | Post_seal_annotate
   | Post_seal_set_level

@@ -58,24 +58,49 @@ let ( |+ ) object_ field =
 let rec freeze_piece context ~depth = function
   | Typed_value (description, value) ->
       Type.freeze_into description context ~depth value
-  | Object object_ -> freeze_object context ~depth object_
+  | Object object_ ->
+      Snapshot.localize_apply context ~depth freeze_object object_
   | Untyped_value value -> Value.freeze_into value context ~depth
   | Interpreted_error (interpretation, backtrace, error) ->
       Error.freeze_into interpretation ?backtrace error context ~depth
 
 and freeze_object context ~depth object_ =
-  let rec collect fields = function
-    | [] -> Snapshot.object_ context ~depth fields
-    | (name, piece) :: rest -> (
-        match freeze_piece context ~depth:(depth + 1) piece with
-        | Error _ as error -> error
-        | Ok value -> collect ((name, value) :: fields) rest)
-  in
-  collect [] object_.fields
+  match object_.fields with
+  | [ (name, piece) ] ->
+      Snapshot.build_object_single context ~depth name (fun () ->
+          freeze_piece context ~depth:(depth + 1) piece)
+  | fields -> (
+      match Snapshot.Object_builder.create context ~depth with
+      | Error _ as error -> error
+      | Ok builder ->
+          let rec collect = function
+            | [] -> Snapshot.Object_builder.finish builder
+            | (name, piece) :: rest -> (
+                match Snapshot.Object_builder.prepare builder name with
+                | Error _ as error -> error
+                | Ok Snapshot.Stop -> Snapshot.Object_builder.finish builder
+                | Ok Snapshot.Ready -> (
+                    match freeze_piece context ~depth:(depth + 1) piece with
+                    | Error _ as error -> error
+                    | Ok value -> (
+                        match Snapshot.Object_builder.add builder value with
+                        | Snapshot.Stop ->
+                            Snapshot.Object_builder.finish builder
+                        | Snapshot.Ready -> collect rest)))
+          in
+          (* [|+] prepends for cheap authoring. Materialization must nevertheless
+             call authors and retain bounded prefixes in source order. *)
+          collect (List.rev fields))
 
-let materialize piece =
-  let context = Snapshot.create_context () in
-  match freeze_piece context ~depth:0 piece with
+let materialize ?limits piece =
+  let context = Snapshot.create_context ?limits () in
+  let materialized =
+    match piece with
+    | Object object_ -> freeze_object context ~depth:0 object_
+    | Typed_value _ | Untyped_value _ | Interpreted_error _ ->
+        freeze_piece context ~depth:0 piece
+  in
+  match materialized with
   | Ok value -> Ok (Snapshot.seal context value)
   | Error _ as error -> error
 
@@ -99,8 +124,10 @@ let rec untyped_builder =
       (fun object_ -> { piece = Object object_; has_error = object_.has_error });
   }
 
-let materialize_untyped_patch (patch : untyped_patch) = materialize patch.piece
-let materialize_untyped value = materialize value
+let materialize_untyped_patch ?limits (patch : untyped_patch) =
+  materialize ?limits patch.piece
+
+let materialize_untyped ?limits value = materialize ?limits value
 let untyped_patch_has_error (patch : untyped_patch) = patch.has_error
 
 let untyped_patch_of_value = function

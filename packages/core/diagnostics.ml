@@ -11,6 +11,10 @@ type kind =
   | Monotonic_clock_raised
   | Message_evaluation_raised
   | Canonical_freeze_failed
+  | Enricher_raised
+  | Enricher_invalid
+  | Enricher_conflict
+  | Enricher_reserved_field
   | Post_seal_set
   | Post_seal_annotate
   | Post_seal_set_level
@@ -43,6 +47,10 @@ let kinds =
     Monotonic_clock_raised;
     Message_evaluation_raised;
     Canonical_freeze_failed;
+    Enricher_raised;
+    Enricher_invalid;
+    Enricher_conflict;
+    Enricher_reserved_field;
     Post_seal_set;
     Post_seal_annotate;
     Post_seal_set_level;
@@ -72,20 +80,24 @@ let index = function
   | Monotonic_clock_raised -> 9
   | Message_evaluation_raised -> 10
   | Canonical_freeze_failed -> 11
-  | Post_seal_set -> 12
-  | Post_seal_annotate -> 13
-  | Post_seal_set_level -> 14
-  | Post_seal_emit -> 15
-  | Formatting_failed -> 16
-  | Formatting_raised -> 17
-  | Console_rejected -> 18
-  | Console_raised -> 19
-  | Drain_rejected -> 20
-  | Drain_raised -> 21
-  | Drain_delivery_failed -> 22
-  | Capture_overflow -> 23
-  | Capture_closed -> 24
-  | Runtime_closed -> 25
+  | Enricher_raised -> 12
+  | Enricher_invalid -> 13
+  | Enricher_conflict -> 14
+  | Enricher_reserved_field -> 15
+  | Post_seal_set -> 16
+  | Post_seal_annotate -> 17
+  | Post_seal_set_level -> 18
+  | Post_seal_emit -> 19
+  | Formatting_failed -> 20
+  | Formatting_raised -> 21
+  | Console_rejected -> 22
+  | Console_raised -> 23
+  | Drain_rejected -> 24
+  | Drain_raised -> 25
+  | Drain_delivery_failed -> 26
+  | Capture_overflow -> 27
+  | Capture_closed -> 28
+  | Runtime_closed -> 29
 
 let create_store () = Array.init (Array.length kinds) (fun _ -> Atomic.make 0)
 

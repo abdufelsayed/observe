@@ -76,8 +76,8 @@ let reference_event_schema =
 let structured_json log =
   match Observe.Log.event log with
   | Observe.Log.Text _ -> Alcotest.fail "expected a structured body"
-  | Observe.Log.Structured { value; _ } ->
-      Observe.Value.frozen_to_json_string value
+  | Observe.Log.Structured _ ->
+      Observe.Value.frozen_to_json_string (Observe.Log.fields log)
 
 let capture ?capacity config callback =
   match Observer.with_capture observer ~config ?capacity callback with
@@ -132,8 +132,8 @@ let test_bodies_and_metadata () =
         "anonymous snapshot" "{\"attempt\":2,\"ok\":true}"
         (structured_json untyped);
       (match Observe.Log.event untyped with
-      | Observe.Log.Structured { value; _ } -> (
-          match Observe.Value.view value with
+      | Observe.Log.Structured _ -> (
+          match Observe.Value.view (Observe.Log.fields untyped) with
           | `Object [ ("attempt", attempt); ("ok", ok) ] ->
               Alcotest.(check bool)
                 "semantic integer view" true
@@ -385,11 +385,11 @@ let test_point_and_wide_semantic_capture () =
         "child duration" 71_000_000L
         (Observe.Log.operation_duration_ns child_operation);
       (match Observe.Log.event child with
-      | Observe.Log.Structured
-          { origin = Observe.Log.Declared "int_event"; value } ->
+      | Observe.Log.Structured { origin = Observe.Log.Declared "int_event"; _ }
+        ->
           Alcotest.(check string)
             "sparse declared snapshot" "{\"value\":7}"
-            (Observe.Value.frozen_to_json_string value)
+            (Observe.Value.frozen_to_json_string (Observe.Log.fields child))
       | Observe.Log.Text _ | Observe.Log.Structured _ ->
           Alcotest.fail "expected declared child body");
       let parent_operation = wide_operation parent in

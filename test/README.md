@@ -3,7 +3,8 @@
 The test tree mirrors the package tree:
 
 - `core` owns public values, formatting, capture, observer state, concurrency,
-  PPX behavior, and the installed `observe` surface.
+  enrichment and bounded materialization, PPX behavior, and the installed
+  `observe` surface.
 - `lwt` owns configurable Lwt I/O, callback-local propagation, cancellation,
   and the installed `observe-lwt` surface.
 - `lwt-unix` owns the ready clock, console, initialization, capture behavior,
@@ -53,6 +54,11 @@ capture routing and conservation, rich formatter projections, temporal stage
 boundaries, bounded state, and parameterized publication/capture/diagnostic
 concurrency. Fixed unit and compile-surface tests remain in `@correctness`;
 install-surface checks remain package-owned gates.
+
+The focused `test/core/enrichment` contract target covers the public enrichment
+and limits configuration, point/wide parity, failure isolation, and localized
+materialization markers. It is included by `@observe-core-contracts` and
+therefore by `@correctness`.
 
 The two user-facing test aliases are `@correctness` and `@stress`. Focused
 aliases beneath them express ownership, not additional public profiles.

@@ -1,5 +1,8 @@
 (** Process-wide static logging authoring. *)
 
+module Enricher : module type of Log_enricher
+module Limits : module type of Log_limits
+
 type message = Message.t
 type object_ = Message.object_
 type field = Message.field
@@ -72,8 +75,9 @@ val create_typed :
 val set : ('builder, 'patch) t -> ('builder -> 'patch) -> unit
 (** Contribute one record-shaped patch. [author] runs only while the handle is
     active. Successive objects merge recursively; later non-object values
-    replace earlier values at the same field. A failed contribution seals and
-    withholds the lifecycle. *)
+    replace earlier values at the same field. Expected limit exhaustion omits
+    only that contribution and preserves the earlier safe body. An invalid or
+    unsafe canonical contribution seals and withholds the lifecycle. *)
 
 val set_level : ('builder, 'patch) t -> level:Level.t -> unit
 (** Replace the explicit level. The last explicit level wins over an

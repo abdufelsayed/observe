@@ -1,3 +1,6 @@
+module Enricher = Log_enricher
+module Limits = Log_limits
+
 type message = Message.t
 type object_ = Message.object_
 type field = Message.field
@@ -75,8 +78,8 @@ let warn ?operation author = log ?operation ~level:Level.Warn author
 let error ?operation author = log ?operation ~level:Level.Error author
 let ( |+ ) = Message.( |+ )
 
-let materialize_error interpretation ?backtrace error =
-  match Error.freeze interpretation ?backtrace error with
+let materialize_error ~limits interpretation ?backtrace error =
+  match Error.freeze ~limits interpretation ?backtrace error with
   | Ok body -> Engine.Contribution (body, true)
   | Error error -> Engine.Invalid_contribution error
 
@@ -87,11 +90,17 @@ let open_handle wide =
     builder = (fun () -> Message.untyped_builder);
     materialize =
       (fun patch ->
-        match Message.materialize_untyped_patch patch with
+        match
+          Message.materialize_untyped_patch ~limits:(Engine.wide_limits wide)
+            patch
+        with
         | Ok body ->
             Engine.Contribution (body, Message.untyped_patch_has_error patch)
         | Error error -> Engine.Invalid_contribution error);
-    error_materialize = materialize_error;
+    error_materialize =
+      (fun interpretation ?backtrace error ->
+        materialize_error ~limits:(Engine.wide_limits wide) interpretation
+          ?backtrace error);
   }
 
 let create ?parent ~name () =
@@ -107,7 +116,9 @@ let typed_handle wide schema =
     builder = (fun () -> Schema.builder schema);
     materialize =
       (fun patch ->
-        let context = Snapshot.create_context () in
+        let context =
+          Snapshot.create_context ~limits:(Engine.wide_limits wide) ()
+        in
         match
           Schema.materialize (Schema.body schema patch) context ~depth:0
         with
@@ -115,7 +126,10 @@ let typed_handle wide schema =
             Engine.Contribution
               (Snapshot.seal context value, Schema.has_error patch)
         | Error error -> Engine.Invalid_contribution error);
-    error_materialize = materialize_error;
+    error_materialize =
+      (fun interpretation ?backtrace error ->
+        materialize_error ~limits:(Engine.wide_limits wide) interpretation
+          ?backtrace error);
   }
 
 let create_typed ?parent ~name ~using () =

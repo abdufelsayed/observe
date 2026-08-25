@@ -57,18 +57,35 @@ let materialize fragment context ~depth = fragment context ~depth
 let patch_fragment patch = patch.body
 let field name fragment = (name, fragment)
 
+let materialize_fields fields context ~depth =
+  match fields with
+  | [ (name, materialize) ] ->
+      Snapshot.build_object_single context ~depth name (fun () ->
+          materialize context ~depth:(depth + 1))
+  | _ -> (
+      match Snapshot.Object_builder.create context ~depth with
+      | Error _ as error -> error
+      | Ok builder ->
+          let rec collect = function
+            | [] -> Snapshot.Object_builder.finish builder
+            | (name, materialize) :: rest -> (
+                match Snapshot.Object_builder.prepare builder name with
+                | Error _ as error -> error
+                | Ok Snapshot.Stop -> Snapshot.Object_builder.finish builder
+                | Ok Snapshot.Ready -> (
+                    match materialize context ~depth:(depth + 1) with
+                    | Error _ as error -> error
+                    | Ok value -> (
+                        match Snapshot.Object_builder.add builder value with
+                        | Snapshot.Stop ->
+                            Snapshot.Object_builder.finish builder
+                        | Snapshot.Ready -> collect rest)))
+          in
+          collect fields)
+
 let make_identified_patch_fields (patch_builder : 'record patch_builder) fields
     =
-  let body context ~depth =
-    let rec collect collected = function
-      | [] -> Snapshot.object_ context ~depth collected
-      | (name, materialize) :: rest -> (
-          match materialize context ~depth:(depth + 1) with
-          | Error _ as error -> error
-          | Ok value -> collect ((name, value) :: collected) rest)
-    in
-    collect [] fields
-  in
+  let body context ~depth = materialize_fields fields context ~depth in
   { schema_identity = patch_builder.schema_identity; body; has_error = false }
 
 (* Keep the option-list bridge allocation-compatible with previously generated
@@ -76,16 +93,7 @@ let make_identified_patch_fields (patch_builder : 'record patch_builder) fields
    slots for absent fields. *)
 let make_identified_patch (patch_builder : 'record patch_builder) fields =
   let fields = List.filter_map Fun.id fields in
-  let body context ~depth =
-    let rec collect collected = function
-      | [] -> Snapshot.object_ context ~depth collected
-      | (name, materialize) :: rest -> (
-          match materialize context ~depth:(depth + 1) with
-          | Error _ as error -> error
-          | Ok value -> collect ((name, value) :: collected) rest)
-    in
-    collect [] fields
-  in
+  let body context ~depth = materialize_fields fields context ~depth in
   { schema_identity = patch_builder.schema_identity; body; has_error = false }
 
 let make_identified_error_patch (patch_builder : 'record patch_builder) body =
@@ -112,15 +120,21 @@ let combine_identified_patches (patch_builder : 'record patch_builder) patches =
     if not valid_identity then Error Snapshot.Unsupported
     else
       let rec combine accumulator = function
-        | [] -> Ok (Snapshot.Object_accumulator.as_value accumulator)
+        | [] ->
+            Snapshot.import context ~depth
+              (Snapshot.Object_accumulator.as_fragment accumulator)
         | patch :: rest -> (
+            let before = Snapshot.checkpoint context in
             match patch.body context ~depth with
-            | Error _ as error -> error
+            | Error _ as error ->
+                Snapshot.rollback context before;
+                error
             | Ok value -> (
-                let fragment = Snapshot.seal context value in
+                let fragment = Snapshot.fragment value in
+                Snapshot.rollback context before;
                 match
-                  Snapshot.Object_accumulator.merge_disjoint accumulator
-                    fragment
+                  Snapshot.Object_accumulator.merge_disjoint
+                    ~limits:(Snapshot.limits context) accumulator fragment
                 with
                 | Error _ as error -> error
                 | Ok accumulator -> combine accumulator rest))

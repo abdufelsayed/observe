@@ -1,6 +1,15 @@
 type event = { user_id : int; method_ : string } [@@deriving observe]
 type 'a box = { value : 'a } [@@deriving observe]
 
+type ppx_bounded_child = { first : string; second : string }
+[@@deriving observe]
+
+type ppx_bounded_parent = { child : ppx_bounded_child; tail : string }
+[@@deriving observe]
+
+let ppx_bounded_parent_schema =
+  Observe.Schema.record ppx_bounded_parent_t ~builder:(fun _ -> ())
+
 module Observer = Observe.Make (Test_io.IO)
 
 let observer = Observer.create (Test_io.Host.create ())
@@ -15,6 +24,38 @@ let contains value fragment =
     else loop (index + 1)
   in
   fragment_length = 0 || loop 0
+
+let test_generated_record_respects_total_bytes_prefix () =
+  let value = { child = { first = "one"; second = "two" }; tail = "tail" } in
+  let limits = Observe.Logs.Limits.create_exn ~max_total_bytes:650 () in
+  let capture =
+    match
+      Observer.with_capture observer
+        ~config:(Test_io.config ~console:Observe.Config.Silent ~limits "s")
+        (fun capture ->
+          Observe.Logs.info (fun m ->
+              m.typed ~using:ppx_bounded_parent_schema value);
+          Test_io.Direct.return capture)
+    with
+    | Ok capture -> capture
+    | Error _ -> Alcotest.fail "capture rejected bounded generated record"
+  in
+  match Observe.Capture.logs capture with
+  | [ log ] -> (
+      match Observe.Value.view (Observe.Log.fields log) with
+      | `Truncated_object ([ ("child", child) ], Observe.Value.Total_bytes) -> (
+          match Observe.Value.view child with
+          | `Object fields ->
+              Alcotest.(check (list string))
+                "nested generated prefix" [ "first"; "second" ]
+                (List.map fst fields)
+          | _ -> Alcotest.fail "nested generated record was not an object")
+      | _ ->
+          Alcotest.fail
+            "generated record did not retain its prefix with a size marker")
+  | logs ->
+      Alcotest.failf "expected one bounded generated record, received %d"
+        (List.length logs)
 
 let test_logging_extensions_lower_to_admitted_builders () =
   let rejected_evaluations = ref 0 in
@@ -70,11 +111,12 @@ let test_logging_extensions_lower_to_admitted_builders () =
       | Observe.Log.Structured _ ->
           Alcotest.fail "text extension produced the wrong body");
       (match Observe.Log.event untyped_log with
-      | Observe.Log.Structured { value; _ } ->
+      | Observe.Log.Structured _ ->
           Alcotest.(check string)
             "anonymous body"
             "{\"action\":\"retry\",\"attempt\":2,\"request_id\":\"request-7\",\"context\":{\"cached\":false,\"roles\":[\"admin\",\"billing\"]},\"referral\":\"partner\",\"mixed\":[1,\"two\",false]}"
-            (Observe.Value.frozen_to_json_string value)
+            (Observe.Value.frozen_to_json_string
+               (Observe.Log.fields untyped_log))
       | Observe.Log.Text _ ->
           Alcotest.fail "untyped extension produced the wrong body");
       (match Observe.Log.event typed_log with
@@ -92,11 +134,12 @@ let test_logging_extensions_lower_to_admitted_builders () =
       Alcotest.check level "explicit point error level" Observe.Level.Error
         (Observe.Log.level error_log);
       match Observe.Log.event error_log with
-      | Observe.Log.Structured { value; _ } ->
+      | Observe.Log.Structured _ ->
           Alcotest.(check bool)
             "explicit point error is structured" true
             (String.starts_with ~prefix:"{\"error\":"
-               (Observe.Value.frozen_to_json_string value))
+               (Observe.Value.frozen_to_json_string
+                  (Observe.Log.fields error_log)))
       | Observe.Log.Text _ -> Alcotest.fail "explicit point error produced text"
       )
   | _ -> Alcotest.fail "capture order changed"
@@ -121,8 +164,8 @@ let test_parameterized_patch_uses_exact_schema () =
       Alcotest.(check string)
         "parameterized patch" "{\"value\":42}"
         (match Observe.Log.event log with
-        | Observe.Log.Structured { value; _ } ->
-            Observe.Value.frozen_to_json_string value
+        | Observe.Log.Structured _ ->
+            Observe.Value.frozen_to_json_string (Observe.Log.fields log)
         | Observe.Log.Text _ -> Alcotest.fail "expected structured wide log")
   | logs ->
       Alcotest.failf "expected one parameterized wide log, received %d"
@@ -130,8 +173,8 @@ let test_parameterized_patch_uses_exact_schema () =
 
 let structured_json log =
   match Observe.Log.event log with
-  | Observe.Log.Structured { value; _ } ->
-      Observe.Value.frozen_to_json_string value
+  | Observe.Log.Structured _ ->
+      Observe.Value.frozen_to_json_string (Observe.Log.fields log)
   | Observe.Log.Text _ -> Alcotest.fail "expected a structured log"
 
 let test_manual_and_ppx_open_authoring_are_equivalent () =
@@ -194,6 +237,8 @@ let () =
     [
       ( "behavior:observe:ppx-logging",
         [
+          Alcotest.test_case "generated records retain bounded prefixes" `Quick
+            test_generated_record_respects_total_bytes_prefix;
           Alcotest.test_case "admission and all body forms" `Quick
             test_logging_extensions_lower_to_admitted_builders;
           Alcotest.test_case "parameterized sparse patch identity" `Quick

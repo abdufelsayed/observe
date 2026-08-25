@@ -44,8 +44,12 @@ val untyped_patch_of_value : Value.t -> untyped_patch
 val untyped_message_of_value : Value.t -> t
 
 val materialize_untyped_patch :
-  untyped_patch -> (Snapshot.fragment, Snapshot.error) result
+  ?limits:Log_limits.t ->
+  untyped_patch ->
+  (Snapshot.fragment, Snapshot.error) result
 
-val materialize_untyped : untyped -> (Snapshot.fragment, Snapshot.error) result
+val materialize_untyped :
+  ?limits:Log_limits.t -> untyped -> (Snapshot.fragment, Snapshot.error) result
+
 val untyped_patch_has_error : untyped_patch -> bool
 val builder : builder

@@ -7,7 +7,12 @@ val plan : 'a t -> 'a -> Pretty.rendered
     the value's placement. *)
 
 val pretty : 'a t -> Pretty.t -> Pretty.placement -> 'a -> unit
-val freeze : 'a t -> 'a -> (Snapshot.fragment, Snapshot.error) result
+
+val freeze :
+  ?limits:Log_limits.t ->
+  'a t ->
+  'a ->
+  (Snapshot.fragment, Snapshot.error) result
 
 val freeze_into :
   'a t ->

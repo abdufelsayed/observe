@@ -8,6 +8,15 @@ type integer =
   | Int64 of int64
   | Decimal of string
 
+type truncation =
+  | Depth
+  | Object_fields
+  | Collection
+  | String_bytes
+  | Bytes_length
+  | Nodes
+  | Total_bytes
+
 type view =
   [ `Null
   | `Bool of bool
@@ -15,6 +24,9 @@ type view =
   | `Float of float
   | `String of string
   | `Bytes of string
+  | `Truncated of truncation
+  | `Truncated_list of t list * truncation
+  | `Truncated_object of (string * t) list * truncation
   | `List of t list
   | `Object of (string * t) list
   | `Variant of string * bool * t option ]
@@ -28,10 +40,30 @@ type error =
 
 type context
 
-val width_limit : int
-val max_string_bytes : int
-val create_context : unit -> context
-val check_depth : depth:int -> (unit, error) result
+val create_context : ?limits:Log_limits.t -> unit -> context
+val limits : context -> Log_limits.t
+val object_field_limit : context -> int
+val collection_length_limit : context -> int
+val check_depth : context -> depth:int -> (unit, error) result
+
+val enter : context -> (unit, error) result
+(** Charge one productive traversal step. Steps are monotonic across localized
+    rollback so unproductive recursive descriptions cannot reset their fuel. *)
+
+type checkpoint
+
+val checkpoint : context -> checkpoint
+val rollback : context -> checkpoint -> unit
+
+val localize_apply :
+  context ->
+  depth:int ->
+  (context -> depth:int -> 'a -> (value, error) result) ->
+  'a ->
+  (value, error) result
+
+val truncated : context -> depth:int -> truncation -> (value, error) result
+val truncation : value -> truncation option
 val own_text : string -> (string, error) result
 val valid_text : string -> bool
 val copy_text : context -> depth:int -> string -> (string, error) result
@@ -49,8 +81,44 @@ val list : context -> depth:int -> value list -> (value, error) result
 val object_ :
   context -> depth:int -> (string * value) list -> (value, error) result
 
-val object_with_owned_names :
-  context -> depth:int -> (string * value) list -> (value, error) result
+val truncated_object :
+  context ->
+  depth:int ->
+  truncation ->
+  (string * value) list ->
+  (value, error) result
+
+type readiness = Ready | Stop
+
+module List_builder : sig
+  type t
+
+  val create : context -> depth:int -> (t, error) result
+  val has_capacity : t -> bool
+  val prepare : t -> readiness
+  val add : t -> value -> readiness
+  val truncate : t -> truncation -> unit
+  val finish : t -> (value, error) result
+end
+
+module Object_builder : sig
+  type t
+
+  val create : context -> depth:int -> (t, error) result
+  val has_capacity : t -> bool
+  val prepare : t -> string -> (readiness, error) result
+  val prepare_owned : t -> string -> (readiness, error) result
+  val add : t -> value -> readiness
+  val truncate : t -> truncation -> unit
+  val finish : t -> (value, error) result
+end
+
+val build_object_single :
+  context ->
+  depth:int ->
+  string ->
+  (unit -> (value, error) result) ->
+  (value, error) result
 
 val variant :
   context ->
@@ -61,13 +129,18 @@ val variant :
   (value, error) result
 
 val seal : context -> value -> fragment
+val fragment : value -> fragment
 
 val import : context -> depth:int -> fragment -> (value, error) result
 (** Import an already-owned fragment into a larger materialization while
     charging its complete resources and rebasing its depth. *)
 
-val singleton_object_from_owned : string -> fragment -> (fragment, error) result
-val object_from_owned : (string * fragment) list -> (fragment, error) result
+val singleton_object_from_owned :
+  ?limits:Log_limits.t -> string -> fragment -> (fragment, error) result
+
+val object_from_owned :
+  ?limits:Log_limits.t -> (string * fragment) list -> (fragment, error) result
+
 val complete : fragment -> t
 val view : t -> view
 
@@ -81,20 +154,44 @@ val root_has_field_matching : (string -> bool) -> t -> bool
 (** Whether an object root contains a field whose name satisfies the predicate.
     The root is traversed at most once. *)
 
+val fragment_is_object : fragment -> bool
+val fragment_root_has_field_matching : (string -> bool) -> fragment -> bool
+
 module Object_accumulator : sig
   type state
 
   val empty : state
-  val merge : state -> fragment -> (state, error) result
+  val merge : ?limits:Log_limits.t -> state -> fragment -> (state, error) result
 
-  val merge_disjoint : state -> fragment -> (state, error) result
+  val merge_disjoint :
+    ?limits:Log_limits.t -> state -> fragment -> (state, error) result
   (** Merge one authored contribution while rejecting repeated root names. *)
 
   val as_fragment : state -> fragment
   val as_value : state -> value
 end
 
+val merge_enrichments :
+  limits:Log_limits.t ->
+  caller:fragment ->
+  ((string -> bool) * fragment) list ->
+  (fragment * bool, error) result
+(** Merge already-owned structured contributions without rebuilding them. Caller
+    fields win recursively. Each contribution carries an authoritative-root
+    predicate. The boolean reports an incompatible ordinary enrichment path that
+    was omitted. *)
+
+val fit_object_extension :
+  ?limits:Log_limits.t ->
+  fragment ->
+  retained_bytes:int ->
+  (fragment, error) result
+(** Reserve deterministic space for required completed-log metadata. When an
+    object root no longer fits, retain its largest safe source-order prefix and
+    mark the root as truncated by total size. *)
+
 val validate_extension :
+  ?limits:Log_limits.t ->
   fragment option ->
   nodes:int ->
   string_bytes:int ->

@@ -1,0 +1,18 @@
+(executable
+ (name test_enrichment_contracts)
+ (modules test_enrichment_contracts)
+ (libraries observe observe_test_support alcotest))
+
+(executable
+ (name test_materialization_boundaries)
+ (modules test_materialization_boundaries)
+ (libraries observe observe_test_support alcotest))
+
+(rule
+ (alias observe-enrichment-contracts)
+ (package observe)
+ (deps test_enrichment_contracts.exe test_materialization_boundaries.exe)
+ (action
+  (progn
+   (run %{exe:test_enrichment_contracts.exe})
+   (run %{exe:test_materialization_boundaries.exe}))))

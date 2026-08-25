@@ -51,9 +51,9 @@ let prepared ?(retained_bytes = no_size) ?(encoded_bytes = no_size) operation =
   { operation; retained_bytes; encoded_bytes; cleanup = no_cleanup }
 
 let config ?(environment = "production") ?(console = Observe.Config.Auto)
-    ?(min_level = Observe.Level.Debug) ?(drains = []) () =
+    ?(min_level = Observe.Level.Debug) ?(drains = []) ?enrichers ?limits () =
   Observe.Config.create_exn ~service:"benchmark" ~environment ~console
-    ~min_level ~drains ()
+    ~min_level ~drains ?enrichers ?limits ()
 
 let accepted_drain () =
   Observe.Drain.create (fun log ->
@@ -80,6 +80,29 @@ let core_operation ?(style = Observe.Formatter.Plain) config make_message =
   let observer = Observer.create state in
   Observer.init_exn observer config;
   prepared (fun () -> Observe.Logs.info (make_message ()))
+
+let core_unit_operation config operation =
+  let state = Benchmark_io.create () in
+  let observer = Observer.create state in
+  Observer.init_exn observer config;
+  prepared operation
+
+let withheld_core_operation limits make_message =
+  let observed = ref false in
+  let drain =
+    Observe.Drain.create (fun _ ->
+        observed := true;
+        Observe.Drain.Accepted)
+  in
+  let state = Benchmark_io.create () in
+  let observer = Observer.create state in
+  Observer.init_exn observer
+    (config ~console:Observe.Config.Silent ~drains:[ drain ] ~limits ());
+  let operation () = Observe.Logs.info (make_message ()) in
+  operation ();
+  if !observed then
+    failwith "full-withholding benchmark unexpectedly retained an observation";
+  prepared operation
 
 let retained_core_operation operation =
   let drain, retained_bytes = retained_log_probe () in
@@ -317,6 +340,103 @@ let open_small () (m : Observe.Logs.builder) =
   |+ m.field "remembered" Observe.Type.bool true
   |> m.seal
 
+let benchmark_enricher name fields =
+  Observe.Logs.Enricher.create_exn ~name (fun () ->
+      Observe.Value.object_ fields)
+
+let benchmark_enricher_one =
+  benchmark_enricher "benchmark-one"
+    [ ("deployment", Observe.Value.string "production") ]
+
+let benchmark_enricher_two =
+  benchmark_enricher "benchmark-two"
+    [
+      ("region", Observe.Value.string "test");
+      ("release", Observe.Value.string "candidate");
+    ]
+
+let benchmark_enrichers_many =
+  List.init 8 (fun index ->
+      benchmark_enricher
+        ("benchmark-many-" ^ string_of_int index)
+        [ ("context_" ^ string_of_int index, Observe.Value.int index) ])
+
+let ppx_embedded_typed () =
+  [%observe.info
+    untyped
+      { payload = [%observe.value.embed Payload.nested_t, Payload.nested] }]
+
+let rec nested_object depth (m : Observe.Logs.untyped_builder) =
+  let open Observe.Logs in
+  if depth <= 0 then m.seal m.untyped
+  else
+    m.untyped
+    |+ m.object_ "child" (fun child -> nested_object (depth - 1) child)
+    |> m.seal
+
+let nested_structured depth () (m : Observe.Logs.builder) =
+  let open Observe.Logs in
+  m.untyped
+  |+ m.object_ "root" (fun child -> nested_object depth child)
+  |> m.seal
+
+let wide_structured count () (m : Observe.Logs.builder) =
+  let open Observe.Logs in
+  let rec add_fields object_ index =
+    if index = count then m.seal object_
+    else
+      add_fields
+        (object_
+        |+ m.field ("field_" ^ string_of_int index) Observe.Type.int index)
+        (index + 1)
+  in
+  add_fields m.untyped 0
+
+let collection_structured count () (m : Observe.Logs.builder) =
+  let open Observe.Logs in
+  m.untyped
+  |+ m.field "items"
+       (Observe.Type.list Observe.Type.int)
+       (List.init count (fun index -> index))
+  |> m.seal
+
+let bytes_structured length () (m : Observe.Logs.builder) =
+  let open Observe.Logs in
+  m.untyped
+  |+ m.field "payload" Observe.Type.bytes (Bytes.make length 'x')
+  |> m.seal
+
+let limited_string () (m : Observe.Logs.builder) =
+  let open Observe.Logs in
+  m.untyped
+  |+ m.field "value" Observe.Type.string (String.make 65 'x')
+  |> m.seal
+
+let p16_limits =
+  Observe.Logs.Limits.create_exn ~max_string_bytes:64 ~max_total_bytes:100_000
+    ()
+
+let p16_depth_limits =
+  Observe.Logs.Limits.create_exn ~max_depth:8 ~max_total_bytes:100_000 ()
+
+let p16_width_limits =
+  Observe.Logs.Limits.create_exn ~max_object_fields:32 ~max_total_bytes:100_000
+    ()
+
+let p16_collection_limits =
+  Observe.Logs.Limits.create_exn ~max_collection_length:32
+    ~max_total_bytes:100_000 ()
+
+let p16_node_limits =
+  Observe.Logs.Limits.create_exn ~max_nodes:32 ~max_total_bytes:100_000 ()
+
+let p16_byte_limits =
+  Observe.Logs.Limits.create_exn ~max_bytes_length:64 ~max_total_bytes:100_000
+    ()
+
+let p16_withholding_limits =
+  Observe.Logs.Limits.create_exn ~max_total_bytes:1 ()
+
 let retained_wide_operation operation = retained_core_operation operation
 
 let count_occurrences text fragment =
@@ -337,8 +457,8 @@ let validate_contended_log mode expected_fields = function
         match Observe.Log.event log with
         | Observe.Log.Text _ ->
             failwith "contended wide benchmark emitted a text observation"
-        | Observe.Log.Structured { value; _ } ->
-            Observe.Value.frozen_to_json_string value
+        | Observe.Log.Structured _ ->
+            Observe.Value.frozen_to_json_string (Observe.Log.fields log)
       in
       let actual =
         match mode with
@@ -758,171 +878,305 @@ let fs_scenarios =
   ]
 
 let core_scenarios =
-  [
-    make ~name:"core/filtered/tagged-text" ~suite:Core ~boundary:"filtered"
-      ~payload:"tagged-text" (fun () ->
-        core_operation (config ~min_level:Observe.Level.Warn ()) filtered_text);
-    make ~name:"core/routing/one-drain" ~suite:Core ~boundary:"routing"
-      ~payload:"tagged-text" (fun () ->
-        core_operation
-          (config ~console:Observe.Config.Silent
-             ~drains:[ accepted_drain () ]
-             ())
-          text);
-    make ~name:"core/routing/four-drains" ~suite:Core ~boundary:"routing"
-      ~payload:"tagged-text" (fun () ->
-        core_operation
-          (config ~console:Observe.Config.Silent
-             ~drains:
-               [
-                 accepted_drain ();
-                 accepted_drain ();
-                 accepted_drain ();
-                 accepted_drain ();
-               ]
-             ())
-          text);
-    make ~name:"core/canonical/typed-point" ~suite:Core
-      ~boundary:"canonical-freeze" ~payload:"typed-small" (fun () ->
-        retained_core_operation (fun () -> Observe.Logs.info (typed_small ())));
-    make ~name:"core/canonical/open-point" ~suite:Core ~boundary:"open-fragment"
-      ~payload:"open-small" (fun () ->
-        retained_core_operation (fun () -> Observe.Logs.info (open_small ())));
-    make ~name:"core/wide/open-fragment" ~suite:Core
-      ~boundary:"open-wide-fragment" ~payload:"open-small" (fun () ->
-        retained_wide_operation open_wide);
-    make ~name:"core/wide-stage/open-create" ~suite:Core ~boundary:"wide-create"
-      ~payload:"open-empty" (fun () -> retained_wide_operation open_wide_create);
-    make ~name:"core/wide-stage/open-create-set" ~suite:Core
-      ~boundary:"wide-create-set" ~payload:"open-small" (fun () ->
-        retained_wide_operation open_wide_create_set);
-    make ~name:"core/wide-stage/open-create-emit" ~suite:Core
-      ~boundary:"wide-create-emit" ~payload:"open-empty" (fun () ->
-        retained_wide_operation open_wide_create_emit);
-    make ~name:"core/wide-stage/open-repeated" ~suite:Core
-      ~boundary:"wide-repeated" ~payload:"open-four-updates" (fun () ->
-        retained_wide_operation open_wide_repeated);
-    make ~name:"core/wide/typed-patch" ~suite:Core ~boundary:"typed-wide-patch"
-      ~payload:"typed-small" (fun () -> retained_wide_operation typed_wide);
-    make ~name:"core/wide-stage/typed-create" ~suite:Core
-      ~boundary:"wide-create" ~payload:"typed-empty" (fun () ->
-        retained_wide_operation typed_wide_create);
-    make ~name:"core/wide-stage/typed-create-set" ~suite:Core
-      ~boundary:"wide-create-set" ~payload:"typed-small" (fun () ->
-        retained_wide_operation typed_wide_create_set);
-    make ~name:"core/wide-stage/typed-repeated" ~suite:Core
-      ~boundary:"wide-repeated" ~payload:"typed-four-updates" (fun () ->
-        retained_wide_operation typed_wide_repeated);
-    make ~name:"core/wide-scale/open-accumulate-1" ~suite:Core
-      ~boundary:"wide-scale" ~payload:"open-1-field" (fun () ->
-        retained_wide_operation (open_wide_accumulate 1));
-    make ~name:"core/wide-scale/open-accumulate-4" ~suite:Core
-      ~boundary:"wide-scale" ~payload:"open-4-fields" (fun () ->
-        retained_wide_operation (open_wide_accumulate 4));
-    make ~name:"core/wide-scale/open-accumulate-16" ~suite:Core
-      ~boundary:"wide-scale" ~payload:"open-16-fields" (fun () ->
-        retained_wide_operation (open_wide_accumulate 16));
-    make ~name:"core/wide-scale/open-accumulate-64" ~suite:Core
-      ~boundary:"wide-scale" ~payload:"open-64-fields" (fun () ->
-        retained_wide_operation (open_wide_accumulate 64));
-    make ~name:"core/wide-scale/open-replace-1" ~suite:Core
-      ~boundary:"wide-scale" ~payload:"open-1-replacement" (fun () ->
-        retained_wide_operation (open_wide_replace 1));
-    make ~name:"core/wide-scale/open-replace-4" ~suite:Core
-      ~boundary:"wide-scale" ~payload:"open-4-replacements" (fun () ->
-        retained_wide_operation (open_wide_replace 4));
-    make ~name:"core/wide-scale/open-replace-16" ~suite:Core
-      ~boundary:"wide-scale" ~payload:"open-16-replacements" (fun () ->
-        retained_wide_operation (open_wide_replace 16));
-    make ~name:"core/wide-scale/open-replace-64" ~suite:Core
-      ~boundary:"wide-scale" ~payload:"open-64-replacements" (fun () ->
-        retained_wide_operation (open_wide_replace 64));
-    make ~name:"core/wide-scale/typed-replace-1" ~suite:Core
-      ~boundary:"wide-scale" ~payload:"typed-1-replacement" (fun () ->
-        retained_wide_operation (typed_wide_replace 1));
-    make ~name:"core/wide-scale/typed-replace-4" ~suite:Core
-      ~boundary:"wide-scale" ~payload:"typed-4-replacements" (fun () ->
-        retained_wide_operation (typed_wide_replace 4));
-    make ~name:"core/wide-scale/typed-replace-16" ~suite:Core
-      ~boundary:"wide-scale" ~payload:"typed-16-replacements" (fun () ->
-        retained_wide_operation (typed_wide_replace 16));
-    make ~name:"core/wide-scale/typed-replace-64" ~suite:Core
-      ~boundary:"wide-scale" ~payload:"typed-64-replacements" (fun () ->
-        retained_wide_operation (typed_wide_replace 64));
-    make ~logical_operations:64
-      ~name:"core/wide-contention/open-accumulate-4x16" ~suite:Core
-      ~boundary:"wide-contention" ~payload:"open-64-fields" (fun () ->
-        contended_wide_operation `Accumulate);
-    make ~logical_operations:64 ~name:"core/wide-contention/open-replace-4x16"
-      ~suite:Core ~boundary:"wide-contention" ~payload:"open-64-replacements"
-      (fun () -> contended_wide_operation `Replace);
-    make ~name:"core/wide-stage/open-error" ~suite:Core ~boundary:"wide-error"
-      ~payload:"open-error" (fun () -> retained_wide_operation open_wide_error);
-    make ~name:"core/wide-stage/open-set-level" ~suite:Core
-      ~boundary:"wide-level" ~payload:"open-empty" (fun () ->
-        retained_wide_operation open_wide_set_level);
-    make ~name:"core/wide-stage/open-annotate" ~suite:Core
-      ~boundary:"wide-annotation" ~payload:"one-warning" (fun () ->
-        retained_wide_operation open_wide_annotate);
-    make ~name:"core/correlation/explicit-point" ~suite:Core
-      ~boundary:"correlated-point" ~payload:"tagged-text" (fun () ->
-        let wide = Observe.Logs.create ~name:"point-parent" () in
-        retained_core_operation (explicit_correlated_point wide));
-    make ~name:"core/operation/point" ~suite:Core ~boundary:"operation-point"
-      ~payload:"tagged-text" (fun () ->
-        retained_core_with_observer (fun observer -> operation_point observer));
-    make ~name:"core/operation/current-open" ~suite:Core
-      ~boundary:"operation-current" ~payload:"open-empty" (fun () ->
-        retained_core_with_observer (fun observer ->
-            current_open_operation observer));
-    make ~name:"core/operation/current-typed" ~suite:Core
-      ~boundary:"operation-current" ~payload:"typed-empty" (fun () ->
-        retained_core_with_observer (fun observer ->
-            current_typed_operation observer));
-    make ~name:"core/operation/success" ~suite:Core
-      ~boundary:"operation-success" ~payload:"open-empty" (fun () ->
-        retained_core_with_observer (fun observer -> operation_success observer));
-    make ~name:"core/operation/failure" ~suite:Core
-      ~boundary:"operation-failure" ~payload:"open-error" (fun () ->
-        retained_core_with_observer (fun observer -> operation_failure observer));
-    make ~name:"core/operation/parent-child" ~suite:Core
-      ~boundary:"operation-parent-child" ~payload:"open-empty" (fun () ->
-        retained_core_with_observer (fun observer ->
-            parent_child_operation observer));
-    make ~name:"core/wide/nested-patch" ~suite:Core
-      ~boundary:"nested-wide-patch" ~payload:"typed-nested" (fun () ->
-        retained_wide_operation nested_typed_wide);
-    make ~name:"core/json/tagged-text" ~suite:Core ~boundary:"json"
-      ~payload:"tagged-text" (fun () ->
-        core_operation (config ~console:Observe.Config.Ndjson ()) text);
-    make ~name:"core/json/untyped-small" ~suite:Core ~boundary:"json"
-      ~payload:"untyped-small" (fun () ->
-        core_operation (config ~console:Observe.Config.Ndjson ()) untyped_small);
-    make ~name:"core/json/typed-small" ~suite:Core ~boundary:"json"
-      ~payload:"typed-small" (fun () ->
-        core_operation (config ~console:Observe.Config.Ndjson ()) typed_small);
-    make ~name:"core/json/untyped-nested" ~suite:Core ~boundary:"json"
-      ~payload:"untyped-nested" (fun () ->
-        core_operation (config ~console:Observe.Config.Ndjson ()) untyped_nested);
-    make ~name:"core/json/typed-nested" ~suite:Core ~boundary:"json"
-      ~payload:"typed-nested" (fun () ->
-        core_operation (config ~console:Observe.Config.Ndjson ()) typed_nested);
-    make ~name:"core/pretty/tagged-text" ~suite:Core ~boundary:"pretty"
-      ~payload:"tagged-text" (fun () ->
-        core_operation ~style:Observe.Formatter.Truecolor
-          (config ~environment:"development" ~console:Observe.Config.Pretty ())
-          text);
-    make ~name:"core/pretty/untyped-nested" ~suite:Core ~boundary:"pretty"
-      ~payload:"untyped-nested" (fun () ->
-        core_operation ~style:Observe.Formatter.Truecolor
-          (config ~environment:"development" ~console:Observe.Config.Pretty ())
-          untyped_nested);
-    make ~name:"core/pretty/typed-nested" ~suite:Core ~boundary:"pretty"
-      ~payload:"typed-nested" (fun () ->
-        core_operation ~style:Observe.Formatter.Truecolor
-          (config ~environment:"development" ~console:Observe.Config.Pretty ())
-          typed_nested);
-  ]
+  let scenarios =
+    [
+      make ~name:"core/filtered/tagged-text" ~suite:Core ~boundary:"filtered"
+        ~payload:"tagged-text" (fun () ->
+          core_operation (config ~min_level:Observe.Level.Warn ()) filtered_text);
+      make ~name:"core/routing/one-drain" ~suite:Core ~boundary:"routing"
+        ~payload:"tagged-text" (fun () ->
+          core_operation
+            (config ~console:Observe.Config.Silent
+               ~drains:[ accepted_drain () ]
+               ())
+            text);
+      make ~name:"core/routing/four-drains" ~suite:Core ~boundary:"routing"
+        ~payload:"tagged-text" (fun () ->
+          core_operation
+            (config ~console:Observe.Config.Silent
+               ~drains:
+                 [
+                   accepted_drain ();
+                   accepted_drain ();
+                   accepted_drain ();
+                   accepted_drain ();
+                 ]
+               ())
+            text);
+      make ~name:"core/enrichment/zero" ~suite:Core ~boundary:"enrichment"
+        ~payload:"zero-enrichers" (fun () ->
+          core_operation
+            (config ~console:Observe.Config.Silent
+               ~drains:[ accepted_drain () ]
+               ())
+            open_small);
+      make ~name:"core/enrichment/one" ~suite:Core ~boundary:"enrichment"
+        ~payload:"one-enricher" (fun () ->
+          core_operation
+            (config ~console:Observe.Config.Silent
+               ~drains:[ accepted_drain () ]
+               ~enrichers:[ benchmark_enricher_one ] ())
+            open_small);
+      make ~name:"core/enrichment/multiple" ~suite:Core ~boundary:"enrichment"
+        ~payload:"two-enrichers" (fun () ->
+          core_operation
+            (config ~console:Observe.Config.Silent
+               ~drains:[ accepted_drain () ]
+               ~enrichers:[ benchmark_enricher_one; benchmark_enricher_two ]
+               ())
+            open_small);
+      make ~name:"core/enrichment/many" ~suite:Core ~boundary:"enrichment"
+        ~payload:"eight-enrichers" (fun () ->
+          core_operation
+            (config ~console:Observe.Config.Silent
+               ~drains:[ accepted_drain () ]
+               ~enrichers:benchmark_enrichers_many ())
+            open_small);
+      make ~name:"core/materialization/default" ~suite:Core
+        ~boundary:"materialization" ~payload:"default-limits" (fun () ->
+          core_operation
+            (config ~console:Observe.Config.Silent
+               ~drains:[ accepted_drain () ]
+               ())
+            untyped_nested);
+      make ~name:"core/materialization/depth" ~suite:Core
+        ~boundary:"materialization-depth" ~payload:"depth-32" (fun () ->
+          core_operation
+            (config ~console:Observe.Config.Silent
+               ~drains:[ accepted_drain () ]
+               ())
+            (nested_structured 32));
+      make ~name:"core/materialization/depth-truncated" ~suite:Core
+        ~boundary:"materialization-depth" ~payload:"depth-32-limit-8" (fun () ->
+          core_operation
+            (config ~console:Observe.Config.Silent
+               ~drains:[ accepted_drain () ]
+               ~limits:p16_depth_limits ())
+            (nested_structured 32));
+      make ~name:"core/materialization/width" ~suite:Core
+        ~boundary:"materialization-width" ~payload:"128-fields" (fun () ->
+          core_operation
+            (config ~console:Observe.Config.Silent
+               ~drains:[ accepted_drain () ]
+               ())
+            (wide_structured 128));
+      make ~name:"core/materialization/width-truncated" ~suite:Core
+        ~boundary:"materialization-width" ~payload:"128-fields-limit-32"
+        (fun () ->
+          core_operation
+            (config ~console:Observe.Config.Silent
+               ~drains:[ accepted_drain () ]
+               ~limits:p16_width_limits ())
+            (wide_structured 128));
+      make ~name:"core/materialization/collection" ~suite:Core
+        ~boundary:"materialization-collection" ~payload:"128-items" (fun () ->
+          core_operation
+            (config ~console:Observe.Config.Silent
+               ~drains:[ accepted_drain () ]
+               ())
+            (collection_structured 128));
+      make ~name:"core/materialization/collection-truncated" ~suite:Core
+        ~boundary:"materialization-collection" ~payload:"128-items-limit-32"
+        (fun () ->
+          core_operation
+            (config ~console:Observe.Config.Silent
+               ~drains:[ accepted_drain () ]
+               ~limits:p16_collection_limits ())
+            (collection_structured 128));
+      make ~name:"core/materialization/nodes-truncated" ~suite:Core
+        ~boundary:"materialization-nodes" ~payload:"128-fields-limit-32"
+        (fun () ->
+          core_operation
+            (config ~console:Observe.Config.Silent
+               ~drains:[ accepted_drain () ]
+               ~limits:p16_node_limits ())
+            (wide_structured 128));
+      make ~name:"core/materialization/bytes-truncated" ~suite:Core
+        ~boundary:"materialization-bytes" ~payload:"128-bytes-limit-64"
+        (fun () ->
+          core_operation
+            (config ~console:Observe.Config.Silent
+               ~drains:[ accepted_drain () ]
+               ~limits:p16_byte_limits ())
+            (bytes_structured 128));
+      make ~name:"core/materialization/truncated-string" ~suite:Core
+        ~boundary:"materialization" ~payload:"localized-string-marker"
+        (fun () ->
+          core_operation
+            (config ~console:Observe.Config.Silent
+               ~drains:[ accepted_drain () ]
+               ~limits:p16_limits ())
+            limited_string);
+      make ~name:"core/materialization/full-withholding" ~suite:Core
+        ~boundary:"materialization-total-bytes" ~payload:"one-byte-budget"
+        (fun () -> withheld_core_operation p16_withholding_limits open_small);
+      make ~name:"core/materialization/embedded-typed" ~suite:Core
+        ~boundary:"materialization-embedded" ~payload:"ppx-embedded-record"
+        (fun () ->
+          core_unit_operation
+            (config ~console:Observe.Config.Silent
+               ~drains:[ accepted_drain () ]
+               ())
+            ppx_embedded_typed);
+      make ~name:"core/canonical/typed-point" ~suite:Core
+        ~boundary:"canonical-freeze" ~payload:"typed-small" (fun () ->
+          retained_core_operation (fun () -> Observe.Logs.info (typed_small ())));
+      make ~name:"core/canonical/open-point" ~suite:Core
+        ~boundary:"open-fragment" ~payload:"open-small" (fun () ->
+          retained_core_operation (fun () -> Observe.Logs.info (open_small ())));
+      make ~name:"core/wide/open-fragment" ~suite:Core
+        ~boundary:"open-wide-fragment" ~payload:"open-small" (fun () ->
+          retained_wide_operation open_wide);
+      make ~name:"core/wide-stage/open-create" ~suite:Core
+        ~boundary:"wide-create" ~payload:"open-empty" (fun () ->
+          retained_wide_operation open_wide_create);
+      make ~name:"core/wide-stage/open-create-set" ~suite:Core
+        ~boundary:"wide-create-set" ~payload:"open-small" (fun () ->
+          retained_wide_operation open_wide_create_set);
+      make ~name:"core/wide-stage/open-create-emit" ~suite:Core
+        ~boundary:"wide-create-emit" ~payload:"open-empty" (fun () ->
+          retained_wide_operation open_wide_create_emit);
+      make ~name:"core/wide-stage/open-repeated" ~suite:Core
+        ~boundary:"wide-repeated" ~payload:"open-four-updates" (fun () ->
+          retained_wide_operation open_wide_repeated);
+      make ~name:"core/wide/typed-patch" ~suite:Core
+        ~boundary:"typed-wide-patch" ~payload:"typed-small" (fun () ->
+          retained_wide_operation typed_wide);
+      make ~name:"core/wide-stage/typed-create" ~suite:Core
+        ~boundary:"wide-create" ~payload:"typed-empty" (fun () ->
+          retained_wide_operation typed_wide_create);
+      make ~name:"core/wide-stage/typed-create-set" ~suite:Core
+        ~boundary:"wide-create-set" ~payload:"typed-small" (fun () ->
+          retained_wide_operation typed_wide_create_set);
+      make ~name:"core/wide-stage/typed-repeated" ~suite:Core
+        ~boundary:"wide-repeated" ~payload:"typed-four-updates" (fun () ->
+          retained_wide_operation typed_wide_repeated);
+      make ~name:"core/wide-scale/open-accumulate-1" ~suite:Core
+        ~boundary:"wide-scale" ~payload:"open-1-field" (fun () ->
+          retained_wide_operation (open_wide_accumulate 1));
+      make ~name:"core/wide-scale/open-accumulate-4" ~suite:Core
+        ~boundary:"wide-scale" ~payload:"open-4-fields" (fun () ->
+          retained_wide_operation (open_wide_accumulate 4));
+      make ~name:"core/wide-scale/open-accumulate-16" ~suite:Core
+        ~boundary:"wide-scale" ~payload:"open-16-fields" (fun () ->
+          retained_wide_operation (open_wide_accumulate 16));
+      make ~name:"core/wide-scale/open-accumulate-64" ~suite:Core
+        ~boundary:"wide-scale" ~payload:"open-64-fields" (fun () ->
+          retained_wide_operation (open_wide_accumulate 64));
+      make ~name:"core/wide-scale/open-replace-1" ~suite:Core
+        ~boundary:"wide-scale" ~payload:"open-1-replacement" (fun () ->
+          retained_wide_operation (open_wide_replace 1));
+      make ~name:"core/wide-scale/open-replace-4" ~suite:Core
+        ~boundary:"wide-scale" ~payload:"open-4-replacements" (fun () ->
+          retained_wide_operation (open_wide_replace 4));
+      make ~name:"core/wide-scale/open-replace-16" ~suite:Core
+        ~boundary:"wide-scale" ~payload:"open-16-replacements" (fun () ->
+          retained_wide_operation (open_wide_replace 16));
+      make ~name:"core/wide-scale/open-replace-64" ~suite:Core
+        ~boundary:"wide-scale" ~payload:"open-64-replacements" (fun () ->
+          retained_wide_operation (open_wide_replace 64));
+      make ~name:"core/wide-scale/typed-replace-1" ~suite:Core
+        ~boundary:"wide-scale" ~payload:"typed-1-replacement" (fun () ->
+          retained_wide_operation (typed_wide_replace 1));
+      make ~name:"core/wide-scale/typed-replace-4" ~suite:Core
+        ~boundary:"wide-scale" ~payload:"typed-4-replacements" (fun () ->
+          retained_wide_operation (typed_wide_replace 4));
+      make ~name:"core/wide-scale/typed-replace-16" ~suite:Core
+        ~boundary:"wide-scale" ~payload:"typed-16-replacements" (fun () ->
+          retained_wide_operation (typed_wide_replace 16));
+      make ~name:"core/wide-scale/typed-replace-64" ~suite:Core
+        ~boundary:"wide-scale" ~payload:"typed-64-replacements" (fun () ->
+          retained_wide_operation (typed_wide_replace 64));
+      make ~logical_operations:64
+        ~name:"core/wide-contention/open-accumulate-4x16" ~suite:Core
+        ~boundary:"wide-contention" ~payload:"open-64-fields" (fun () ->
+          contended_wide_operation `Accumulate);
+      make ~logical_operations:64 ~name:"core/wide-contention/open-replace-4x16"
+        ~suite:Core ~boundary:"wide-contention" ~payload:"open-64-replacements"
+        (fun () -> contended_wide_operation `Replace);
+      make ~name:"core/wide-stage/open-error" ~suite:Core ~boundary:"wide-error"
+        ~payload:"open-error" (fun () ->
+          retained_wide_operation open_wide_error);
+      make ~name:"core/wide-stage/open-set-level" ~suite:Core
+        ~boundary:"wide-level" ~payload:"open-empty" (fun () ->
+          retained_wide_operation open_wide_set_level);
+      make ~name:"core/wide-stage/open-annotate" ~suite:Core
+        ~boundary:"wide-annotation" ~payload:"one-warning" (fun () ->
+          retained_wide_operation open_wide_annotate);
+      make ~name:"core/correlation/explicit-point" ~suite:Core
+        ~boundary:"correlated-point" ~payload:"tagged-text" (fun () ->
+          let wide = Observe.Logs.create ~name:"point-parent" () in
+          retained_core_operation (explicit_correlated_point wide));
+      make ~name:"core/operation/point" ~suite:Core ~boundary:"operation-point"
+        ~payload:"tagged-text" (fun () ->
+          retained_core_with_observer (fun observer -> operation_point observer));
+      make ~name:"core/operation/current-open" ~suite:Core
+        ~boundary:"operation-current" ~payload:"open-empty" (fun () ->
+          retained_core_with_observer (fun observer ->
+              current_open_operation observer));
+      make ~name:"core/operation/current-typed" ~suite:Core
+        ~boundary:"operation-current" ~payload:"typed-empty" (fun () ->
+          retained_core_with_observer (fun observer ->
+              current_typed_operation observer));
+      make ~name:"core/operation/success" ~suite:Core
+        ~boundary:"operation-success" ~payload:"open-empty" (fun () ->
+          retained_core_with_observer (fun observer ->
+              operation_success observer));
+      make ~name:"core/operation/failure" ~suite:Core
+        ~boundary:"operation-failure" ~payload:"open-error" (fun () ->
+          retained_core_with_observer (fun observer ->
+              operation_failure observer));
+      make ~name:"core/operation/parent-child" ~suite:Core
+        ~boundary:"operation-parent-child" ~payload:"open-empty" (fun () ->
+          retained_core_with_observer (fun observer ->
+              parent_child_operation observer));
+      make ~name:"core/wide/nested-patch" ~suite:Core
+        ~boundary:"nested-wide-patch" ~payload:"typed-nested" (fun () ->
+          retained_wide_operation nested_typed_wide);
+      make ~name:"core/json/tagged-text" ~suite:Core ~boundary:"json"
+        ~payload:"tagged-text" (fun () ->
+          core_operation (config ~console:Observe.Config.Ndjson ()) text);
+      make ~name:"core/json/untyped-small" ~suite:Core ~boundary:"json"
+        ~payload:"untyped-small" (fun () ->
+          core_operation
+            (config ~console:Observe.Config.Ndjson ())
+            untyped_small);
+      make ~name:"core/json/typed-small" ~suite:Core ~boundary:"json"
+        ~payload:"typed-small" (fun () ->
+          core_operation (config ~console:Observe.Config.Ndjson ()) typed_small);
+      make ~name:"core/json/untyped-nested" ~suite:Core ~boundary:"json"
+        ~payload:"untyped-nested" (fun () ->
+          core_operation
+            (config ~console:Observe.Config.Ndjson ())
+            untyped_nested);
+      make ~name:"core/json/typed-nested" ~suite:Core ~boundary:"json"
+        ~payload:"typed-nested" (fun () ->
+          core_operation (config ~console:Observe.Config.Ndjson ()) typed_nested);
+      make ~name:"core/pretty/tagged-text" ~suite:Core ~boundary:"pretty"
+        ~payload:"tagged-text" (fun () ->
+          core_operation ~style:Observe.Formatter.Truecolor
+            (config ~environment:"development" ~console:Observe.Config.Pretty ())
+            text);
+      make ~name:"core/pretty/untyped-nested" ~suite:Core ~boundary:"pretty"
+        ~payload:"untyped-nested" (fun () ->
+          core_operation ~style:Observe.Formatter.Truecolor
+            (config ~environment:"development" ~console:Observe.Config.Pretty ())
+            untyped_nested);
+      make ~name:"core/pretty/typed-nested" ~suite:Core ~boundary:"pretty"
+        ~payload:"typed-nested" (fun () ->
+          core_operation ~style:Observe.Formatter.Truecolor
+            (config ~environment:"development" ~console:Observe.Config.Pretty ())
+            typed_nested);
+    ]
+  in
+  let p16, established =
+    List.partition
+      (fun scenario ->
+        String.starts_with ~prefix:"core/enrichment/" scenario.name
+        || String.starts_with ~prefix:"core/materialization/" scenario.name)
+      scenarios
+  in
+  established @ p16
 
 let lwt_unix_scenarios =
   [

@@ -13,6 +13,8 @@ Select one suite or compare with an earlier report:
 
 ```sh
 opam exec -- dune exec bench/observe_bench.exe -- --suite core
+opam exec -- dune exec bench/observe_bench.exe -- \
+  --scenario core/canonical/open-point
 opam exec -- dune exec bench/observe_bench.exe -- --suite fs
 opam exec -- dune exec bench/observe_bench.exe -- --suite fs-lwt-unix
 opam exec -- dune exec bench/observe_bench.exe -- \
@@ -52,7 +54,13 @@ amortized. Report schema version 3 adds this field.
   wide fragments, typed sparse patches, and nested
   typed patches. Operation scenarios separately measure open and typed current
   lookup, bounded success and failure, a point inside an operation, and child
-  execution together with its required parent lifecycle. These boundaries are
+  execution together with its required parent lifecycle. Enrichment scenarios
+  measure zero, one, multiple, and many configured enrichers. Materialization
+  scenarios cover a representative default payload, depth, object width,
+  collection length, node count, embedded typed values, byte and string
+  truncation, and a total-byte budget that withholds the observation. The
+  boundary probes use deliberately small limits so their behavior is cheap to
+  measure; they are not substitutes for correctness tests. These boundaries are
   named separately in the report; no latency number is treated as proof of
   semantic correctness or lock-freedom.
 - `fs` isolates prompt rejection by a full or closed portable filesystem
@@ -76,4 +84,12 @@ amortized. Report schema version 3 adds this field.
 Untyped and typed scenarios use the same small or nested logical event.
 Compare measurements only when their report metadata, benchmark configuration,
 runtime, and machine are compatible. GitHub Actions stores reports as workflow
-artifacts and does not enforce performance thresholds.
+artifacts and does not enforce performance thresholds. The finite defaults
+preserve Observe's established canonical safety envelope: depth 64, 1,024
+object fields or collection entries, 1 MiB per string or byte value, 100,000
+nodes, and 4 MiB of deterministic total-size accounting. The default scenarios
+measure representative work below that envelope, while controlled low-limit
+scenarios measure localized truncation and full withholding. This evidence
+supports a bounded compatibility-preserving default; it does not claim those
+numbers are optimal or universally safe for every workload. Applications can
+select another validated finite policy from their own workload evidence.
