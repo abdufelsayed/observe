@@ -20,12 +20,14 @@ let next_open_fails = ref false
 let next_write_fails = ref false
 let next_flush_fails = ref false
 let next_close_fails = ref false
+let next_child_callback : (unit -> unit) option ref = ref None
 let write_gate : unit Lwt.t option ref = ref None
 let flushes = ref 0
 let closes = ref 0
 let recorded_operations = ref []
 let next_notifier_id = ref 0
 let notification_counts : (int, int) Hashtbl.t = Hashtbl.create 2
+let path_projections = ref 0
 
 let reset () =
   Hashtbl.clear files;
@@ -34,11 +36,13 @@ let reset () =
   next_write_fails := false;
   next_flush_fails := false;
   next_close_fails := false;
+  next_child_callback := None;
   write_gate := None;
   flushes := 0;
   closes := 0;
   recorded_operations := [];
   next_notifier_id := 0;
+  path_projections := 0;
   Hashtbl.clear notification_counts
 
 let seed path value =
@@ -57,6 +61,8 @@ let fail_next_open () = next_open_fails := true
 let fail_next_write () = next_write_fails := true
 let fail_next_flush () = next_flush_fails := true
 let fail_next_close () = next_close_fails := true
+let path_projection_count () = !path_projections
+let on_next_path callback = next_child_callback := Some callback
 let flush_count () = !flushes
 let close_count () = !closes
 let operations () = List.rev !recorded_operations
@@ -115,7 +121,13 @@ module IO = struct
     notifier.disposed <- true;
     notify notifier
 
-  let child ~dir ~name = Filename.concat dir name
+  let child ~dir ~name =
+    incr path_projections;
+    let callback = !next_child_callback in
+    next_child_callback := None;
+    Option.iter (fun callback -> callback ()) callback;
+    Filename.concat dir name
+
   let ensure_directory _ = Lwt.return (Ok ())
 
   let open_append path =

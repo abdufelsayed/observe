@@ -3,6 +3,8 @@
  (modules benchmark_io payload scenario measurement report observe_bench)
  (libraries
   observe
+  observe-fs
+  observe_fs_test_support
   observe-lwt-unix
   observe-fs-lwt-unix
   bechamel

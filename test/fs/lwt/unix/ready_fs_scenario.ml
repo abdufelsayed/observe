@@ -10,6 +10,13 @@ let check condition format =
     (fun message -> if not condition then failwith message)
     format
 
+let diagnostic_count kind =
+  List.fold_left
+    (fun total (entry : Observe.Diagnostics.entry) ->
+      if entry.kind = kind then total + entry.count else total)
+    0
+    (Observe.Diagnostics.snapshot ())
+
 let valid_json value =
   let decoder = Jsonm.decoder (`String value) in
   let rec decode saw_lexeme =
@@ -209,6 +216,53 @@ let concurrency () =
         done
       done)
 
+let bounded_concurrency () =
+  with_directory (fun root ->
+      let drain =
+        Lwt_main.run (Observe_fs_lwt_unix.create_exn ~dir:root ~capacity:1 ())
+      in
+      Observe_lwt_unix.init_exn
+        (Observe.Config.create_exn ~service:"fs-bounded-concurrency"
+           ~console:Observe.Config.Silent ~drains:[ drain ] ());
+      let producers = 8 in
+      let records_per_producer = 100 in
+      let total = producers * records_per_producer in
+      let rejected_before =
+        diagnostic_count Observe.Diagnostics.Drain_rejected
+      in
+      let threads =
+        List.init producers (fun producer ->
+            Thread.create
+              (fun () ->
+                for record = 1 to records_per_producer do
+                  Observe.Logs.info
+                    (text ~tag:"bounded-concurrency"
+                       (Format.sprintf "%d:%d" producer record))
+                done)
+              ())
+      in
+      List.iter Thread.join threads;
+      Lwt_main.run (Observe_lwt_unix.shutdown ());
+      let rejected =
+        diagnostic_count Observe.Diagnostics.Drain_rejected - rejected_before
+      in
+      let written =
+        Sys.readdir root
+        |> Array.to_list
+        |> List.fold_left
+             (fun count file ->
+               count
+               + List.length
+                   (nonempty_lines (read_file (Filename.concat root file))))
+             0
+      in
+      check (rejected > 0) "bounded concurrent output never reached capacity";
+      check
+        (written + rejected = total)
+        "concurrent acceptance accounting lost work: %d written + %d rejected \
+         <> %d"
+        written rejected total)
+
 let () =
   match Array.to_list Sys.argv with
   | [ _; "daily" ] -> daily ()
@@ -216,4 +270,5 @@ let () =
   | [ _; "invalid-target" ] -> invalid_target ()
   | [ _; "lifecycle-closed" ] -> lifecycle_closed ()
   | [ _; "concurrency" ] -> concurrency ()
+  | [ _; "bounded-concurrency" ] -> bounded_concurrency ()
   | _ -> fail "unknown ready filesystem scenario"

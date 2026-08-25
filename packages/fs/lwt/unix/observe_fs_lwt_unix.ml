@@ -51,6 +51,13 @@ let lifecycle_hook callback () =
     | Result.Ok () -> Lwt.return_unit
     | Result.Error error -> Lwt.fail (Error (error_of_writer error)))
 
+let cleanup writer =
+  Lwt.catch
+    (fun () -> Lwt.map ignore (Lwt.no_cancel (Writer.shutdown writer)))
+    (function
+      | (Out_of_memory | Stack_overflow | Sys.Break) as exn -> Lwt.fail exn
+      | _ -> Lwt.return_unit)
+
 let create ~dir ?capacity () =
   Lwt.bind (Writer.create ~dir ?capacity ()) (function
     | Result.Error error -> Lwt.return (Result.Error (error_of_writer error))
@@ -62,8 +69,12 @@ let create ~dir ?capacity () =
         with
         | Result.Ok () -> Lwt.return (Result.Ok (Writer.drain writer))
         | Result.Error Observe_lwt_unix.Lifecycle.Closed ->
-            Lwt.bind (Writer.shutdown writer) (fun _ ->
-                Lwt.return (Result.Error Lifecycle_closed))))
+            Lwt.bind (cleanup writer) (fun () ->
+                Lwt.return (Result.Error Lifecycle_closed))
+        | exception raised ->
+            let backtrace = Printexc.get_raw_backtrace () in
+            Lwt.bind (cleanup writer) (fun () ->
+                Printexc.raise_with_backtrace raised backtrace)))
 
 let create_exn ~dir ?capacity () =
   Lwt.bind (create ~dir ?capacity ()) (function

@@ -198,10 +198,16 @@ let capacity () =
   emit "one" "one";
   Lwt_main.run (Lwt.pause ());
   emit "two" "two";
+  let projections =
+    Observe_fs_test_support.Fs_fixture.path_projection_count ()
+  in
   emit "three" "three";
   check
     (diagnostic_count Observe.Diagnostics.Drain_rejected = before + 1)
     "full queue did not reject exactly the newest record";
+  check
+    (Observe_fs_test_support.Fs_fixture.path_projection_count () = projections)
+    "full queue projected the rejected record";
   release ();
   Lwt_main.run (Writer.shutdown writer) |> Result.get_ok;
   let output =
@@ -358,6 +364,50 @@ let invalid_write_count () =
   | Error error -> fail "unexpected failure: %a" Writer.pp_error error
   | Ok () -> fail "invalid write count was accepted"
 
+let projection_failure_releases_capacity () =
+  let writer = create ~capacity:1 () in
+  install [ 0L; 1L ] (Writer.drain writer);
+  let raised_before = diagnostic_count Observe.Diagnostics.Drain_raised in
+  Observe_fs_test_support.Fs_fixture.on_next_path (fun () ->
+      failwith "path projection failed");
+  emit "failed-projection" "reject";
+  check
+    (diagnostic_count Observe.Diagnostics.Drain_raised = raised_before + 1)
+    "path projection failure did not escape through the drain boundary";
+  emit "after-projection" "accepted";
+  Lwt_main.run (Writer.shutdown writer) |> Result.get_ok;
+  let output =
+    Observe_fs_test_support.Fs_fixture.contents "/logs/1970-01-01.jsonl"
+  in
+  check (line_count output = 1) "projection failure leaked its reservation";
+  check
+    (contains output "\"tag\":\"after-projection\"")
+    "later output was not accepted after projection failure"
+
+let shutdown_during_projection () =
+  let writer = create ~capacity:1 () in
+  install [ 0L ] (Writer.drain writer);
+  let shutdown = ref None in
+  let rejected_before = diagnostic_count Observe.Diagnostics.Drain_rejected in
+  Observe_fs_test_support.Fs_fixture.on_next_path (fun () ->
+      shutdown := Some (Writer.shutdown writer));
+  emit "shutdown-race" "reject";
+  check
+    (diagnostic_count Observe.Diagnostics.Drain_rejected = rejected_before + 1)
+    "shutdown race accepted a reserved projection";
+  let shutdown =
+    match !shutdown with
+    | Some shutdown -> shutdown
+    | None -> fail "path projection did not start shutdown"
+  in
+  Lwt_main.run shutdown |> Result.get_ok;
+  check
+    (Observe_fs_test_support.Fs_fixture.paths () = [])
+    "shutdown race enqueued a projected record";
+  check
+    (Observe_fs_test_support.Fs_fixture.close_count () = 0)
+    "empty shutdown unexpectedly opened a file"
+
 let shutdown () =
   let writer = create () in
   install [ 0L; 1L ] (Writer.drain writer);
@@ -365,10 +415,16 @@ let shutdown () =
   Lwt_main.run (Writer.shutdown writer) |> Result.get_ok;
   Lwt_main.run (Writer.shutdown writer) |> Result.get_ok;
   let rejected_before = diagnostic_count Observe.Diagnostics.Drain_rejected in
+  let projections =
+    Observe_fs_test_support.Fs_fixture.path_projection_count ()
+  in
   emit "after" "after";
   check
     (diagnostic_count Observe.Diagnostics.Drain_rejected = rejected_before + 1)
     "shutdown writer accepted later output";
+  check
+    (Observe_fs_test_support.Fs_fixture.path_projection_count () = projections)
+    "shutdown writer projected later output";
   check
     (Observe_fs_test_support.Fs_fixture.close_count () = 1)
     "shutdown did not close exactly once"
@@ -389,5 +445,8 @@ let () =
   | [ _; "failure-flush" ] -> failure_flush ()
   | [ _; "failure-close" ] -> failure_close ()
   | [ _; "invalid-write-count" ] -> invalid_write_count ()
+  | [ _; "projection-failure-releases-capacity" ] ->
+      projection_failure_releases_capacity ()
+  | [ _; "shutdown-during-projection" ] -> shutdown_during_projection ()
   | [ _; "shutdown" ] -> shutdown ()
   | _ -> fail "unknown portable filesystem scenario"

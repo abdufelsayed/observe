@@ -38,6 +38,8 @@ val fail_next_open : unit -> unit
 val fail_next_write : unit -> unit
 val fail_next_flush : unit -> unit
 val fail_next_close : unit -> unit
+val path_projection_count : unit -> int
+val on_next_path : (unit -> unit) -> unit
 val block_writes : unit -> unit -> unit
 val flush_count : unit -> int
 val close_count : unit -> int

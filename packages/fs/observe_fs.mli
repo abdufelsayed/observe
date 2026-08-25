@@ -69,7 +69,9 @@ module Make (IO : IO.S) : sig
   (** Prepare the directory and start one bounded background writer. *)
 
   val drain : t -> Observe.Drain.t
-  (** The synchronous ownership-transfer boundary for application config. *)
+  (** The synchronous ownership-transfer boundary for application config. Full
+      and closed writers reject before projection. Projections in progress
+      reserve queue capacity until they commit or fail. *)
 
   val flush : t -> (unit, error) result IO.t
   (** Flush every record accepted before the call. *)

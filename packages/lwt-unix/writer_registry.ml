@@ -1,5 +1,12 @@
 type error = Closed
-type hook = { flush : unit -> unit Lwt.t; shutdown : unit -> unit Lwt.t }
+type identity = { shutdown_claimed : bool Atomic.t }
+
+type hook = {
+  identity : identity;
+  flush : unit -> unit Lwt.t;
+  shutdown : unit -> unit Lwt.t;
+}
+
 type status = Open | Closing of unit Lwt.t | Settled of (unit, exn) result
 type t = { mutex : Mutex.t; mutable hooks : hook list; mutable status : status }
 
@@ -14,12 +21,13 @@ let with_lock t callback =
       raise exn
 
 let create () = { mutex = Mutex.create (); hooks = []; status = Open }
+let create_identity () = { shutdown_claimed = Atomic.make false }
 
-let register t ~flush ~shutdown =
+let register t ~identity ~flush ~shutdown =
   with_lock t (fun () ->
       match t.status with
       | Open ->
-          t.hooks <- { flush; shutdown } :: t.hooks;
+          t.hooks <- { identity; flush; shutdown } :: t.hooks;
           Ok ()
       | Closing _ | Settled _ -> Error Closed)
 
@@ -39,17 +47,25 @@ let settle callbacks =
       | Some (Error exn) -> Lwt.fail exn
       | Some (Ok ()) -> assert false)
 
+let settle_shutdown hooks =
+  hooks
+  |> List.filter_map (fun hook ->
+      if Atomic.compare_and_set hook.identity.shutdown_claimed false true then
+        Some hook.shutdown
+      else None)
+  |> settle
+
 let flush t =
   let action =
     with_lock t (fun () ->
         match t.status with
-        | Open -> `Flush (List.rev_map (fun hook -> hook.flush) t.hooks)
+        | Open -> `Flush (List.rev t.hooks)
         | Closing promise -> `Wait promise
         | Settled (Ok ()) -> `Done
         | Settled (Error exn) -> `Failed exn)
   in
   match action with
-  | `Flush callbacks -> settle callbacks
+  | `Flush hooks -> settle (List.map (fun hook -> hook.flush) hooks)
   | `Wait promise -> Lwt.protected promise
   | `Done -> Lwt.return_unit
   | `Failed exn -> Lwt.fail exn
@@ -61,17 +77,14 @@ let shutdown t =
         | Open ->
             let promise, wakener = Lwt.wait () in
             t.status <- Closing promise;
-            `Start
-              ( List.rev_map (fun hook -> hook.shutdown) t.hooks,
-                promise,
-                wakener )
+            `Start (List.rev t.hooks, promise, wakener)
         | Closing promise -> `Wait promise
         | Settled (Ok ()) -> `Done
         | Settled (Error exn) -> `Failed exn)
   in
   match action with
-  | `Start (callbacks, promise, wakener) ->
-      let work = settle callbacks in
+  | `Start (hooks, promise, wakener) ->
+      let work = settle_shutdown hooks in
       Lwt.on_any work
         (fun () ->
           with_lock t (fun () -> t.status <- Settled (Ok ()));

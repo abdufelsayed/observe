@@ -12,7 +12,7 @@ module Make (IO : Io.S) = struct
   type status = Running | Closing | Failed of error | Stopped
   type write_buffer = { mutable bytes : Bytes.t; mutable view : string }
 
-  type t = {
+  type state = {
     directory : string;
     capacity : int;
     lock : IO.lock;
@@ -20,6 +20,7 @@ module Make (IO : Io.S) = struct
     progress_notifier : IO.notifier;
     queue : record Queue.t;
     formatter : Observe.Formatter.t;
+    mutable projecting : int;
     mutable accepted_sequence : int64;
     mutable completed_sequence : int64;
     mutable flush_barriers : int64 list;
@@ -30,6 +31,8 @@ module Make (IO : Io.S) = struct
     mutable worker_waiting : bool;
     write_buffer : write_buffer;
   }
+
+  type t = { state : state; drain : Observe.Drain.t }
 
   let ( let* ) = IO.bind
 
@@ -149,7 +152,7 @@ module Make (IO : Io.S) = struct
     IO.dispose t.worker_notifier;
     IO.dispose t.progress_notifier
 
-  let fail t error =
+  let fail t drain error =
     let first =
       IO.with_lock t.lock (fun () ->
           match t.status with
@@ -162,7 +165,7 @@ module Make (IO : Io.S) = struct
     in
     if not first then IO.return ()
     else (
-      Observe.Drain.Integration.report_failure ();
+      Observe.Drain.Integration.report_failure drain;
       IO.notify t.progress_notifier;
       IO.notify t.worker_notifier;
       let* _ = close_current t in
@@ -225,8 +228,8 @@ module Make (IO : Io.S) = struct
                 | Some record -> Write (coalesce_write t record)
                 | None -> (
                     match t.status with
-                    | Closing -> Close
-                    | Running ->
+                    | Closing when t.projecting = 0 -> Close
+                    | Closing | Running ->
                         t.worker_waiting <- true;
                         Wait (IO.await t.worker_notifier)
                     | Failed _ | Stopped -> assert false))))
@@ -248,33 +251,33 @@ module Make (IO : Io.S) = struct
     IO.notify t.progress_notifier;
     dispose t
 
-  let rec worker t =
+  let rec worker t drain =
     match next_action t with
     | Write write -> (
         let* ready = ensure_file t write.path in
         match ready with
-        | Error error -> fail t error
+        | Error error -> fail t drain error
         | Ok file -> (
             let* written = write_all file write.bytes 0 write.length in
             match written with
-            | Error error -> fail t error
+            | Error error -> fail t drain error
             | Ok () ->
                 complete_write t write.through;
-                worker t))
+                worker t drain))
     | Flush sequence -> (
         let* flushed = flush_current t in
         match flushed with
-        | Error error -> fail t error
+        | Error error -> fail t drain error
         | Ok () ->
             complete_flush t sequence;
-            worker t)
+            worker t drain)
     | Wait promise ->
         let* () = promise in
-        worker t
+        worker t drain
     | Close -> (
         let* closed = close_current t in
         match closed with
-        | Error error -> fail t error
+        | Error error -> fail t drain error
         | Ok () ->
             complete_shutdown t;
             IO.return ())
@@ -292,43 +295,81 @@ module Make (IO : Io.S) = struct
 
   let formatter = Observe.Formatter.ndjson
 
-  let offer t log =
-    let projected =
-      match Observe.Formatter.format t.formatter log with
-      | Error _ -> None
-      | Ok bytes ->
-          let path =
-            IO.child ~dir:t.directory
-              ~name:(Observe_fs_date.Date.filename (Observe.Log.timestamp log))
-          in
-          Some (path, bytes)
-      | exception exn ->
-          preserve_fatal exn;
-          None
-    in
-    match projected with
-    | None -> Observe.Drain.Rejected
-    | Some (path, bytes) ->
-        let accepted, should_notify =
-          IO.with_lock t.lock (fun () ->
-              match t.status with
-              | Closing | Failed _ | Stopped -> (false, false)
-              | Running when Queue.length t.queue >= t.capacity -> (false, false)
-              | Running ->
-                  t.accepted_sequence <- Int64.succ t.accepted_sequence;
-                  Queue.add
-                    { sequence = t.accepted_sequence; path; bytes }
-                    t.queue;
-                  let should_notify = t.worker_waiting in
-                  t.worker_waiting <- false;
-                  (true, should_notify))
-        in
-        if accepted then (
-          if should_notify then IO.notify t.worker_notifier;
-          Observe.Drain.Accepted)
-        else Observe.Drain.Rejected
+  let reserve_projection t =
+    IO.with_lock t.lock (fun () ->
+        match t.status with
+        | Closing | Failed _ | Stopped -> false
+        | Running when Queue.length t.queue + t.projecting >= t.capacity ->
+            false
+        | Running ->
+            t.projecting <- t.projecting + 1;
+            true)
 
-  let drain t = Observe.Drain.create (offer t)
+  let release_projection t =
+    let should_notify =
+      IO.with_lock t.lock (fun () ->
+          assert (t.projecting > 0);
+          t.projecting <- t.projecting - 1;
+          let should_notify = t.worker_waiting in
+          if should_notify then t.worker_waiting <- false;
+          should_notify)
+    in
+    if should_notify then IO.notify t.worker_notifier
+
+  let commit_projection t ~path ~bytes =
+    IO.with_lock t.lock (fun () ->
+        assert (t.projecting > 0);
+        match t.status with
+        | Closing | Failed _ | Stopped ->
+            t.projecting <- t.projecting - 1;
+            let should_notify = t.worker_waiting in
+            if should_notify then t.worker_waiting <- false;
+            (false, should_notify)
+        | Running ->
+            let sequence = Int64.succ t.accepted_sequence in
+            Queue.add { sequence; path; bytes } t.queue;
+            t.projecting <- t.projecting - 1;
+            t.accepted_sequence <- sequence;
+            let should_notify = t.worker_waiting in
+            if should_notify then t.worker_waiting <- false;
+            (true, should_notify))
+
+  let project t log =
+    match Observe.Formatter.format t.formatter log with
+    | Error _ -> None
+    | Ok bytes ->
+        let path =
+          IO.child ~dir:t.directory
+            ~name:(Observe_fs_date.Date.filename (Observe.Log.timestamp log))
+        in
+        Some (path, bytes)
+    | exception exn ->
+        preserve_fatal exn;
+        None
+
+  let offer t log =
+    if not (reserve_projection t) then Observe.Drain.Rejected
+    else
+      match project t log with
+      | None ->
+          release_projection t;
+          Observe.Drain.Rejected
+      | Some (path, bytes) -> (
+          match commit_projection t ~path ~bytes with
+          | accepted, should_notify ->
+              if should_notify then IO.notify t.worker_notifier;
+              if accepted then Observe.Drain.Accepted
+              else Observe.Drain.Rejected
+          | exception raised ->
+              let backtrace = Printexc.get_raw_backtrace () in
+              release_projection t;
+              Printexc.raise_with_backtrace raised backtrace)
+      | exception raised ->
+          let backtrace = Printexc.get_raw_backtrace () in
+          release_projection t;
+          Printexc.raise_with_backtrace raised backtrace
+
+  let drain t = t.drain
 
   let rec flush_through t target =
     let state =
@@ -356,8 +397,9 @@ module Make (IO : Io.S) = struct
         flush_through t target
 
   let flush t =
-    let target = IO.with_lock t.lock (fun () -> t.accepted_sequence) in
-    flush_through t target
+    let state = t.state in
+    let target = IO.with_lock state.lock (fun () -> state.accepted_sequence) in
+    flush_through state target
 
   let rec wait_for_shutdown t =
     let state =
@@ -386,7 +428,7 @@ module Make (IO : Io.S) = struct
         let* () = promise in
         wait_for_shutdown t
 
-  let shutdown = wait_for_shutdown
+  let shutdown t = wait_for_shutdown t.state
 
   let create ~dir ?(capacity = 1_024) () =
     if String.length dir = 0 || contains_nul dir then
@@ -397,7 +439,7 @@ module Make (IO : Io.S) = struct
       match setup with
       | Error error -> IO.return (Error error)
       | Ok () ->
-          let t =
+          let state =
             {
               directory = dir;
               capacity;
@@ -406,6 +448,7 @@ module Make (IO : Io.S) = struct
               progress_notifier = IO.create_notifier ();
               queue = Queue.create ();
               formatter;
+              projecting = 0;
               accepted_sequence = 0L;
               completed_sequence = 0L;
               flush_barriers = [];
@@ -417,11 +460,13 @@ module Make (IO : Io.S) = struct
               write_buffer = create_write_buffer ();
             }
           in
+          let drain = Observe.Drain.create (offer state) in
+          let t = { state; drain } in
           IO.async (fun () ->
               IO.catch
-                (fun () -> worker t)
+                (fun () -> worker state drain)
                 (fun exn ->
                   preserve_fatal exn;
-                  fail t (Unexpected exn)));
+                  fail state drain (Unexpected exn)));
           IO.return (Ok t)
 end

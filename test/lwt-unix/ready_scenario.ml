@@ -605,7 +605,19 @@ let lifecycle_failure () =
   | Error exn ->
       fail "unexpected lifecycle failure: %s" (Printexc.to_string exn)
   | Ok () -> fail "failing lifecycle hook did not fail shutdown");
-  check (!attempted = 2) "failure prevented another shutdown hook"
+  check (!attempted = 2) "failure prevented another shutdown hook";
+  let repeated =
+    Lwt_main.run
+      (Lwt.catch
+         (fun () -> Lwt.map Result.ok (Observe_lwt_unix.shutdown ()))
+         (fun exn -> Lwt.return (Error exn)))
+  in
+  (match repeated with
+  | Error (Failure message) when String.equal message "first" -> ()
+  | Error exn ->
+      fail "repeated shutdown changed failure: %s" (Printexc.to_string exn)
+  | Ok () -> fail "repeated shutdown forgot the lifecycle failure");
+  check (!attempted = 2) "repeated shutdown reran registered hooks"
 
 let basic_capture () =
   let capture =

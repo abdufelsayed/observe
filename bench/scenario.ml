@@ -1,4 +1,4 @@
-type suite = Component | Core | Lwt_unix | Fs_lwt_unix
+type suite = Component | Core | Fs | Lwt_unix | Fs_lwt_unix
 
 type prepared = {
   operation : unit -> unit;
@@ -18,9 +18,23 @@ type t = {
 
 module Observer = Observe.Make (Benchmark_io.IO)
 
+module Fs_benchmark_io = struct
+  include Observe_fs_test_support.Fs_fixture.IO
+
+  type 'a t = 'a Lwt.t
+
+  let return = Lwt.return
+  let bind = Lwt.bind
+  let catch = Lwt.catch
+  let async = Lwt.async
+end
+
+module Fs_benchmark_writer = Observe_fs.Make (Fs_benchmark_io)
+
 let suite_name = function
   | Component -> "component"
   | Core -> "core"
+  | Fs -> "fs"
   | Lwt_unix -> "lwt-unix"
   | Fs_lwt_unix -> "fs-lwt-unix"
 
@@ -225,6 +239,55 @@ let untyped_small () (m : Observe.Logs.builder) =
 
 let typed_small () (m : Observe.Logs.builder) =
   m.typed ~using:Payload.small_schema Payload.small
+
+let prepare_fs_rejection mode make_message =
+  Observe_fs_test_support.Fs_fixture.reset ();
+  let writer =
+    Lwt_main.run (Fs_benchmark_writer.create ~dir:"/logs" ~capacity:1 ())
+    |> Result.get_ok
+  in
+  let drain = Fs_benchmark_writer.drain writer in
+  let observer = Observer.create (Benchmark_io.create ()) in
+  Observer.init_exn observer
+    (config ~console:Observe.Config.Silent ~drains:[ drain ] ());
+  let emit () = Observe.Logs.info (make_message ()) in
+  let cleanup = ref (fun () -> ()) in
+  (match mode with
+  | `Full ->
+      let release = Observe_fs_test_support.Fs_fixture.block_writes () in
+      cleanup := release;
+      emit ();
+      Lwt_main.run (Lwt.pause ());
+      emit ()
+  | `Closed ->
+      Lwt_main.run (Fs_benchmark_writer.shutdown writer) |> Result.get_ok);
+  let rejected_before =
+    Observe.Diagnostics.snapshot ()
+    |> List.find_map (fun (entry : Observe.Diagnostics.entry) ->
+        if entry.kind = Observe.Diagnostics.Drain_rejected then Some entry.count
+        else None)
+    |> Option.value ~default:0
+  in
+  emit ();
+  let rejected_after =
+    Observe.Diagnostics.snapshot ()
+    |> List.find_map (fun (entry : Observe.Diagnostics.entry) ->
+        if entry.kind = Observe.Diagnostics.Drain_rejected then Some entry.count
+        else None)
+    |> Option.value ~default:0
+  in
+  if rejected_after <> rejected_before + 1 then
+    failwith "filesystem rejection benchmark did not reject its probe";
+  {
+    operation = emit;
+    retained_bytes = no_size;
+    encoded_bytes = no_size;
+    cleanup =
+      (fun () ->
+        !cleanup ();
+        Lwt_main.run (Fs_benchmark_writer.shutdown writer) |> Result.get_ok;
+        Observer.close observer);
+  }
 
 let untyped_nested () (m : Observe.Logs.builder) =
   let open Observe.Logs in
@@ -686,6 +749,14 @@ let component_scenarios =
         formatter_observation Observe.Formatter.json child_wide);
   ]
 
+let fs_scenarios =
+  [
+    make ~name:"fs/rejected/full" ~suite:Fs ~boundary:"prompt-rejection"
+      ~payload:"tagged-text" (fun () -> prepare_fs_rejection `Full text);
+    make ~name:"fs/rejected/closed" ~suite:Fs ~boundary:"prompt-rejection"
+      ~payload:"tagged-text" (fun () -> prepare_fs_rejection `Closed text);
+  ]
+
 let core_scenarios =
   [
     make ~name:"core/filtered/tagged-text" ~suite:Core ~boundary:"filtered"
@@ -930,6 +1001,7 @@ let fs_lwt_unix_scenarios =
 let all =
   component_scenarios
   @ core_scenarios
+  @ fs_scenarios
   @ lwt_unix_scenarios
   @ fs_lwt_unix_scenarios
 

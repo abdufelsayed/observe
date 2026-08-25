@@ -13,6 +13,7 @@ Select one suite or compare with an earlier report:
 
 ```sh
 opam exec -- dune exec bench/observe_bench.exe -- --suite core
+opam exec -- dune exec bench/observe_bench.exe -- --suite fs
 opam exec -- dune exec bench/observe_bench.exe -- --suite fs-lwt-unix
 opam exec -- dune exec bench/observe_bench.exe -- \
   --compare .logs/benchmarks/baseline.json
@@ -54,6 +55,9 @@ amortized. Report schema version 3 adds this field.
   execution together with its required parent lifecycle. These boundaries are
   named separately in the report; no latency number is treated as proof of
   semantic correctness or lock-freedom.
+- `fs` isolates prompt rejection by a full or closed portable filesystem
+  writer. Its controlled blocked writer keeps the rejection boundary separate
+  from accepted projection and delivery.
 - `lwt-unix` initializes `Observe_lwt_unix` and performs its real clock and Unix
   standard-error write. Each measured operation includes a `flush` sequence
   barrier, so it measures formatting, bounded submission, scheduler wakeup,

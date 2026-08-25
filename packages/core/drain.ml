@@ -1,9 +1,11 @@
 type acceptance = Accepted | Rejected
-type t = Drain of (Log.t -> acceptance)
+type t = { consume : Log.t -> acceptance; delivery_failed : bool Atomic.t }
 
-let create consume = Drain consume
-let offer (Drain consume) log = consume log
+let create consume = { consume; delivery_failed = Atomic.make false }
+let offer t log = t.consume log
 
 module Integration = struct
-  let report_failure () = Diagnostics.record Drain_delivery_failed
+  let report_failure t =
+    if Atomic.compare_and_set t.delivery_failed false true then
+      Diagnostics.record Drain_delivery_failed
 end

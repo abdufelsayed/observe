@@ -100,7 +100,11 @@ end
 
 module Observer = Observe.Make (Observe_lwt.IO)
 
-type hook = { flush : unit -> unit Lwt.t; shutdown : unit -> unit Lwt.t }
+type hook = {
+  identity : Writer_registry.identity;
+  flush : unit -> unit Lwt.t;
+  shutdown : unit -> unit Lwt.t;
+}
 
 type context = {
   identity : Identity.t;
@@ -125,6 +129,9 @@ let with_lifecycle callback =
   Mutex.lock lifecycle_lock;
   Fun.protect ~finally:(fun () -> Mutex.unlock lifecycle_lock) callback
 
+let create_hook ~flush ~shutdown =
+  { identity = Writer_registry.create_identity (); flush; shutdown }
+
 let create_context () =
   let identity = Identity.create () in
   let owner_thread = Atomic.make (Thread.id (Thread.self ())) in
@@ -145,9 +152,10 @@ let create_context () =
   in
   { identity; owner_thread; console; observer = Observer.create io }
 
-let register_hook writers hook =
+let register_hook writers (hook : hook) =
   match
-    Writer_registry.register writers ~flush:hook.flush ~shutdown:hook.shutdown
+    Writer_registry.register writers ~identity:hook.identity ~flush:hook.flush
+      ~shutdown:hook.shutdown
   with
   | Ok () -> ()
   | Error Closed -> assert false
@@ -157,10 +165,9 @@ let create_registry ?writer pending =
   Option.iter
     (fun writer ->
       register_hook writers
-        {
-          flush = (fun () -> Writer.flush writer);
-          shutdown = (fun () -> Writer.shutdown writer);
-        })
+        (create_hook
+           ~flush:(fun () -> Writer.flush writer)
+           ~shutdown:(fun () -> Writer.shutdown writer)))
     writer;
   List.iter (register_hook writers) (List.rev pending);
   writers
@@ -313,16 +320,18 @@ module Lifecycle = struct
   type error = Writer_registry.error = Closed
 
   let register ~flush ~shutdown =
+    let hook = create_hook ~flush ~shutdown in
     with_lifecycle (fun () ->
         match !lifecycle with
         | Fresh pending ->
-            lifecycle := Fresh ({ flush; shutdown } :: pending);
+            lifecycle := Fresh (hook :: pending);
             Ok ()
         | Prepared (context, pending) ->
-            lifecycle := Prepared (context, { flush; shutdown } :: pending);
+            lifecycle := Prepared (context, hook :: pending);
             Ok ()
         | Running runtime ->
-            Writer_registry.register runtime.writers ~flush ~shutdown
+            Writer_registry.register runtime.writers ~identity:hook.identity
+              ~flush:hook.flush ~shutdown:hook.shutdown
         | Closing _ | Closed _ -> Error Closed)
 end
 

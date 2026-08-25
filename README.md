@@ -152,9 +152,9 @@ let main () =
   Lwt.finalize run_application Observe_lwt_unix.shutdown
 ```
 
-The directory is created recursively. Each log is projected to owned compact
-NDJSON before synchronous drain acceptance, then one bounded background writer
-appends it to the UTC file selected by the log timestamp:
+The directory is created recursively. The drain reserves bounded queue capacity
+before projecting a log to owned compact NDJSON. One background writer then
+appends accepted bytes to the UTC file selected by the log timestamp:
 
 ```text
 .observe/logs/2026-08-13.jsonl
@@ -162,8 +162,11 @@ appends it to the UTC file selected by the log timestamp:
 
 The writer coalesces records already queued for the same file into a reusable
 write buffer; it never waits to accumulate records or crosses a flush barrier.
-The queue holds at most 1,024 pending records by default. A full or stopped
-writer rejects the newest record without discarding earlier acceptance.
+The queue holds at most 1,024 pending records by default. Projections in
+progress occupy those slots too. A full or stopped writer rejects the newest
+record before formatting it or calculating its path, without discarding
+earlier acceptance. A projection that loses a shutdown race is rejected and
+cannot enqueue after closure.
 `Observe_lwt_unix.flush` and `shutdown` include registered filesystem workers.
 Acceptance does not promise `fsync`, crash durability, retry, retention,
 compression, or cross-process coordination.

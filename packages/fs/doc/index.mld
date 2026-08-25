@@ -5,9 +5,12 @@ finite admission, FIFO writing, flush barriers, failure, and shutdown. It
 performs no concrete filesystem or scheduler operation.
 
 The functor-based surface accepts an {!Observe_fs.IO.S} implementation through
-{!Observe_fs.Make}. The drain callback synchronously converts a completed log
-into owned bytes before returning [Accepted]. The resulting writer can then
-perform effects without retaining the caller's OCaml value.
+{!Observe_fs.Make}. The drain reserves finite capacity before synchronously
+converting a completed log into owned bytes. Full and closed writers therefore
+reject without formatting or path work. A projection occupies one queue slot
+until it commits or releases its reservation. The writer returns [Accepted]
+only after it owns the bytes and can then perform effects without retaining the
+caller's OCaml value.
 
 The background writer coalesces records that are already queued for the same
 daily file into one buffered write. It never waits to accumulate records and

@@ -265,9 +265,14 @@ let test_asynchronous_drain_failure_diagnostic () =
       (Observe.Diagnostics.snapshot ())
   in
   let before = count () in
-  Observe.Drain.Integration.report_failure ();
+  let first = Observe.Drain.create (fun _ -> Observe.Drain.Accepted) in
+  let second = Observe.Drain.create (fun _ -> Observe.Drain.Accepted) in
+  Observe.Drain.Integration.report_failure first;
+  Observe.Drain.Integration.report_failure first;
+  Observe.Drain.Integration.report_failure second;
   Alcotest.(check int)
-    "one bounded asynchronous failure" (before + 1) (count ())
+    "one bounded asynchronous failure for each owning drain" (before + 2)
+    (count ())
 
 let () =
   Alcotest.run "observe-public-contracts"

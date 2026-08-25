@@ -188,8 +188,9 @@ let offer t record =
         | Closing | Stopped _ -> Closed
         | Running when Queue.length t.queue >= t.capacity -> Full
         | Running ->
-            t.accepted_sequence <- Int64.succ t.accepted_sequence;
-            Queue.add (t.accepted_sequence, record) t.queue;
+            let sequence = Int64.succ t.accepted_sequence in
+            Queue.add (sequence, record) t.queue;
+            t.accepted_sequence <- sequence;
             Accepted)
   in
   (match result with Accepted -> notify t | Full | Closed -> ());

@@ -19,7 +19,10 @@ Observe_lwt_unix.init_exn config;
 run_application ()]}
 
 Acceptance means bounded ownership transfer, not a completed write, [fsync],
-or crash durability. Call the ready shutdown path before process exit.
+or crash durability. Full and closed writers reject before NDJSON projection.
+The ready lifecycle owns the registered worker and waits for cleanup when
+registration loses a shutdown race. Call the ready shutdown path before process
+exit.
 
 Regular-file writes run directly on the Lwt event-loop thread instead of its
 preemptive worker pool. This removes a cross-thread round trip for every write,

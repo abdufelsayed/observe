@@ -29,6 +29,8 @@
    (run %{exe:portable_scenario.exe} failure-flush)
    (run %{exe:portable_scenario.exe} failure-close)
    (run %{exe:portable_scenario.exe} invalid-write-count)
+   (run %{exe:portable_scenario.exe} projection-failure-releases-capacity)
+   (run %{exe:portable_scenario.exe} shutdown-during-projection)
    (run %{exe:portable_scenario.exe} shutdown))))
 
 (alias

@@ -1,4 +1,4 @@
-type suite = Component | Core | Lwt_unix | Fs_lwt_unix
+type suite = Component | Core | Fs | Lwt_unix | Fs_lwt_unix
 type t
 
 val all : t list
