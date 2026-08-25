@@ -57,6 +57,7 @@ let capture_outcome level message =
       Alcotest.fail "I/O implementation unexpectedly conflicted"
   | Error (Observe.Invalid_capacity capacity) ->
       Alcotest.failf "unexpected invalid capacity: %d" capacity
+  | Error Observe.Runtime_closed -> Alcotest.fail "runtime was already closed"
 
 let capture_one level message =
   match capture_outcome level message with
@@ -144,6 +145,7 @@ let wide_fixtures () =
       Alcotest.fail "I/O implementation unexpectedly conflicted"
   | Error (Observe.Invalid_capacity capacity) ->
       Alcotest.failf "unexpected invalid capacity: %d" capacity
+  | Error Observe.Runtime_closed -> Alcotest.fail "runtime was already closed"
 
 let strip_ansi value =
   let buffer = Buffer.create (String.length value) in
@@ -635,6 +637,7 @@ let test_wide_metadata_escaping () =
         Alcotest.fail "I/O implementation unexpectedly conflicted"
     | Error (Observe.Invalid_capacity capacity) ->
         Alcotest.failf "unexpected invalid capacity: %d" capacity
+    | Error Observe.Runtime_closed -> Alcotest.fail "runtime was already closed"
   in
   Alcotest.(check string)
     "pretty metadata is terminal safe"

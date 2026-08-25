@@ -140,6 +140,60 @@ let diagnostic_counting work =
     "every rejection counted" work
     (Test_io.process_diagnostic_count Observe.Diagnostics.Console_rejected)
 
+let producer_close_race () =
+  let delivered = Atomic.make 0 in
+  let drain =
+    Observe.Drain.create (fun _ ->
+        ignore (Atomic.fetch_and_add delivered 1 : int);
+        Observe.Drain.Accepted)
+  in
+  let observer = Observer.create (Test_io.Host.create ()) in
+  (match
+     Observer.init observer
+       (config ~console:Observe.Config.Silent ~drains:[ drain ] ())
+   with
+  | Ok () -> ()
+  | Error _ -> Alcotest.fail "production initialization was rejected");
+  let mutex = Mutex.create () in
+  let condition = Condition.create () in
+  let entered = ref false in
+  let release = ref false in
+  let producer =
+    Thread.create
+      (fun () ->
+        Observe.Logs.info (fun m ->
+            Mutex.lock mutex;
+            entered := true;
+            Condition.broadcast condition;
+            while not !release do
+              Condition.wait condition mutex
+            done;
+            Mutex.unlock mutex;
+            m.text ~tag:"race" "accepted-before-close"))
+      ()
+  in
+  Mutex.lock mutex;
+  while not !entered do
+    Condition.wait condition mutex
+  done;
+  Mutex.unlock mutex;
+  Observer.close observer;
+  let late_authored = ref false in
+  Observe.Logs.info (fun m ->
+      late_authored := true;
+      m.text ~tag:"race" "after-close");
+  Mutex.lock mutex;
+  release := true;
+  Condition.broadcast condition;
+  Mutex.unlock mutex;
+  Thread.join producer;
+  Alcotest.(check bool) "post-close producer remains lazy" false !late_authored;
+  Alcotest.(check int)
+    "closing wins before in-flight output delivery" 0 (Atomic.get delivered);
+  Alcotest.(check int)
+    "post-close producer is diagnosed" 1
+    (Test_io.process_diagnostic_count Observe.Diagnostics.Runtime_closed)
+
 let wide_contribution_and_seal work =
   let work = max 2 work in
   let observer = Observer.create (Test_io.Host.create ()) in
@@ -391,7 +445,14 @@ let wide_authoring_linearization () =
           Condition.wait condition mutex
         done;
         Mutex.unlock mutex;
-        let emitter = Thread.create (fun () -> Observe.Logs.emit wide) () in
+        let emitter_returned = Atomic.make false in
+        let emitter =
+          Thread.create
+            (fun () ->
+              Observe.Logs.emit wide;
+              Atomic.set emitter_returned true)
+            ()
+        in
         let rec observe_rejection () =
           let before =
             Test_io.diagnostic_count
@@ -416,6 +477,16 @@ let wide_authoring_linearization () =
             observe_rejection ())
         in
         observe_rejection ();
+        let rec await_emitter attempts =
+          Atomic.get emitter_returned
+          || attempts > 0
+             &&
+             (Thread.yield ();
+              await_emitter (attempts - 1))
+        in
+        Alcotest.(check bool)
+          "emitter returns while an admitted author remains blocked" true
+          (await_emitter 1_000_000);
         Mutex.lock mutex;
         release := true;
         Condition.broadcast condition;
@@ -539,6 +610,7 @@ let () =
   | "capture-conservation" ->
       capture_conservation work (argument 3 ~default:(max 1 (work / 2)))
   | "diagnostic-counting" -> diagnostic_counting work
+  | "producer-close-race" -> producer_close_race ()
   | "wide-contribution-and-seal" -> wide_contribution_and_seal work
   | "wide-set-level-emit-race" -> wide_set_level_emit_race work
   | "wide-annotation-emit-race" -> wide_annotation_emit_race work

@@ -71,10 +71,12 @@ module IO = Io
 type init_error = Observer.init_error =
   | Already_initialized
   | IO_already_registered
+  | Runtime_closed
 
 type capture_error = Observer.capture_error =
   | IO_already_registered
   | Invalid_capacity of int
+  | Runtime_closed
 
 exception Init_error = Observer.Init_error
 
@@ -87,6 +89,7 @@ module Make (IO : Io.S) = struct
   let create state = { runtime = Runtime.create state; state }
   let init t = Runtime.init t.runtime
   let init_exn t = Runtime.init_exn t.runtime
+  let close t = Runtime.close t.runtime
   let with_capture t ~config = Runtime.with_capture t.runtime ~config
 
   let is_control_exception t raised =
@@ -98,7 +101,7 @@ module Make (IO : Io.S) = struct
         | exception _ -> true)
 
   let run_operation t wide ~error callback =
-    Runtime.with_operation t.runtime (Logs.engine_current wide) (fun () ->
+    Runtime.with_operation t.runtime (Logs.Runtime.current wide) (fun () ->
         IO.bind (IO.observe callback) (function
           | Io.Returned value ->
               Logs.emit wide;
@@ -109,7 +112,7 @@ module Make (IO : Io.S) = struct
                 else
                   let contributed =
                     match
-                      Logs.contribute_error wide error ~backtrace raised
+                      Logs.Runtime.contribute_error wide error ~backtrace raised
                     with
                     | contributed -> contributed
                     | exception _ -> false
@@ -124,11 +127,19 @@ module Make (IO : Io.S) = struct
     | Some using ->
         run_operation t (Logs.create_typed ~name ~using ()) ~error callback
 
-  let fork t ~parent ~name ?using ?(error = Error.exn) callback =
+  let fork t ~name ?using ?(error = Error.exn) callback =
+    let parent =
+      match Runtime.current_operation t.runtime with
+      | Some parent -> parent
+      | None -> raise (Logs.Current_error Logs.Not_bound)
+    in
     match using with
-    | None -> run_operation t (Logs.create ~parent ~name ()) ~error callback
+    | None ->
+        run_operation t
+          (Logs.Runtime.create_child ~parent ~name ())
+          ~error callback
     | Some using ->
         run_operation t
-          (Logs.create_typed ~parent ~name ~using ())
+          (Logs.Runtime.create_typed_child ~parent ~name ~using ())
           ~error callback
 end

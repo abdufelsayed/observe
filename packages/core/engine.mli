@@ -34,6 +34,10 @@ val create_capture :
 val after_install : t -> unit
 (** Record installation-only diagnostics after this engine wins publication. *)
 
+val close : t -> unit
+(** Stop production admission and delivery. Capture engines remain controlled by
+    their lexical capture scope. *)
+
 val record_diagnostic : t -> Diagnostics.kind -> unit
 (** Record through the engine's active output or capture diagnostic boundary. *)
 
@@ -44,6 +48,7 @@ type wide
 type current = Open of wide | Typed of wide * Schema.identity
 
 val current_reference : current -> Log.operation_reference option
+val current_wide : current -> wide
 
 type contribution =
   | Contribution of Snapshot.fragment * bool

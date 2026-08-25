@@ -34,22 +34,21 @@ let fail waiters exn =
   List.iter (fun (_, waiter) -> Lwt.wakeup_later_exn waiter exn) waiters
 
 let stop_notification t =
-  match t.notification with
-  | None -> ()
-  | Some notification ->
-      t.notification <- None;
-      Lwt_unix.stop_notification notification
-
-let notify t =
   let notification =
     with_lock t (fun () ->
-        match (t.worker_waiter, t.notification, t.notification_pending) with
-        | Some _, Some notification, false ->
-            t.notification_pending <- true;
-            Some notification
-        | None, _, _ | _, None, _ | _, _, true -> None)
+        let notification = t.notification in
+        t.notification <- None;
+        notification)
   in
-  Option.iter Lwt_unix.send_notification notification
+  Option.iter Lwt_unix.stop_notification notification
+
+let notify t =
+  with_lock t (fun () ->
+      match (t.worker_waiter, t.notification, t.notification_pending) with
+      | Some _, Some notification, false ->
+          t.notification_pending <- true;
+          Lwt_unix.send_notification notification
+      | None, _, _ | _, None, _ | _, _, true -> ())
 
 let complete_waiters t =
   let ready =
@@ -220,3 +219,18 @@ let shutdown t =
   in
   if should_notify then notify t;
   Lwt.protected t.shutdown_promise
+
+let abort t =
+  let waiter, shutdown =
+    with_lock t (fun () ->
+        match t.status with
+        | Running ->
+            t.status <- Stopped None;
+            let waiter = t.worker_waiter in
+            t.worker_waiter <- None;
+            (waiter, Some t.shutdown_wakener)
+        | Closing | Stopped _ -> (None, None))
+  in
+  stop_notification t;
+  Option.iter (fun waiter -> Lwt.wakeup_later waiter ()) waiter;
+  Option.iter (fun shutdown -> Lwt.wakeup_later shutdown ()) shutdown

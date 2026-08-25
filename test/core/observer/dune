@@ -29,6 +29,7 @@
    (run %{exe:observer_scenario.exe} aggregate-wide-bound)
    (run %{exe:observer_scenario.exe} inert-create)
    (run %{exe:observer_scenario.exe} repeated-install)
+   (run %{exe:observer_scenario.exe} closed-route)
    (run %{exe:observer_scenario.exe} io-owner-conflict)
    (run %{exe:observer_scenario.exe} invalid-capacity)
    (run %{exe:observer_scenario.exe} threshold-and-authoring)

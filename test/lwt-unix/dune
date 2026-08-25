@@ -1,7 +1,15 @@
 (executable
  (name ready_scenario)
  (modules ready_scenario)
- (libraries observe-lwt-unix observe lwt lwt.unix threads unix uuidm))
+ (libraries
+  observe-lwt-unix
+  observe-lwt
+  observe
+  lwt
+  lwt.unix
+  threads
+  unix
+  uuidm))
 
 (rule
  (alias observe-lwt-unix-contracts)
@@ -18,12 +26,18 @@
    (run %{exe:ready_scenario.exe} wide-json-console)
    (run %{exe:ready_scenario.exe} production-json-console)
    (run %{exe:ready_scenario.exe} repeated-init)
+   (run %{exe:ready_scenario.exe} init-rollback)
    (run %{exe:ready_scenario.exe} silent-drain)
    (run %{exe:ready_scenario.exe} no-output)
    (run %{exe:ready_scenario.exe} bounded-console)
    (run %{exe:ready_scenario.exe} serialized-console)
    (run %{exe:ready_scenario.exe} shutdown)
+   (run %{exe:ready_scenario.exe} shutdown-before-init)
+   (run %{exe:ready_scenario.exe} prepared-shutdown)
+   (run %{exe:ready_scenario.exe} active-capture-shutdown)
+   (run %{exe:ready_scenario.exe} initialization-rebinds-owner)
    (run %{exe:ready_scenario.exe} lifecycle-flush)
+   (run %{exe:ready_scenario.exe} lifecycle-init-transfer)
    (run %{exe:ready_scenario.exe} lifecycle-failure)
    (run %{exe:ready_scenario.exe} basic-capture)
    (run %{exe:ready_scenario.exe} operation-scope)

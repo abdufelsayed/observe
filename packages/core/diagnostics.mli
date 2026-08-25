@@ -26,6 +26,7 @@ type kind =
   | Drain_delivery_failed
   | Capture_overflow
   | Capture_closed
+  | Runtime_closed
 
 type entry = { kind : kind; count : int }
 type store

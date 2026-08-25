@@ -58,6 +58,7 @@ let init_ok observer config =
       Alcotest.fail "observer was already initialized"
   | Error Observe.IO_already_registered ->
       Alcotest.fail "a different I/O implementation already owned the route"
+  | Error Observe.Runtime_closed -> Alcotest.fail "runtime was already closed"
 
 let init_inherited_ok observer config =
   match Inherited_observer.init observer config with
@@ -66,6 +67,7 @@ let init_inherited_ok observer config =
       Alcotest.fail "inherited observer was already initialized"
   | Error Observe.IO_already_registered ->
       Alcotest.fail "a different I/O implementation already owned the route"
+  | Error Observe.Runtime_closed -> Alcotest.fail "runtime was already closed"
 
 let capture_tags capture =
   List.map
@@ -177,7 +179,7 @@ let causal_children_and_correlation () =
                  |+ m.field "parent_only" Observe.Type.string "parent"
                  |> m.seal);
              Observe.Logs.info (Test_io.text ~tag:"parent" "before");
-             Observer.fork observer ~parent ~name:"typed-child"
+             Observer.fork observer ~name:"typed-child"
                ~using:mutable_event_schema (fun () ->
                  let child =
                    Observe.Logs.current_typed ~using:mutable_event_schema
@@ -233,6 +235,8 @@ let current_operation_contract () =
   in
   Alcotest.check_raises "no ambient fallback outside an operation" not_bound
     (fun () -> ignore (Observe.Logs.current ()));
+  Alcotest.check_raises "contextual fork requires a current operation" not_bound
+    (fun () -> ignore (Observer.fork observer ~name:"orphan" (fun () -> ())));
   let other_schema =
     Observe.Schema.record mutable_event_t ~builder:(fun _ -> { typed = Fun.id })
   in
@@ -243,11 +247,10 @@ let current_operation_contract () =
            (fun () -> ignore (Observe.Logs.current ()));
          Observe.Logs.emit manual;
          Observer.with_operation observer ~name:"open" (fun () ->
-             let parent = Observe.Logs.current () in
              Alcotest.check_raises "open current rejects typed retrieval"
                expected_typed (fun () ->
                  ignore (Observe.Logs.current_typed ~using:mutable_event_schema));
-             Observer.fork observer ~parent ~name:"typed-child"
+             Observer.fork observer ~name:"typed-child"
                ~using:mutable_event_schema (fun () ->
                  Alcotest.check_raises "typed current rejects open retrieval"
                    expected_open (fun () -> ignore (Observe.Logs.current ()));
@@ -1070,6 +1073,41 @@ let repeated_install () =
     (Observe.Init_error Observe.Already_initialized) (fun () ->
       Observer.init_exn observer (config ()))
 
+let closed_route () =
+  let delivered = ref 0 in
+  let drain =
+    Observe.Drain.create (fun _ ->
+        incr delivered;
+        Observe.Drain.Accepted)
+  in
+  let observer = make_observer () in
+  init_ok observer (config ~console:Observe.Config.Silent ~drains:[ drain ] ());
+  let authored = ref 0 in
+  let author tag (m : Observe.Logs.builder) =
+    incr authored;
+    m.text ~tag "%s" tag
+  in
+  Observe.Logs.info (author "before");
+  let wide = Observe.Logs.create ~name:"open-before-close" () in
+  Observer.close observer;
+  Observe.Logs.info (author "after");
+  Observe.Logs.set wide (fun m ->
+      incr authored;
+      m.seal m.untyped);
+  Observe.Logs.emit wide;
+  Alcotest.(check int) "only pre-close author evaluated" 1 !authored;
+  Alcotest.(check int) "only pre-close log reached drains" 1 !delivered;
+  Alcotest.(check int)
+    "post-close point and wide authoring diagnosed" 2
+    (Test_io.process_diagnostic_count Observe.Diagnostics.Runtime_closed);
+  Alcotest.(check bool)
+    "closed observer cannot initialize" true
+    (Observer.init observer (config ()) = Error Observe.Runtime_closed);
+  Alcotest.(check bool)
+    "closed observer cannot start capture" true
+    (Observer.with_capture observer ~config:(config ()) (fun _ -> ())
+    = Error Observe.Runtime_closed)
+
 let io_owner_conflict () =
   let owner = make_observer () in
   let other = make_observer () in
@@ -1602,6 +1640,7 @@ let scenario = function
   | "aggregate-wide-bound" -> aggregate_wide_bound
   | "inert-create" -> inert_create
   | "repeated-install" -> repeated_install
+  | "closed-route" -> closed_route
   | "io-owner-conflict" -> io_owner_conflict
   | "invalid-capacity" -> invalid_capacity
   | "threshold-and-authoring" -> threshold_and_authoring

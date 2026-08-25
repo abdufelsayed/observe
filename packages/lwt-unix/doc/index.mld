@@ -21,8 +21,10 @@ The initializer is synchronous. It installs Lwt callback-local context, the OS
 wall clock, cryptographically random UUID v4 operation identities, and
 automatic formatted output on standard error. Console records
 are submitted without blocking the producer and written in order by one bounded
-Lwt worker. It starts no scheduler and returns no logging handle. See
-{!module:Observe_lwt_unix}.
+Lwt worker. Merely linking the package allocates no writer, notification, or
+background Lwt work; those resources start during successful initialization
+when console output is active. Initialization starts no scheduler and returns
+no logging handle. See {!module:Observe_lwt_unix}.
 
 [Config.Auto] selects pretty output for an absent, [dev], or [development]
 environment and NDJSON otherwise. [Pretty], [Ndjson], and [Silent] are explicit
@@ -30,6 +32,8 @@ overrides.
 
 Before process exit, run {!val:Observe_lwt_unix.shutdown} through the active Lwt
 scheduler. Use {!val:Observe_lwt_unix.flush} when the worker should remain open.
+Shutdown first closes production admission, then drains accepted output work.
+It is terminal and idempotent, including when called before initialization.
 Official filesystem workers register with the same lifecycle, so these calls
 cover console and daily-file records accepted before their barriers. The
 {!module:Observe_lwt_unix.Lifecycle} module registers independently installed

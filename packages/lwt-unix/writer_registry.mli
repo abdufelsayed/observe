@@ -1,7 +1,7 @@
 type error = Closed
 type t
 
-val create : flush:(unit -> unit Lwt.t) -> shutdown:(unit -> unit Lwt.t) -> t
+val create : unit -> t
 
 val register :
   t ->

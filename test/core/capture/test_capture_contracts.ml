@@ -86,6 +86,7 @@ let capture ?capacity config callback =
       Alcotest.fail "I/O implementation unexpectedly conflicted"
   | Error (Observe.Invalid_capacity capacity) ->
       Alcotest.failf "unexpected invalid capacity: %d" capacity
+  | Error Observe.Runtime_closed -> Alcotest.fail "runtime was already closed"
 
 let expect_text ~tag ~message log =
   match Observe.Log.event log with

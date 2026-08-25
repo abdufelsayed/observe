@@ -20,7 +20,9 @@ val init :
     wall clock, cryptographically random UUID v4 operation identities, and
     automatic standard-error output. A custom generator replaces only operation
     identity and is useful for deterministic tests or an application-specific
-    identity policy. See {!type:id_generator} for its contract. *)
+    identity policy. Importing this package allocates no writer or background
+    work. See {!type:id_generator} for its contract. Returns
+    [Error Runtime_closed] after shutdown has begun. *)
 
 val init_exn : ?id_generator:id_generator -> Observe.Config.t -> unit
 (** Like {!init}, but raises [Observe.Init_error] on failure. *)
@@ -38,15 +40,16 @@ val with_operation :
     error interpretation seals and withholds the invalid observation. *)
 
 val fork :
-  parent:('parent_builder, 'parent_patch) Observe.Logs.t ->
   name:string ->
   ?using:('record, 'builder) Observe.Schema.t ->
   ?error:exn Observe.Error.t ->
   (unit -> 'a Lwt.t) ->
   'a Lwt.t
-(** Run one scoped, independently emitted child operation. The child records the
-    parent's complete reference; it does not copy or modify the parent's event.
-    The prior current operation is restored when [callback] finishes. *)
+(** Run one scoped, independently emitted child of the current operation. The
+    child records its parent's complete reference; it does not copy or modify
+    the parent's event. The prior current operation is restored when [callback]
+    finishes. Raises [Observe.Logs.Current_error Not_bound] outside an operation
+    scope. *)
 
 val flush : unit -> unit Lwt.t
 (** Resolve when all console and registered output records accepted before the
@@ -54,9 +57,10 @@ val flush : unit -> unit Lwt.t
     are not registered automatically. *)
 
 val shutdown : unit -> unit Lwt.t
-(** Stop console and registered output acceptance, drain accepted records, and
-    stop every output worker. Repeated calls share the same completion. Logging
-    after shutdown diagnoses output rejection. *)
+(** Close production logging admission, drain accepted records, and stop every
+    output worker. Repeated calls share the same completion. Shutdown is
+    terminal even when called before initialization. Logging after shutdown does
+    not evaluate author callbacks. *)
 
 module Lifecycle : sig
   (** Expert registration for independently installed Lwt-Unix outputs. *)

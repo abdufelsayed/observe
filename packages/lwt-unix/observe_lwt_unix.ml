@@ -30,6 +30,7 @@ end
 
 module Identity = struct
   type generator = unit -> string
+  type t = { selected : generator Atomic.t }
 
   let default () =
     Mirage_crypto_rng_unix.getrandom 16
@@ -37,9 +38,9 @@ module Identity = struct
     |> Uuidm.v4
     |> Uuidm.to_string
 
-  let selected = Atomic.make default
-  let get () = Atomic.get selected
-  let set generator = Atomic.set selected generator
+  let create () = { selected = Atomic.make default }
+  let get t = Atomic.get t.selected
+  let set t generator = Atomic.set t.selected generator
 
   let serialize generator =
     let lock = Mutex.create () in
@@ -47,7 +48,7 @@ module Identity = struct
       Mutex.lock lock;
       Fun.protect ~finally:(fun () -> Mutex.unlock lock) generator
 
-  let next () = Ok ((get ()) ())
+  let next t () = Ok ((get t) ())
 end
 
 type id_generator = Identity.generator
@@ -95,54 +96,144 @@ module Console = struct
     with
     | (Out_of_memory | Stack_overflow | Sys.Break) as exn -> raise exn
     | _ -> Observe.Formatter.Plain
-
-  let writer = Writer.create ~capacity:1_024 Lwt_unix.stderr
-
-  let offer value =
-    match Writer.offer writer value with
-    | Accepted -> Observe.IO.Accepted
-    | Full | Closed -> Observe.IO.Rejected
-
-  let flush () = Writer.flush writer
-  let shutdown () = Writer.shutdown writer
 end
 
 module Observer = Observe.Make (Observe_lwt.IO)
 
-let writers =
-  Writer_registry.create ~flush:Console.flush ~shutdown:Console.shutdown
+type hook = { flush : unit -> unit Lwt.t; shutdown : unit -> unit Lwt.t }
 
-let owner_thread = Thread.id (Thread.self ())
+type context = {
+  identity : Identity.t;
+  owner_thread : int Atomic.t;
+  console : Writer.t option Atomic.t;
+  observer : Observer.t;
+}
 
-let io =
-  Observe_lwt.create ~clock:Clock.now ~monotonic_now:Clock.monotonic_now
-    ~next_id:Identity.next ~console_style:Console.style
-    ~offer_console:Console.offer
-    ~can_lookup_context:(fun () -> Thread.id (Thread.self ()) = owner_thread)
-    ()
+type runtime = { context : context; writers : Writer_registry.t }
 
-let observer = Observer.create io
-let init_lock = Mutex.create ()
-let initialized = ref false
+type lifecycle =
+  | Fresh of hook list
+  | Prepared of context * hook list
+  | Running of runtime
+  | Closing of context * unit Lwt.t
+  | Closed of context * (unit, exn) result
+
+let lifecycle = ref (Fresh [])
+let lifecycle_lock = Mutex.create ()
+
+let with_lifecycle callback =
+  Mutex.lock lifecycle_lock;
+  Fun.protect ~finally:(fun () -> Mutex.unlock lifecycle_lock) callback
+
+let create_context () =
+  let identity = Identity.create () in
+  let owner_thread = Atomic.make (Thread.id (Thread.self ())) in
+  let console = Atomic.make None in
+  let io =
+    Observe_lwt.create ~clock:Clock.now ~monotonic_now:Clock.monotonic_now
+      ~next_id:(Identity.next identity) ~console_style:Console.style
+      ~offer_console:(fun output ->
+        match Atomic.get console with
+        | None -> Observe.IO.Rejected
+        | Some writer -> (
+            match Writer.offer writer output with
+            | Accepted -> Observe.IO.Accepted
+            | Full | Closed -> Observe.IO.Rejected))
+      ~can_lookup_context:(fun () ->
+        Thread.id (Thread.self ()) = Atomic.get owner_thread)
+      ()
+  in
+  { identity; owner_thread; console; observer = Observer.create io }
+
+let register_hook writers hook =
+  match
+    Writer_registry.register writers ~flush:hook.flush ~shutdown:hook.shutdown
+  with
+  | Ok () -> ()
+  | Error Closed -> assert false
+
+let create_registry ?writer pending =
+  let writers = Writer_registry.create () in
+  Option.iter
+    (fun writer ->
+      register_hook writers
+        {
+          flush = (fun () -> Writer.flush writer);
+          shutdown = (fun () -> Writer.shutdown writer);
+        })
+    writer;
+  List.iter (register_hook writers) (List.rev pending);
+  writers
+
+let get_or_create_context () =
+  with_lifecycle (fun () ->
+      match !lifecycle with
+      | Fresh pending ->
+          let context = create_context () in
+          lifecycle := Prepared (context, pending);
+          Some context
+      | Prepared (context, _) | Running { context; _ } -> Some context
+      | Closing _ | Closed _ -> None)
 
 let init ?id_generator config =
-  Mutex.lock init_lock;
-  Fun.protect
-    ~finally:(fun () -> Mutex.unlock init_lock)
-    (fun () ->
-      if !initialized then Error Observe.Already_initialized
-      else
-        let previous = Identity.get () in
-        Identity.set
-          (Option.fold ~none:Identity.default ~some:Identity.serialize
-             id_generator);
-        match Observer.init observer config with
-        | Ok () as initialized_result ->
-            initialized := true;
-            initialized_result
-        | Error _ as error ->
-            Identity.set previous;
-            error)
+  with_lifecycle (fun () ->
+      match !lifecycle with
+      | Running _ -> Error Observe.Already_initialized
+      | Closing _ | Closed _ -> Error Observe.Runtime_closed
+      | (Fresh _ | Prepared _) as before -> (
+          let context, pending =
+            match before with
+            | Fresh pending -> (create_context (), pending)
+            | Prepared (context, pending) -> (context, pending)
+            | Running _ | Closing _ | Closed _ -> assert false
+          in
+          lifecycle := Prepared (context, pending);
+          let previous_identity = Identity.get context.identity in
+          let previous_owner_thread = Atomic.get context.owner_thread in
+          let selected_identity =
+            Option.fold ~none:Identity.default ~some:Identity.serialize
+              id_generator
+          in
+          Identity.set context.identity selected_identity;
+          Atomic.set context.owner_thread (Thread.id (Thread.self ()));
+          let writer =
+            try
+              match
+                (Observe.Config.enabled config, Observe.Config.console config)
+              with
+              | false, _ | true, Observe.Config.Silent -> None
+              | true, (Observe.Config.Auto | Observe.Config.Pretty)
+              | true, Observe.Config.Ndjson ->
+                  Some (Writer.create ~capacity:1_024 Lwt_unix.stderr)
+            with raised ->
+              Identity.set context.identity previous_identity;
+              Atomic.set context.owner_thread previous_owner_thread;
+              lifecycle := Prepared (context, pending);
+              raise raised
+          in
+          Atomic.set context.console writer;
+          let rollback () =
+            Atomic.set context.console None;
+            Identity.set context.identity previous_identity;
+            Atomic.set context.owner_thread previous_owner_thread;
+            Option.iter Writer.abort writer;
+            lifecycle := Prepared (context, pending)
+          in
+          match create_registry ?writer pending with
+          | exception raised ->
+              rollback ();
+              raise raised
+          | writers -> (
+              match Observer.init context.observer config with
+              | exception raised ->
+                  rollback ();
+                  raise raised
+              | Ok () ->
+                  lifecycle := Running { context; writers };
+                  Ok ()
+              | Error _ as error ->
+                  rollback ();
+                  error)))
 
 let init_exn ?id_generator config =
   match init ?id_generator config with
@@ -150,27 +241,101 @@ let init_exn ?id_generator config =
   | Error error -> raise (Observe.Init_error error)
 
 let with_operation ~name ?using ?error callback =
-  Observer.with_operation observer ~name ?using ?error callback
+  match get_or_create_context () with
+  | Some context ->
+      Observer.with_operation context.observer ~name ?using ?error callback
+  | None -> callback ()
 
-let fork ~parent ~name ?using ?error callback =
-  Observer.fork observer ~parent ~name ?using ?error callback
+let fork ~name ?using ?error callback =
+  match get_or_create_context () with
+  | Some context -> Observer.fork context.observer ~name ?using ?error callback
+  | None -> raise (Observe.Logs.Current_error Observe.Logs.Not_bound)
 
-let flush () = Writer_registry.flush writers
-let shutdown () = Writer_registry.shutdown writers
+let result_promise = function
+  | Ok () -> Lwt.return_unit
+  | Error raised -> Lwt.fail raised
+
+let flush () =
+  let action =
+    with_lifecycle (fun () ->
+        match !lifecycle with
+        | Fresh pending | Prepared (_, pending) -> `Pending pending
+        | Running runtime -> `Registry runtime.writers
+        | Closing (_, promise) -> `Promise promise
+        | Closed (_, outcome) -> `Outcome outcome)
+  in
+  match action with
+  | `Pending pending -> Writer_registry.flush (create_registry pending)
+  | `Registry writers -> Writer_registry.flush writers
+  | `Promise promise -> Lwt.protected promise
+  | `Outcome outcome -> result_promise outcome
+
+let settle_shutdown context promise wakener work =
+  Lwt.on_any work
+    (fun () ->
+      with_lifecycle (fun () -> lifecycle := Closed (context, Ok ()));
+      Lwt.wakeup_later wakener ())
+    (fun raised ->
+      with_lifecycle (fun () -> lifecycle := Closed (context, Error raised));
+      Lwt.wakeup_later_exn wakener raised);
+  Lwt.protected promise
+
+let shutdown () =
+  let action =
+    with_lifecycle (fun () ->
+        match !lifecycle with
+        | Closing (_, promise) -> `Promise promise
+        | Closed (_, outcome) -> `Outcome outcome
+        | Fresh pending ->
+            let context = create_context () in
+            Observer.close context.observer;
+            let promise, wakener = Lwt.wait () in
+            lifecycle := Closing (context, promise);
+            `Start (context, create_registry pending, promise, wakener)
+        | Prepared (context, pending) ->
+            Observer.close context.observer;
+            let promise, wakener = Lwt.wait () in
+            lifecycle := Closing (context, promise);
+            `Start (context, create_registry pending, promise, wakener)
+        | Running runtime ->
+            Observer.close runtime.context.observer;
+            let promise, wakener = Lwt.wait () in
+            lifecycle := Closing (runtime.context, promise);
+            `Start (runtime.context, runtime.writers, promise, wakener))
+  in
+  match action with
+  | `Promise promise -> Lwt.protected promise
+  | `Outcome outcome -> result_promise outcome
+  | `Start (context, writers, promise, wakener) ->
+      settle_shutdown context promise wakener (Writer_registry.shutdown writers)
 
 module Lifecycle = struct
   type error = Writer_registry.error = Closed
 
   let register ~flush ~shutdown =
-    Writer_registry.register writers ~flush ~shutdown
+    with_lifecycle (fun () ->
+        match !lifecycle with
+        | Fresh pending ->
+            lifecycle := Fresh ({ flush; shutdown } :: pending);
+            Ok ()
+        | Prepared (context, pending) ->
+            lifecycle := Prepared (context, { flush; shutdown } :: pending);
+            Ok ()
+        | Running runtime ->
+            Writer_registry.register runtime.writers ~flush ~shutdown
+        | Closing _ | Closed _ -> Error Closed)
 end
 
 module Test = struct
   exception Capture_error of Observe.capture_error
 
   let with_capture_exn ~config ?capacity callback =
-    Lwt.bind (Observer.with_capture observer ~config ?capacity callback)
-      (function
-      | Ok result -> Lwt.return result
-      | Error error -> Lwt.fail (Capture_error error))
+    match get_or_create_context () with
+    | None -> Lwt.fail (Capture_error Observe.Runtime_closed)
+    | Some context ->
+        Lwt.bind
+          (Observer.with_capture context.observer ~config ?capacity callback)
+          (function
+          | Ok result -> Lwt.return result
+          | Error error -> Lwt.fail (Capture_error error))
 end

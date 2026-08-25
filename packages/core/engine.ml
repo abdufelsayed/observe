@@ -36,6 +36,7 @@ type t = {
   resolve_operation : unit -> Log.operation_reference option;
   is_control_exception : exn -> bool;
   output : output;
+  accepting : bool Atomic.t;
 }
 
 let automatic_console environment =
@@ -68,6 +69,7 @@ let create_outputs config ~console_style ~clock ~monotonic_now ~next_id
     resolve_operation;
     is_control_exception;
     output = Outputs { console; drains = Config.drains config; formatter };
+    accepting = Atomic.make true;
   }
 
 let create_capture config ~clock ~monotonic_now ~next_id ~resolve_operation
@@ -80,6 +82,7 @@ let create_capture config ~clock ~monotonic_now ~next_id ~resolve_operation
     resolve_operation;
     is_control_exception;
     output = Capture capture;
+    accepting = Atomic.make true;
   }
 
 let record_diagnostic t kind =
@@ -98,8 +101,14 @@ let after_install t =
       Diagnostics.record Diagnostics.No_delivery_target
   | Outputs _ | Capture _ -> ()
 
+let close t =
+  match t.output with
+  | Outputs _ -> Atomic.set t.accepting false
+  | Capture _ -> ()
+
 let admitted t level =
-  Config.enabled t.config
+  Atomic.get t.accepting
+  && Config.enabled t.config
   && has_active_route t.output
   && Level.compare level (Config.min_level t.config) >= 0
 
@@ -163,13 +172,14 @@ let offer_drain t drain log =
   | Raised -> record_diagnostic t Diagnostics.Drain_raised
 
 let dispatch t log =
-  match t.output with
-  | Capture capture -> offer_capture t capture log
-  | Outputs { console; drains; formatter } ->
+  match (Atomic.get t.accepting, t.output) with
+  | true, Capture capture -> offer_capture t capture log
+  | true, Outputs { console; drains; formatter } ->
       Option.iter
         (fun formatter -> format_and_offer_console t console formatter log)
         formatter;
       List.iter (fun drain -> offer_drain t drain log) drains
+  | false, (Capture _ | Outputs _) -> ()
 
 let emit_point t ?correlation level author =
   if admitted t level then
@@ -193,6 +203,8 @@ let emit_point t ?correlation level author =
     | Raised -> record_diagnostic t Diagnostics.Clock_raised
     | Returned (Error Io.Unavailable) ->
         record_diagnostic t Diagnostics.Clock_unavailable
+    | Returned (Ok _) when not (Atomic.get t.accepting) ->
+        record_diagnostic t Diagnostics.Runtime_closed
     | Returned (Ok timestamp) -> (
         match evaluate_author t author with
         | Raised -> record_diagnostic t Diagnostics.Message_evaluation_raised
@@ -205,19 +217,33 @@ let emit_point t ?correlation level author =
             | Error _ -> record_diagnostic t Diagnostics.Canonical_freeze_failed
             ))
 
-(* The low lifecycle bits record closing and failure; the remaining bits count
-   admitted authors. Reserving an author and closing the lifecycle are competing
-   CAS operations on this one word, so a callback is either admitted completely
-   before closing or is never evaluated. Admitted callbacks may materialize in
-   parallel. [writer] serializes only mutation of the shared accumulator. *)
-
-let lifecycle_closing = 1
-let lifecycle_failed = 2
-let lifecycle_author = 4
-
 type contribution =
   | Contribution of Snapshot.fragment * bool
   | Invalid_contribution of Snapshot.error
+
+(* Authors reserve their callback by incrementing [lifecycle], materialize
+   independently, then commit each independent part with a short CAS. Emission
+   changes the lifecycle phase to [closing] and returns when an author is
+   already active. The last reserved author claims [completing], after which
+   all content is stable and can be published exactly once. No participant
+   waits for a blocked callback or owns a spin lock. *)
+
+type annotations = { rev : Log.annotation list; count : int; bytes : int }
+
+let accepting = 0
+let closing = 1
+let completing = 2
+let failed = 3
+let finished = 4
+let phase_bits = 3
+let phase_mask = (1 lsl phase_bits) - 1
+let author = 1 lsl phase_bits
+let max_authors = max_int lsr phase_bits
+let lifecycle_phase lifecycle = lifecycle land phase_mask
+let lifecycle_authors lifecycle = lifecycle lsr phase_bits
+
+let lifecycle_with_phase lifecycle phase =
+  lifecycle land lnot phase_mask lor phase
 
 type wide = {
   name : string;
@@ -226,17 +252,16 @@ type wide = {
   id : string option;
   parent : Log.operation_reference option;
   start_ns : int64 option;
-  mutable body : Snapshot.Object_accumulator.state;
-  mutable explicit_level : Level.t option;
-  mutable derived_level : Level.t;
-  mutable annotations_rev : Log.annotation list;
-  mutable annotation_count : int;
-  mutable annotation_bytes : int;
   lifecycle : int Atomic.t;
-  writer : bool Atomic.t;
+  body : Snapshot.Object_accumulator.state Atomic.t;
+  explicit_level : Level.t option Atomic.t;
+  derived_level : Level.t Atomic.t;
+  annotations : annotations Atomic.t;
 }
 
 type current = Open of wide | Typed of wide * Schema.identity
+
+let empty_annotations = { rev = []; count = 0; bytes = 0 }
 
 let inert_wide () =
   {
@@ -246,14 +271,11 @@ let inert_wide () =
     id = None;
     parent = None;
     start_ns = None;
-    body = Snapshot.Object_accumulator.empty;
-    explicit_level = None;
-    derived_level = Level.Info;
-    annotations_rev = [];
-    annotation_count = 0;
-    annotation_bytes = 0;
-    lifecycle = Atomic.make lifecycle_closing;
-    writer = Atomic.make false;
+    lifecycle = Atomic.make finished;
+    body = Atomic.make Snapshot.Object_accumulator.empty;
+    explicit_level = Atomic.make None;
+    derived_level = Atomic.make Level.Info;
+    annotations = Atomic.make empty_annotations;
   }
 
 let contained_call t callback =
@@ -267,6 +289,8 @@ let wide_reference wide =
 let current_reference = function
   | Open wide | Typed (wide, _) -> wide_reference wide
 
+let current_wide = function Open wide | Typed (wide, _) -> wide
+
 let own_wide_text ~used value =
   let length = String.length value in
   if length > Snapshot.max_string_bytes - used then
@@ -274,8 +298,11 @@ let own_wide_text ~used value =
   else Snapshot.own_text value
 
 let create_wide t ?parent ~name ~origin () =
-  if (not (Config.enabled t.config)) || not (has_active_route t.output) then
-    inert_wide ()
+  if
+    (not (Atomic.get t.accepting))
+    || (not (Config.enabled t.config))
+    || not (has_active_route t.output)
+  then inert_wide ()
   else if String.trim name = "" then (
     record_diagnostic t Diagnostics.Canonical_freeze_failed;
     inert_wide ())
@@ -317,79 +344,198 @@ let create_wide t ?parent ~name ~origin () =
                       id = Some id;
                       parent;
                       start_ns = Some start_ns;
-                      body = Snapshot.Object_accumulator.empty;
-                      explicit_level = None;
-                      derived_level = Level.Info;
-                      annotations_rev = [];
-                      annotation_count = 0;
-                      annotation_bytes = 0;
-                      lifecycle = Atomic.make 0;
-                      writer = Atomic.make false;
+                      lifecycle = Atomic.make accepting;
+                      body = Atomic.make Snapshot.Object_accumulator.empty;
+                      explicit_level = Atomic.make None;
+                      derived_level = Atomic.make Level.Info;
+                      annotations = Atomic.make empty_annotations;
                     })))
 
 let merge_body = Snapshot.Object_accumulator.merge
-
-let clear_wide wide =
-  wide.body <- Snapshot.Object_accumulator.empty;
-  wide.annotations_rev <- [];
-  wide.annotation_count <- 0;
-  wide.annotation_bytes <- 0
 
 let reject_authoring engine diagnostic =
   record_diagnostic engine diagnostic;
   false
 
-let lifecycle_is_closing state = state land lifecycle_closing <> 0
-let lifecycle_is_failed state = state land lifecycle_failed <> 0
-let lifecycle_has_authors state = state >= lifecycle_author
+let clear_wide wide =
+  Atomic.set wide.body Snapshot.Object_accumulator.empty;
+  Atomic.set wide.explicit_level None;
+  Atomic.set wide.derived_level Level.Info;
+  Atomic.set wide.annotations empty_annotations
+
+let rec release_failed_author wide =
+  let before = Atomic.get wide.lifecycle in
+  let authors = lifecycle_authors before in
+  match lifecycle_phase before with
+  | phase when phase = failed && authors > 1 ->
+      if not (Atomic.compare_and_set wide.lifecycle before (before - author))
+      then release_failed_author wide
+  | phase when phase = failed && authors = 1 ->
+      if Atomic.compare_and_set wide.lifecycle before failed then
+        clear_wide wide
+      else release_failed_author wide
+  | _ -> ()
+
+let rec fail_reserved_author wide engine diagnostic =
+  let before = Atomic.get wide.lifecycle in
+  match lifecycle_phase before with
+  | phase when phase = accepting || phase = closing ->
+      let after = lifecycle_with_phase before failed in
+      if Atomic.compare_and_set wide.lifecycle before after then (
+        record_diagnostic engine diagnostic;
+        release_failed_author wide)
+      else fail_reserved_author wide engine diagnostic
+  | phase when phase = failed -> release_failed_author wide
+  | _ -> ()
+
+let raise_reserved_author_failure wide engine diagnostic raised =
+  let backtrace = Printexc.get_raw_backtrace () in
+  fail_reserved_author wide engine diagnostic;
+  Printexc.raise_with_backtrace raised backtrace
 
 let reserve_authoring wide engine diagnostic =
   let rec reserve () =
-    let state = Atomic.get wide.lifecycle in
-    if lifecycle_is_closing state then reject_authoring engine diagnostic
-    else if state > max_int - lifecycle_author then
-      reject_authoring engine Diagnostics.Canonical_freeze_failed
-    else if
-      Atomic.compare_and_set wide.lifecycle state (state + lifecycle_author)
-    then true
-    else reserve ()
+    if not (Atomic.get engine.accepting) then
+      reject_authoring engine Diagnostics.Runtime_closed
+    else
+      let before = Atomic.get wide.lifecycle in
+      match lifecycle_phase before with
+      | phase when phase = accepting ->
+          if lifecycle_authors before = max_authors then
+            reject_authoring engine Diagnostics.Canonical_freeze_failed
+          else if Atomic.compare_and_set wide.lifecycle before (before + author)
+          then
+            if Atomic.get engine.accepting then true
+            else (
+              fail_reserved_author wide engine Diagnostics.Runtime_closed;
+              false)
+          else reserve ()
+      | _ -> reject_authoring engine diagnostic
   in
   reserve ()
 
-let release_authoring wide =
-  ignore (Atomic.fetch_and_add wide.lifecycle (-lifecycle_author) : int)
+let complete_wide wide engine =
+  Fun.protect
+    ~finally:(fun () ->
+      clear_wide wide;
+      Atomic.set wide.lifecycle finished)
+    (fun () ->
+      let body =
+        Snapshot.Object_accumulator.as_fragment (Atomic.get wide.body)
+      in
+      let annotations = List.rev (Atomic.get wide.annotations).rev in
+      let level =
+        match Atomic.get wide.explicit_level with
+        | Some level -> level
+        | None -> Atomic.get wide.derived_level
+      in
+      match contained_call engine engine.monotonic_now with
+      | Raised -> record_diagnostic engine Diagnostics.Monotonic_clock_raised
+      | Returned (Error Io.Unavailable) ->
+          record_diagnostic engine Diagnostics.Monotonic_clock_unavailable
+      | Returned (Ok end_ns) -> (
+          match contained_call engine engine.clock with
+          | Raised -> record_diagnostic engine Diagnostics.Clock_raised
+          | Returned (Error Io.Unavailable) ->
+              record_diagnostic engine Diagnostics.Clock_unavailable
+          | Returned (Ok timestamp) -> (
+              if admitted engine level then
+                match (wide.id, wide.start_ns) with
+                | Some id, Some start_ns -> (
+                    let duration_ns =
+                      if Int64.compare end_ns start_ns < 0 then 0L
+                      else Int64.sub end_ns start_ns
+                    in
+                    let operation =
+                      Log.Producer.operation ~name:wide.name ~id
+                        ?parent:wide.parent ~duration_ns ()
+                    in
+                    match
+                      contained_call engine (fun () ->
+                          create_log engine level timestamp
+                            ~kind:(Log.Wide { operation; annotations })
+                            (Log.Producer.Structured
+                               { origin = wide.origin; value = body }))
+                    with
+                    | Raised | Returned (Error _) ->
+                        record_diagnostic engine
+                          Diagnostics.Canonical_freeze_failed
+                    | Returned (Ok log) -> dispatch engine log)
+                | None, _ | _, None ->
+                    record_diagnostic engine Diagnostics.Canonical_freeze_failed
+              )))
 
-let rec acquire_writer wide =
-  if Atomic.compare_and_set wide.writer false true then ()
-  else acquire_writer wide
+let release_reserved_author wide engine =
+  let rec release () =
+    let before = Atomic.get wide.lifecycle in
+    let authors = lifecycle_authors before in
+    match lifecycle_phase before with
+    | phase when phase = accepting && authors > 0 ->
+        if Atomic.compare_and_set wide.lifecycle before (before - author) then
+          true
+        else release ()
+    | phase when phase = closing && authors > 1 ->
+        if Atomic.compare_and_set wide.lifecycle before (before - author) then
+          true
+        else release ()
+    | phase when phase = closing && authors = 1 ->
+        if Atomic.compare_and_set wide.lifecycle before completing then (
+          complete_wide wide engine;
+          true)
+        else release ()
+    | phase when phase = failed && authors > 0 ->
+        release_failed_author wide;
+        false
+    | _ -> false
+  in
+  release ()
 
-let release_writer wide = Atomic.set wide.writer false
+let derive_level wide level =
+  let rec derive () =
+    let before = Atomic.get wide.derived_level in
+    if Level.compare level before <= 0 then ()
+    else if not (Atomic.compare_and_set wide.derived_level before level) then
+      derive ()
+  in
+  derive ()
 
-let rec mark_failed wide =
-  let state = Atomic.get wide.lifecycle in
-  if lifecycle_is_failed state then false
-  else
-    let failed = state lor lifecycle_closing lor lifecycle_failed in
-    if Atomic.compare_and_set wide.lifecycle state failed then true
-    else mark_failed wide
+let commit_body wide engine contribution =
+  let rec commit () =
+    let before = Atomic.get wide.body in
+    match contained_call engine (fun () -> merge_body before contribution) with
+    | Raised ->
+        fail_reserved_author wide engine Diagnostics.Message_evaluation_raised;
+        false
+    | Returned (Error _) ->
+        fail_reserved_author wide engine Diagnostics.Canonical_freeze_failed;
+        false
+    | Returned (Ok after) ->
+        if Atomic.compare_and_set wide.body before after then true
+        else commit ()
+  in
+  commit ()
 
-let fail_authoring wide engine diagnostic =
-  let first_failure = mark_failed wide in
-  if first_failure then (
-    acquire_writer wide;
-    clear_wide wide;
-    release_writer wide);
-  release_authoring wide;
-  if first_failure then record_diagnostic engine diagnostic
-
-let fail_authoring_with_writer wide engine diagnostic =
-  let first_failure = mark_failed wide in
-  if first_failure then clear_wide wide;
-  release_writer wide;
-  release_authoring wide;
-  if first_failure then record_diagnostic engine diagnostic
-
-let authoring_failed wide = lifecycle_is_failed (Atomic.get wide.lifecycle)
+let commit_annotation wide engine annotation message_bytes =
+  let rec commit () =
+    let before = Atomic.get wide.annotations in
+    if
+      before.count >= Snapshot.width_limit
+      || message_bytes > Snapshot.max_string_bytes - before.bytes
+    then (
+      fail_reserved_author wide engine Diagnostics.Canonical_freeze_failed;
+      false)
+    else
+      let after =
+        {
+          rev = annotation :: before.rev;
+          count = before.count + 1;
+          bytes = before.bytes + message_bytes;
+        }
+      in
+      if Atomic.compare_and_set wide.annotations before after then true
+      else commit ()
+  in
+  commit ()
 
 let contribute_wide wide materialize =
   match wide.engine with
@@ -402,55 +548,27 @@ let contribute_wide wide materialize =
         match contained_call engine materialize with
         | result -> result
         | exception raised ->
-            let backtrace = Printexc.get_raw_backtrace () in
-            fail_authoring wide engine Diagnostics.Message_evaluation_raised;
-            Printexc.raise_with_backtrace raised backtrace
+            raise_reserved_author_failure wide engine
+              Diagnostics.Message_evaluation_raised raised
       in
       match materialized with
       | Raised ->
-          fail_authoring wide engine Diagnostics.Message_evaluation_raised;
+          fail_reserved_author wide engine Diagnostics.Message_evaluation_raised;
           false
       | Returned (Invalid_contribution _) ->
-          fail_authoring wide engine Diagnostics.Canonical_freeze_failed;
+          fail_reserved_author wide engine Diagnostics.Canonical_freeze_failed;
           false
       | Returned (Contribution (contribution_body, contribution_has_error)) -> (
-          acquire_writer wide;
-          if authoring_failed wide then (
-            release_writer wide;
-            release_authoring wide;
-            false)
-          else
-            let merged =
-              match
-                contained_call engine (fun () ->
-                    merge_body wide.body contribution_body)
-              with
-              | result -> result
-              | exception raised ->
-                  let backtrace = Printexc.get_raw_backtrace () in
-                  fail_authoring_with_writer wide engine
-                    Diagnostics.Message_evaluation_raised;
-                  Printexc.raise_with_backtrace raised backtrace
-            in
-            match merged with
-            | Raised ->
-                fail_authoring_with_writer wide engine
-                  Diagnostics.Message_evaluation_raised;
-                false
-            | Returned (Error _) ->
-                fail_authoring_with_writer wide engine
-                  Diagnostics.Canonical_freeze_failed;
-                false
-            | Returned (Ok body) ->
-                wide.body <- body;
-                if contribution_has_error then
-                  wide.derived_level <-
-                    (if Level.compare Level.Error wide.derived_level > 0 then
-                       Level.Error
-                     else wide.derived_level);
-                release_writer wide;
-                release_authoring wide;
-                true))
+          match
+            if commit_body wide engine contribution_body then (
+              if contribution_has_error then derive_level wide Level.Error;
+              release_reserved_author wide engine)
+            else false
+          with
+          | result -> result
+          | exception raised ->
+              raise_reserved_author_failure wide engine
+                Diagnostics.Message_evaluation_raised raised))
 
 let annotate_wide wide level author =
   match wide.engine with
@@ -463,16 +581,15 @@ let annotate_wide wide level author =
         match contained_call engine engine.clock with
         | result -> result
         | exception raised ->
-            let backtrace = Printexc.get_raw_backtrace () in
-            fail_authoring wide engine Diagnostics.Clock_raised;
-            Printexc.raise_with_backtrace raised backtrace
+            raise_reserved_author_failure wide engine Diagnostics.Clock_raised
+              raised
       in
       match clocked with
       | Raised ->
-          fail_authoring wide engine Diagnostics.Clock_raised;
+          fail_reserved_author wide engine Diagnostics.Clock_raised;
           false
       | Returned (Error Io.Unavailable) ->
-          fail_authoring wide engine Diagnostics.Clock_unavailable;
+          fail_reserved_author wide engine Diagnostics.Clock_unavailable;
           false
       | Returned (Ok timestamp) -> (
           let materialized =
@@ -481,118 +598,65 @@ let annotate_wide wide level author =
             with
             | result -> result
             | exception raised ->
-                let backtrace = Printexc.get_raw_backtrace () in
-                fail_authoring wide engine Diagnostics.Message_evaluation_raised;
-                Printexc.raise_with_backtrace raised backtrace
+                raise_reserved_author_failure wide engine
+                  Diagnostics.Message_evaluation_raised raised
           in
           match materialized with
           | Raised ->
-              fail_authoring wide engine Diagnostics.Message_evaluation_raised;
+              fail_reserved_author wide engine
+                Diagnostics.Message_evaluation_raised;
               false
           | Returned (Error _) ->
-              fail_authoring wide engine Diagnostics.Canonical_freeze_failed;
+              fail_reserved_author wide engine
+                Diagnostics.Canonical_freeze_failed;
               false
-          | Returned (Ok message) ->
-              acquire_writer wide;
-              let message_bytes = String.length message in
-              if
-                authoring_failed wide
-                || wide.annotation_count >= Snapshot.width_limit
-                || message_bytes
-                   > Snapshot.max_string_bytes - wide.annotation_bytes
-              then (
-                if authoring_failed wide then (
-                  release_writer wide;
-                  release_authoring wide)
-                else
-                  fail_authoring_with_writer wide engine
-                    Diagnostics.Canonical_freeze_failed;
-                false)
-              else (
-                wide.annotations_rev <-
+          | Returned (Ok message) -> (
+              match
+                let message_bytes = String.length message in
+                let annotation =
                   Log.Producer.annotation ~timestamp ~level ~message
-                  :: wide.annotations_rev;
-                wide.annotation_count <- wide.annotation_count + 1;
-                wide.annotation_bytes <- wide.annotation_bytes + message_bytes;
-                if Level.compare level wide.derived_level > 0 then
-                  wide.derived_level <- level;
-                release_writer wide;
-                release_authoring wide;
-                true)))
+                in
+                if commit_annotation wide engine annotation message_bytes then (
+                  derive_level wide level;
+                  release_reserved_author wide engine)
+                else false
+              with
+              | result -> result
+              | exception raised ->
+                  raise_reserved_author_failure wide engine
+                    Diagnostics.Message_evaluation_raised raised)))
 
 let set_wide_level wide level =
   match wide.engine with
   | None -> ()
-  | Some engine ->
-      if reserve_authoring wide engine Diagnostics.Post_seal_set_level then (
-        acquire_writer wide;
-        if not (authoring_failed wide) then wide.explicit_level <- Some level;
-        release_writer wide;
-        release_authoring wide)
-
-let rec close_lifecycle wide =
-  let state = Atomic.get wide.lifecycle in
-  if lifecycle_is_closing state then false
-  else if
-    Atomic.compare_and_set wide.lifecycle state (state lor lifecycle_closing)
-  then true
-  else close_lifecycle wide
-
-let rec wait_for_authors wide =
-  if lifecycle_has_authors (Atomic.get wide.lifecycle) then
-    wait_for_authors wide
+  | Some engine -> (
+      if reserve_authoring wide engine Diagnostics.Post_seal_set_level then
+        match
+          let explicit_level = Some level in
+          Atomic.set wide.explicit_level explicit_level;
+          ignore (release_reserved_author wide engine : bool)
+        with
+        | () -> ()
+        | exception raised ->
+            raise_reserved_author_failure wide engine
+              Diagnostics.Message_evaluation_raised raised)
 
 let emit_wide wide =
   match wide.engine with
   | None -> ()
   | Some engine ->
-      if not (close_lifecycle wide) then
-        record_diagnostic engine Diagnostics.Post_seal_emit
-      else (
-        wait_for_authors wide;
-        if not (authoring_failed wide) then (
-          let body = Snapshot.Object_accumulator.as_fragment wide.body in
-          let annotations = List.rev wide.annotations_rev in
-          clear_wide wide;
-          let level =
-            match wide.explicit_level with
-            | Some level -> level
-            | None -> wide.derived_level
-          in
-          match contained_call engine engine.monotonic_now with
-          | Raised ->
-              record_diagnostic engine Diagnostics.Monotonic_clock_raised
-          | Returned (Error Io.Unavailable) ->
-              record_diagnostic engine Diagnostics.Monotonic_clock_unavailable
-          | Returned (Ok end_ns) -> (
-              match contained_call engine engine.clock with
-              | Raised -> record_diagnostic engine Diagnostics.Clock_raised
-              | Returned (Error Io.Unavailable) ->
-                  record_diagnostic engine Diagnostics.Clock_unavailable
-              | Returned (Ok timestamp) -> (
-                  if admitted engine level then
-                    match (wide.id, wide.start_ns) with
-                    | Some id, Some start_ns -> (
-                        let duration_ns =
-                          if Int64.compare end_ns start_ns < 0 then 0L
-                          else Int64.sub end_ns start_ns
-                        in
-                        let operation =
-                          Log.Producer.operation ~name:wide.name ~id
-                            ?parent:wide.parent ~duration_ns ()
-                        in
-                        match
-                          contained_call engine (fun () ->
-                              create_log engine level timestamp
-                                ~kind:(Log.Wide { operation; annotations })
-                                (Log.Producer.Structured
-                                   { origin = wide.origin; value = body }))
-                        with
-                        | Raised | Returned (Error _) ->
-                            record_diagnostic engine
-                              Diagnostics.Canonical_freeze_failed
-                        | Returned (Ok log) -> dispatch engine log)
-                    | None, _ | _, None ->
-                        record_diagnostic engine
-                          Diagnostics.Canonical_freeze_failed)))
-        else ())
+      let rec close () =
+        let before = Atomic.get wide.lifecycle in
+        match lifecycle_phase before with
+        | phase when phase = accepting ->
+            let authors = lifecycle_authors before in
+            let after =
+              if authors = 0 then completing
+              else lifecycle_with_phase before closing
+            in
+            if Atomic.compare_and_set wide.lifecycle before after then (
+              if authors = 0 then complete_wide wide engine)
+            else close ()
+        | _ -> record_diagnostic engine Diagnostics.Post_seal_emit
+      in
+      close ()

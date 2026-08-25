@@ -24,6 +24,7 @@ type kind =
   | Drain_delivery_failed
   | Capture_overflow
   | Capture_closed
+  | Runtime_closed
 
 type entry = { kind : kind; count : int }
 type store = int Atomic.t array
@@ -55,6 +56,7 @@ let kinds =
     Drain_delivery_failed;
     Capture_overflow;
     Capture_closed;
+    Runtime_closed;
   |]
 
 let index = function
@@ -83,6 +85,7 @@ let index = function
   | Drain_delivery_failed -> 22
   | Capture_overflow -> 23
   | Capture_closed -> 24
+  | Runtime_closed -> 25
 
 let create_store () = Array.init (Array.length kinds) (fun _ -> Atomic.make 0)
 

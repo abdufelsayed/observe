@@ -522,10 +522,10 @@ let operation_failure observer () =
   | _ -> ()
   | exception Failure _ -> ()
 
-let child_operation observer () =
-  let parent = Observe.Logs.create ~name:"operation-parent" () in
+let parent_child_operation observer () =
   consume
-    (Observer.fork observer ~parent ~name:"operation-child" (fun () -> 42))
+    (Observer.with_operation observer ~name:"operation-parent" (fun () ->
+         Observer.fork observer ~name:"operation-child" (fun () -> 42)))
 
 let lwt_operation_prepare mode =
   let restore = redirect_standard_error () in
@@ -556,12 +556,12 @@ let lwt_operation_prepare mode =
           Lwt.cancel operation;
           Lwt_main.run
             (Lwt.catch (fun () -> operation) (fun _ -> Lwt.return_unit))
-      | `Child ->
-          let parent = Observe.Logs.create ~name:"lwt-parent" () in
+      | `Parent_child ->
           consume
             (Lwt_main.run
-               (Observe_lwt_unix.fork ~parent ~name:"lwt-child" (fun () ->
-                    Lwt.return 42)))
+               (Observe_lwt_unix.with_operation ~name:"lwt-parent" (fun () ->
+                    Observe_lwt_unix.fork ~name:"lwt-child" (fun () ->
+                        Lwt.return 42))))
     in
     {
       operation;
@@ -814,9 +814,10 @@ let core_scenarios =
     make ~name:"core/operation/failure" ~suite:Core
       ~boundary:"operation-failure" ~payload:"open-error" (fun () ->
         retained_core_with_observer (fun observer -> operation_failure observer));
-    make ~name:"core/operation/child" ~suite:Core ~boundary:"operation-child"
-      ~payload:"open-empty" (fun () ->
-        retained_core_with_observer (fun observer -> child_operation observer));
+    make ~name:"core/operation/parent-child" ~suite:Core
+      ~boundary:"operation-parent-child" ~payload:"open-empty" (fun () ->
+        retained_core_with_observer (fun observer ->
+            parent_child_operation observer));
     make ~name:"core/wide/nested-patch" ~suite:Core
       ~boundary:"nested-wide-patch" ~payload:"typed-nested" (fun () ->
         retained_wide_operation nested_typed_wide);
@@ -896,9 +897,9 @@ let lwt_unix_scenarios =
     make ~name:"lwt-unix/operation/cancellation" ~suite:Lwt_unix
       ~boundary:"operation-cancellation" ~payload:"open-empty" (fun () ->
         lwt_operation_prepare `Cancellation);
-    make ~name:"lwt-unix/operation/child" ~suite:Lwt_unix
-      ~boundary:"operation-child" ~payload:"open-empty" (fun () ->
-        lwt_operation_prepare `Child);
+    make ~name:"lwt-unix/operation/parent-child" ~suite:Lwt_unix
+      ~boundary:"operation-parent-child" ~payload:"open-empty" (fun () ->
+        lwt_operation_prepare `Parent_child);
   ]
 
 let fs_lwt_unix_scenarios =

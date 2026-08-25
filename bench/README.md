@@ -51,8 +51,9 @@ amortized. Report schema version 3 adds this field.
   wide fragments, typed sparse patches, and nested
   typed patches. Operation scenarios separately measure open and typed current
   lookup, bounded success and failure, a point inside an operation, and child
-  execution. These boundaries are named separately in the report; no latency
-  number is treated as proof of semantic correctness or lock-freedom.
+  execution together with its required parent lifecycle. These boundaries are
+  named separately in the report; no latency number is treated as proof of
+  semantic correctness or lock-freedom.
 - `lwt-unix` initializes `Observe_lwt_unix` and performs its real clock and Unix
   standard-error write. Each measured operation includes a `flush` sequence
   barrier, so it measures formatting, bounded submission, scheduler wakeup,

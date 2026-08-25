@@ -12,8 +12,5 @@ let io =
 
 let observer = Observer.create io
 let request callback = Observer.with_operation observer ~name:"request" callback
-
-let child parent callback =
-  Observer.fork observer ~parent ~name:"child" callback
-
+let child callback = Observer.fork observer ~name:"child" callback
 let _ = (observer, request, child)

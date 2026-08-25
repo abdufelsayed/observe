@@ -1,5 +1,9 @@
-type init_error = Already_initialized | IO_already_registered
-type capture_error = IO_already_registered | Invalid_capacity of int
+type init_error = Already_initialized | IO_already_registered | Runtime_closed
+
+type capture_error =
+  | IO_already_registered
+  | Invalid_capacity of int
+  | Runtime_closed
 
 exception Init_error of init_error
 
@@ -21,6 +25,7 @@ type route =
   | Vacant
   | Io_registered of io_registration
   | Outputs of io_registration * Engine.t
+  | Closed of io_registration
 
 let route = Atomic.make Vacant
 
@@ -32,6 +37,7 @@ let rec claim_io io : (unit, capture_error) result =
   | (Io_registered installed | Outputs (installed, _)) when installed == io ->
       Ok ()
   | Io_registered _ | Outputs _ -> Error IO_already_registered
+  | Closed _ -> Error Runtime_closed
 
 let rec publish io engine : (unit, init_error) result =
   match Atomic.get route with
@@ -47,8 +53,22 @@ let rec publish io engine : (unit, init_error) result =
       else publish io engine
   | Outputs (installed, _) when installed == io -> Error Already_initialized
   | Io_registered _ | Outputs _ -> Error IO_already_registered
+  | Closed _ -> Error Runtime_closed
 
-type resolution = Engine of Engine.t | Missing | Withhold
+let rec close io =
+  match Atomic.get route with
+  | Vacant as before ->
+      if not (Atomic.compare_and_set route before (Closed io)) then close io
+  | Outputs (installed, engine) as before when installed == io ->
+      Engine.close engine;
+      if not (Atomic.compare_and_set route before (Closed installed)) then
+        close io
+  | Io_registered installed as before when installed == io ->
+      if not (Atomic.compare_and_set route before (Closed installed)) then
+        close io
+  | Closed _ | Io_registered _ | Outputs _ -> ()
+
+type resolution = Engine of Engine.t | Missing | Withhold | Closed_route
 
 let resolve io fallback =
   match
@@ -70,17 +90,18 @@ let active_engine () =
   | Vacant -> Missing
   | Io_registered io -> resolve io Missing
   | Outputs (io, engine) -> resolve io (Engine engine)
+  | Closed io -> resolve io Closed_route
 
 let record_active diagnostic =
   match active_engine () with
   | Engine engine -> Engine.record_diagnostic engine diagnostic
   | Missing -> Diagnostics.record diagnostic
-  | Withhold -> ()
+  | Withhold | Closed_route -> ()
 
 let current_operation () =
   match Atomic.get route with
   | Vacant -> None
-  | Io_registered io | Outputs (io, _) -> (
+  | Io_registered io | Outputs (io, _) | Closed io -> (
       match
         Engine.contain ~is_control_exception:io.is_control_exception
           io.resolve_operation
@@ -97,11 +118,12 @@ let emit_point ?correlation ~level author =
   | Engine engine -> Engine.emit_point engine ?correlation level author
   | Withhold -> ()
   | Missing -> Diagnostics.record Diagnostics.Not_initialized
+  | Closed_route -> Diagnostics.record Diagnostics.Runtime_closed
 
 let create_wide ?parent ~name ~origin () =
   match active_engine () with
   | Engine engine -> Engine.create_wide engine ?parent ~name ~origin ()
-  | Withhold | Missing -> Engine.inert_wide ()
+  | Withhold | Missing | Closed_route -> Engine.inert_wide ()
 
 module Make (IO : Io.S) = struct
   type +'a io = 'a IO.t
@@ -154,6 +176,8 @@ module Make (IO : Io.S) = struct
     | Ok () -> ()
     | Error error -> raise (Init_error error)
 
+  let close t = close t.io
+
   let close_scope scope =
     if Atomic.compare_and_set scope.closed false true then
       Capture.close scope.capture
@@ -189,4 +213,9 @@ module Make (IO : Io.S) = struct
     IO.protect t.state
       ~finally:(fun () -> Atomic.set scope.closed true)
       (fun () -> IO.with_binding t.state operation_key scope callback)
+
+  let current_operation t =
+    match IO.get t.state operation_key with
+    | Some scope when not (Atomic.get scope.closed) -> Some scope.current
+    | None | Some _ -> None
 end

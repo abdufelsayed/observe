@@ -156,3 +156,23 @@ let annotate handle ~level author =
   ignore (Engine.annotate_wide handle.wide level author)
 
 let emit handle = Engine.emit_wide handle.wide
+
+module Runtime = struct
+  let current = engine_current
+
+  let create_child ~parent ~name () =
+    Observer.create_wide
+      ~parent:(Engine.current_wide parent)
+      ~name ~origin:Log.Open ()
+    |> open_handle
+
+  let create_typed_child ~parent ~name ~using () =
+    Observer.create_wide
+      ~parent:(Engine.current_wide parent)
+      ~name
+      ~origin:(Log.Declared (Schema.name using))
+      ()
+    |> fun wide -> typed_handle wide using
+
+  let contribute_error = contribute_error
+end

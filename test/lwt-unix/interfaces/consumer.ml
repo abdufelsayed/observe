@@ -7,7 +7,7 @@ let capture callback = Observe_lwt_unix.Test.with_capture_exn ~config callback
 let operation callback =
   Observe_lwt_unix.with_operation ~name:"operation" callback
 
-let child parent callback =
-  Observe_lwt_unix.fork ~parent ~name:"child" ~error:Observe.Error.exn callback
+let child callback =
+  Observe_lwt_unix.fork ~name:"child" ~error:Observe.Error.exn callback
 
 let _ = (initialize, flush, shutdown, capture, operation, child)

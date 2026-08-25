@@ -19,6 +19,7 @@
    (run %{exe:concurrency_scenario.exe} diagnostic-counting 1)
    (run %{exe:concurrency_scenario.exe} diagnostic-counting 8)
    (run %{exe:concurrency_scenario.exe} diagnostic-counting 64)
+   (run %{exe:concurrency_scenario.exe} producer-close-race)
    (run %{exe:concurrency_scenario.exe} wide-contribution-and-seal 8)
    (run %{exe:concurrency_scenario.exe} wide-contribution-and-seal 64)
    (run %{exe:concurrency_scenario.exe} wide-set-level-emit-race 8)

@@ -120,8 +120,8 @@ let checkout_operation () =
   let* () =
     Lwt.catch
       (fun () ->
-        Observe_lwt_unix.fork ~parent:log ~name:"capture-payment"
-          ~error:payment_error capture_payment)
+        Observe_lwt_unix.fork ~name:"capture-payment" ~error:payment_error
+          capture_payment)
       (function
         | Payment_declined { code; _ } ->
             [%observe.warn

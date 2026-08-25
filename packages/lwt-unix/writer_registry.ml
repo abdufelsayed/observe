@@ -13,8 +13,7 @@ let with_lock t callback =
       Mutex.unlock t.mutex;
       raise exn
 
-let create ~flush ~shutdown =
-  { mutex = Mutex.create (); hooks = [ { flush; shutdown } ]; status = Open }
+let create () = { mutex = Mutex.create (); hooks = []; status = Open }
 
 let register t ~flush ~shutdown =
   with_lock t (fun () ->

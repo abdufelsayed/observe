@@ -83,7 +83,7 @@ let operation callback =
   Observer.with_operation observer ~name:"consumer" ~using:event_schema callback
 
 let typed_child callback =
-  Observer.fork observer ~parent:wide ~name:"child" ~using:event_schema callback
+  Observer.fork observer ~name:"child" ~using:event_schema callback
 
 let current () = Observe.Logs.current_typed ~using:event_schema
 

@@ -87,7 +87,10 @@ val annotate : ('builder, 'patch) t -> level:Level.t -> (unit -> string) -> unit
 
 val emit : ('builder, 'patch) t -> unit
 (** Seal and attempt to publish the wide log exactly once. Admission uses the
-    final level. Completion failures remain sealed and are diagnosed. *)
+    final level. With no in-flight author, completion happens before [emit]
+    returns. If another thread is already evaluating an admitted author, [emit]
+    seals and returns; the last admitted author performs completion. Completion
+    failures remain sealed and are diagnosed. *)
 
 type current_error =
   | Not_bound
@@ -109,16 +112,27 @@ val current_typed :
     operation. Raises [Current_error Not_bound], [Current_error Expected_typed],
     or [Current_error Schema_mismatch] when that contract is not met. *)
 
-val engine_wide : ('builder, 'patch) t -> Engine.wide
+(** Private bridge for runtime composition. *)
+module Runtime : sig
+  val current : ('builder, 'patch) t -> Engine.current
 
-val engine_current : ('builder, 'patch) t -> Engine.current
-(** Internal bridge used by runtime compositions. *)
+  val create_child :
+    parent:Engine.current ->
+    name:string ->
+    unit ->
+    (untyped_builder, untyped_patch) t
 
-val contribute_error :
-  ('builder, 'patch) t ->
-  'error Error.t ->
-  ?backtrace:Printexc.raw_backtrace ->
-  'error ->
-  bool
-(** Internal schema-independent error contribution used by bounded operations.
-    Returns whether the error contribution was accepted. *)
+  val create_typed_child :
+    parent:Engine.current ->
+    name:string ->
+    using:('record, 'builder) Schema.t ->
+    unit ->
+    ('builder, 'record Schema.patch) t
+
+  val contribute_error :
+    ('builder, 'patch) t ->
+    'error Error.t ->
+    ?backtrace:Printexc.raw_backtrace ->
+    'error ->
+    bool
+end

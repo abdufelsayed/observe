@@ -309,6 +309,38 @@ let repeated_init () =
       fail "unexpected initialization exception: %s" (Printexc.to_string exn)
   | () -> fail "second init_exn unexpectedly succeeded"
 
+let init_rollback () =
+  let module Conflict = Observe.Make (Observe_lwt.IO) in
+  let state =
+    Observe_lwt.create
+      ~clock:(fun () -> Ok (Observe.Timestamp.of_unix_ns 0L))
+      ~monotonic_now:(fun () -> Ok 0L)
+      ~next_id:(fun () -> Ok "conflicting-operation")
+      ~console_style:(fun () -> Observe.Formatter.Plain)
+      ~offer_console:(fun _ -> Observe.IO.Accepted)
+      ~can_lookup_context:(fun () -> true)
+      ()
+  in
+  let conflict = Conflict.create state in
+  Conflict.init_exn conflict
+    (config ~console:Observe.Config.Silent "conflicting-runtime");
+  let stopped = ref 0 in
+  Observe_lwt_unix.Lifecycle.register
+    ~flush:(fun () -> Lwt.return_unit)
+    ~shutdown:(fun () ->
+      incr stopped;
+      Lwt.return_unit)
+  |> Result.get_ok;
+  let ready = config "rolled-back-runtime" in
+  check
+    (Observe_lwt_unix.init ready = Error Observe.IO_already_registered)
+    "failed initialization did not report the conflicting runtime";
+  check
+    (Observe_lwt_unix.init ready = Error Observe.IO_already_registered)
+    "failed initialization left the ready lifecycle initialized";
+  Lwt_main.run (Observe_lwt_unix.shutdown ());
+  check (!stopped = 1) "failed initialization lost its pending lifecycle hook"
+
 let silent_drain () =
   let delivered = ref 0 in
   let drain =
@@ -363,19 +395,135 @@ let serialized_console () =
     lines
 
 let shutdown () =
+  let delivered = ref 0 in
+  let drain =
+    Observe.Drain.create (fun _ ->
+        incr delivered;
+        Observe.Drain.Accepted)
+  in
+  let authored = ref 0 in
+  let author message (m : Observe.Logs.builder) =
+    incr authored;
+    m.text ~tag:"shutdown" "%s" message
+  in
   let (), output =
     capture_stderr (fun () ->
-        Observe_lwt_unix.init_exn (config "shutdown");
-        Observe.Logs.info (text ~tag:"shutdown" "before");
+        Observe_lwt_unix.init_exn (config ~drains:[ drain ] "shutdown");
+        Observe.Logs.info (author "before");
         Lwt_main.run (Observe_lwt_unix.shutdown ());
-        Observe.Logs.info (text ~tag:"shutdown" "after");
+        Observe.Logs.info (author "after");
         check
-          (process_diagnostic_count Observe.Diagnostics.Console_rejected = 1)
-          "post-shutdown output was not rejected")
+          (process_diagnostic_count Observe.Diagnostics.Runtime_closed = 1)
+          "post-shutdown logging was not diagnosed")
   in
   check (contains output "before") "shutdown lost an accepted record";
   check (not (contains output "after")) "shutdown accepted a later record";
+  check (!authored = 1) "shutdown evaluated a later author callback";
+  check (!delivered = 1) "shutdown delivered a later record to a drain";
   Lwt_main.run (Observe_lwt_unix.shutdown ())
+
+let shutdown_before_init () =
+  Lwt_main.run (Observe_lwt_unix.shutdown ());
+  let config = config ~console:Observe.Config.Silent "closed-before-init" in
+  check
+    (Observe_lwt_unix.init config = Error Observe.Runtime_closed)
+    "initialization succeeded after terminal shutdown";
+  (match Observe_lwt_unix.init_exn config with
+  | exception Observe.Init_error Observe.Runtime_closed -> ()
+  | exception raised ->
+      fail "unexpected post-shutdown init exception: %s"
+        (Printexc.to_string raised)
+  | () -> fail "init_exn succeeded after terminal shutdown");
+  check
+    (Observe_lwt_unix.Lifecycle.register
+       ~flush:(fun () -> Lwt.return_unit)
+       ~shutdown:(fun () -> Lwt.return_unit)
+    = Error Observe_lwt_unix.Lifecycle.Closed)
+    "closed lifecycle accepted a new output";
+  let called = ref false in
+  let capture =
+    Observe_lwt_unix.Test.with_capture_exn ~config (fun _ ->
+        called := true;
+        Lwt.return_unit)
+  in
+  (match Lwt_main.run capture with
+  | exception Observe_lwt_unix.Test.Capture_error Observe.Runtime_closed -> ()
+  | exception raised ->
+      fail "unexpected post-shutdown capture exception: %s"
+        (Printexc.to_string raised)
+  | () -> fail "capture succeeded after terminal shutdown");
+  check (not !called) "closed capture evaluated its callback"
+
+let prepared_shutdown () =
+  Lwt_main.run
+    (Observe_lwt_unix.with_operation ~name:"pre-init" (fun () ->
+         Lwt.return_unit));
+  Lwt_main.run (Observe_lwt_unix.shutdown ());
+  let authored = ref false in
+  Observe.Logs.info (fun m ->
+      authored := true;
+      m.text ~tag:"closed" "message");
+  check (not !authored) "prepared shutdown evaluated a later author";
+  check
+    (process_diagnostic_count Observe.Diagnostics.Runtime_closed = 1)
+    "prepared shutdown left the global route vacant";
+  let called = ref false in
+  let capture =
+    Observe_lwt_unix.Test.with_capture_exn ~config:(config "closed-capture")
+      (fun _ ->
+        called := true;
+        Lwt.return_unit)
+  in
+  (match Lwt_main.run capture with
+  | exception Observe_lwt_unix.Test.Capture_error Observe.Runtime_closed -> ()
+  | exception raised ->
+      fail "unexpected prepared-shutdown capture exception: %s"
+        (Printexc.to_string raised)
+  | () -> fail "prepared-shutdown capture unexpectedly succeeded");
+  check (not !called) "prepared-shutdown capture evaluated its callback"
+
+let active_capture_survives_shutdown () =
+  let capture =
+    Lwt_main.run
+      (Observe_lwt_unix.Test.with_capture_exn ~config:(config "active-capture")
+         (fun capture ->
+           Observe_lwt_unix.init_exn
+             (config ~console:Observe.Config.Silent "production");
+           Observe.Logs.info (text ~tag:"before-shutdown" "message");
+           Lwt.bind (Observe_lwt_unix.shutdown ()) (fun () ->
+               Observe.Logs.info (text ~tag:"after-shutdown" "message");
+               Lwt.return capture)))
+  in
+  check
+    (capture_tags capture = [ "before-shutdown"; "after-shutdown" ])
+    "production shutdown hid an active lexical capture"
+
+let initialization_rebinds_owner () =
+  let pre_init =
+    Thread.create
+      (fun () ->
+        Lwt_main.run
+          (Observe_lwt_unix.with_operation ~name:"foreign-pre-init" (fun () ->
+               Lwt.return_unit)))
+      ()
+  in
+  Thread.join pre_init;
+  Observe_lwt_unix.init_exn
+    (config ~console:Observe.Config.Silent "owner-rebind");
+  let capture =
+    Lwt_main.run
+      (Observe_lwt_unix.Test.with_capture_exn ~config:(config "owner-capture")
+         (fun capture ->
+           Lwt.bind
+             (Observe_lwt_unix.with_operation ~name:"owner-parent" (fun () ->
+                  Observe_lwt_unix.fork ~name:"owner-child" (fun () ->
+                      Observe.Logs.info (text ~tag:"owner-child" "message");
+                      Lwt.return_unit)))
+             (fun () -> Lwt.return capture)))
+  in
+  check
+    (Option.is_some (correlation_by_tag capture "owner-child"))
+    "initialization retained the pre-init caller as context owner"
 
 let lifecycle_flush () =
   let flushed = ref 0 in
@@ -397,6 +545,24 @@ let lifecycle_flush () =
   check (!stopped = 0) "flush ran shutdown hooks";
   Lwt_main.run (Observe_lwt_unix.shutdown ());
   check (!stopped = 2) "shutdown did not visit every registered output"
+
+let lifecycle_init_transfer () =
+  let flushed = ref 0 in
+  let stopped = ref 0 in
+  Observe_lwt_unix.Lifecycle.register
+    ~flush:(fun () ->
+      incr flushed;
+      Lwt.return_unit)
+    ~shutdown:(fun () ->
+      incr stopped;
+      Lwt.return_unit)
+  |> Result.get_ok;
+  Observe_lwt_unix.init_exn
+    (config ~console:Observe.Config.Silent "lifecycle-init-transfer");
+  Lwt_main.run (Observe_lwt_unix.flush ());
+  check (!flushed = 1) "initialization lost a registered flush hook";
+  Lwt_main.run (Observe_lwt_unix.shutdown ());
+  check (!stopped = 1) "initialization lost a registered shutdown hook"
 
 let lifecycle_failure () =
   let attempted = ref 0 in
@@ -458,10 +624,9 @@ let operation_scope () =
          (fun capture ->
            Lwt.bind
              (Observe_lwt_unix.with_operation ~name:"parent" (fun () ->
-                  let parent = Observe.Logs.current () in
                   Observe.Logs.info (text ~tag:"parent-before" "message");
                   Lwt.bind
-                    (Observe_lwt_unix.fork ~parent ~name:"child" (fun () ->
+                    (Observe_lwt_unix.fork ~name:"child" (fun () ->
                          Lwt.bind (Lwt.pause ()) (fun () ->
                              Observe.Logs.info
                                (text ~tag:"child-inside" "message");
@@ -560,10 +725,8 @@ let operation_lifecycle () =
                           | raised -> Lwt.fail raised))
                      (fun () ->
                        Observe_lwt_unix.with_operation ~name:"parent" (fun () ->
-                           let parent = Observe.Logs.current () in
                            Lwt.bind
-                             (Observe_lwt_unix.fork ~parent ~name:"child"
-                                (fun () ->
+                             (Observe_lwt_unix.fork ~name:"child" (fun () ->
                                   Observe.Logs.info
                                     (text ~tag:"fork-child" "message");
                                   Lwt.return 42))
@@ -855,12 +1018,18 @@ let scenarios =
     ("wide-json-console", wide_json_console);
     ("production-json-console", production_json_console);
     ("repeated-init", repeated_init);
+    ("init-rollback", init_rollback);
     ("silent-drain", silent_drain);
     ("no-output", no_output);
     ("bounded-console", bounded_console);
     ("serialized-console", serialized_console);
     ("shutdown", shutdown);
+    ("shutdown-before-init", shutdown_before_init);
+    ("prepared-shutdown", prepared_shutdown);
+    ("active-capture-shutdown", active_capture_survives_shutdown);
+    ("initialization-rebinds-owner", initialization_rebinds_owner);
     ("lifecycle-flush", lifecycle_flush);
+    ("lifecycle-init-transfer", lifecycle_init_transfer);
     ("lifecycle-failure", lifecycle_failure);
     ("basic-capture", basic_capture);
     ("operation-scope", operation_scope);

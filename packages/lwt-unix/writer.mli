@@ -12,3 +12,7 @@ val flush : t -> unit Lwt.t
 val shutdown : t -> unit Lwt.t
 (** Stop accepting records, drain those already accepted, and stop the worker.
     Repeated calls share the same completion. *)
+
+val abort : t -> unit
+(** Synchronously discard a writer created for an initialization which did not
+    publish. No records may have been offered. *)

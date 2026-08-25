@@ -95,15 +95,21 @@ let config =
     ()
 ```
 
+Linking `observe-lwt-unix` allocates no writer and starts no background work.
 The initializer installs Lwt callback-local context, the Unix wall clock,
 cryptographically random UUID v4 operation identities, and automatic output on
 standard error. It is synchronous, starts no scheduler, and returns no logger
-handle. A bounded Lwt worker serializes accepted console records once a
-scheduler runs. All caller code emits through the same process-wide
-`Observe.Logs` module. Pass `~id_generator` only when a deterministic test or an
-existing identity policy needs to replace the secure default. Observe
-serializes calls to that callback; each call must promptly return a fresh,
-non-empty, valid UTF-8 operation ID.
+handle. When console output is active, initialization creates one bounded Lwt
+writer which begins processing once a scheduler runs. All caller code emits
+through the same process-wide `Observe.Logs` module. Pass `~id_generator` only
+when a deterministic test or an existing identity policy needs to replace the
+secure default. Observe serializes calls to that callback; each call must
+promptly return a fresh, non-empty, valid UTF-8 operation ID.
+
+`shutdown` first closes production logging admission, then drains accepted
+output and stops its workers. It is terminal and idempotent. Author callbacks
+are not evaluated after it begins, and a later `init` returns
+`Error Observe.Runtime_closed`.
 
 Identity generation is configured at the Unix composition boundary, not in the
 portable core:
@@ -338,7 +344,9 @@ Observe.Logs.emit checkout
 Successive object contributions merge recursively; a later scalar or variant
 replaces the earlier value at that field. The first `emit` seals the lifecycle
 and publishes at most once. Contributions and completion are lazy for inert or
-already sealed handles.
+already sealed handles. Sequential `emit` completes synchronously. If another
+thread is already evaluating an admitted contribution, `emit` seals and returns
+without waiting; the last admitted contributor performs completion.
 
 Manual lifecycles accept explicit error contributions:
 
@@ -415,14 +423,15 @@ let capture_payment () =
   authorize_payment ()
 
 let checkout () =
-  let checkout = Observe.Logs.current () in
-  Observe_lwt_unix.fork ~parent:checkout ~name:"capture-payment"
-    capture_payment
+  Observe_lwt_unix.fork ~name:"capture-payment" capture_payment
 ```
 
-The callback receives `unit` and retrieves its child with `current`. The child
-records only the parent identity; it does not copy the parent's fields, level,
-schema, or lifecycle. When it settles, the parent becomes current again.
+The callback receives `unit` and retrieves its child with `current`. `fork`
+derives the parent from the current operation and raises `Current_error
+Not_bound` outside an operation scope. The child records only the parent
+identity; it does not copy the parent's fields, level, schema, or lifecycle.
+When it settles, the parent becomes current again. Manual detached construction
+can still pass an explicit `~parent` to `Observe.Logs.create`.
 
 ## Console Output
 

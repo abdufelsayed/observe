@@ -302,6 +302,7 @@ module Diagnostics : sig
     | Drain_delivery_failed
     | Capture_overflow
     | Capture_closed
+    | Runtime_closed
 
   type entry = private { kind : kind; count : int }
 
@@ -532,7 +533,10 @@ module Logs : sig
       operation's annotation list. *)
 
   val emit : ('builder, 'patch) t -> unit
-  (** Seal and attempt final-level admission and publication exactly once. *)
+  (** Seal and attempt final-level admission and publication exactly once. With
+      no in-flight author, completion happens before [emit] returns. If another
+      thread is already evaluating an admitted author, [emit] seals and returns;
+      the last admitted author performs completion. *)
 
   type current_error =
     | Not_bound
@@ -785,8 +789,12 @@ module IO : sig
   end
 end
 
-type init_error = Already_initialized | IO_already_registered
-type capture_error = IO_already_registered | Invalid_capacity of int
+type init_error = Already_initialized | IO_already_registered | Runtime_closed
+
+type capture_error =
+  | IO_already_registered
+  | Invalid_capacity of int
+  | Runtime_closed
 
 exception Init_error of init_error
 
@@ -802,6 +810,10 @@ module Make (IO : IO.S) : sig
 
   val init_exn : t -> Config.t -> unit
   (** [init_exn] raises [Init_error error] when [init] returns [Error error]. *)
+
+  val close : t -> unit
+  (** Stop production admission for this process-wide runtime. This performs no
+      flushing or I/O. Repeated calls are harmless. *)
 
   val with_capture :
     t ->
@@ -835,13 +847,13 @@ module Make (IO : IO.S) : sig
 
   val fork :
     t ->
-    parent:('parent_builder, 'parent_patch) Logs.t ->
     name:string ->
     ?using:('record, 'builder) Schema.t ->
     ?error:exn Error.t ->
     (unit -> 'a io) ->
     'a io
-  (** Run an independently completed child operation. The child records the
-      parent's complete reference without copying or modifying its event. The
-      prior current operation is restored when the callback settles. *)
+  (** Run an independently completed child of the current operation. The child
+      records the parent's complete reference without copying or modifying its
+      event. The prior current operation is restored when the callback settles.
+      Raises [Logs.Current_error Not_bound] outside an operation scope. *)
 end
