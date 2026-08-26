@@ -29,7 +29,8 @@
    (run %{exe:concurrency_scenario.exe} wide-annotation-emit-race 64)
    (run %{exe:concurrency_scenario.exe} wide-authoring-linearization)
    (run %{exe:concurrency_scenario.exe} wide-parallel-materialization)
-   (run %{exe:concurrency_scenario.exe} wide-parallel-failure-linearization))))
+   (run %{exe:concurrency_scenario.exe} wide-parallel-failure-linearization)
+   (run %{exe:concurrency_scenario.exe} redaction-concurrency 32))))
 
 (rule
  (alias observe-concurrency-stress)

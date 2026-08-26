@@ -8,6 +8,7 @@ type t = {
   drains : Drain.t list;
   enrichers : Log_enricher.t list;
   limits : Log_limits.t;
+  redaction : Log_redaction.t;
 }
 
 and console = Auto | Pretty | Ndjson | Silent
@@ -70,7 +71,7 @@ let sort_enrichers =
 
 let create ~service ?environment ?version ?(enabled = true) ?(console = Auto)
     ?(min_level = Level.Info) ?(drains = []) ?(enrichers = [])
-    ?(limits = Log_limits.default) () =
+    ?(limits = Log_limits.default) ?(redaction = Log_redaction.none) () =
   match validate Service service with
   | Error _ as error -> error
   | Ok () -> (
@@ -94,6 +95,7 @@ let create ~service ?environment ?version ?(enabled = true) ?(console = Auto)
                       drains;
                       enrichers = sort_enrichers enrichers;
                       limits;
+                      redaction;
                     })))
 
 let pp_field formatter = function
@@ -114,10 +116,10 @@ let pp_error formatter { field; problem } =
   Format.fprintf formatter "%a %a" pp_field field pp_problem problem
 
 let create_exn ~service ?environment ?version ?enabled ?console ?min_level
-    ?drains ?enrichers ?limits () =
+    ?drains ?enrichers ?limits ?redaction () =
   match
     create ~service ?environment ?version ?enabled ?console ?min_level ?drains
-      ?enrichers ?limits ()
+      ?enrichers ?limits ?redaction ()
   with
   | Ok config -> config
   | Error error -> raise (Invalid_configuration error)
@@ -131,3 +133,4 @@ let min_level t = t.min_level
 let drains t = t.drains
 let enrichers t = t.enrichers
 let limits t = t.limits
+let redaction t = t.redaction

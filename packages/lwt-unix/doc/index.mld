@@ -30,6 +30,29 @@ no logging handle. See {!module:Observe_lwt_unix}.
 environment and NDJSON otherwise. [Pretty], [Ndjson], and [Silent] are explicit
 overrides.
 
+Disclosure rules are also selected at configuration time:
+
+{[
+let redaction =
+  let module R = Observe.Logs.Redaction in
+  R.create_exn
+    ~rules:
+      [ R.Rule.at (R.Path.fields [ "payment"; "card_number" ])
+          (R.Action.mask
+             (R.Mask.keep_suffix ~characters:4
+                ~hidden:(R.Mask.Fill "*") ())) ]
+    ()
+
+let config = Observe.Config.create_exn ~service:"orders" ~redaction ()
+]}
+
+Omitting [~redaction] applies no caller-defined rule. Exact paths affect
+structured fields; string value matchers can also replace or mask point-text
+and wide annotation messages. Observe does not guess sensitive fields, rewrite
+package metadata, or deliver an original value when a redaction operation fails.
+See {!module:Observe.Logs.Redaction} for typed schema policies, finite and
+custom masks, and stricter per-drain branches.
+
 Before process exit, run {!val:Observe_lwt_unix.shutdown} through the active Lwt
 scheduler. Use {!val:Observe_lwt_unix.flush} when the worker should remain open.
 Shutdown first closes production admission, then drains accepted output work.

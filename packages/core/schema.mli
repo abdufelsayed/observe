@@ -29,6 +29,7 @@ val name : ('record, 'builder) t -> string
 val identity : ('record, 'builder) t -> identity
 val same_identity : identity -> identity -> bool
 val builder : ('record, 'builder) t -> 'builder
+val shape : ('record, 'builder) t -> Log_shape.t
 
 val freeze_complete :
   ('record, 'builder) t ->

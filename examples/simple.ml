@@ -26,9 +26,26 @@ let payment_error =
           ~kind:(Printexc.exn_slot_name error)
           ~message:(Printexc.to_string error) ())
 
+(* Redaction is opt-in. This policy protects only the typed authorization field;
+   Observe does not infer sensitive fields from their names or values. *)
+let redaction =
+  let module R = Observe.Logs.Redaction in
+  R.create_exn ~using:checkout_schema
+    ~rules:
+      [
+        R.Rule.at
+          (R.Path.root
+          |> R.Path.field "payment"
+          |> R.Path.case "Authorized"
+          |> R.Path.field "authorization_id")
+          (R.Action.mask
+             (R.Mask.keep_suffix ~characters:4 ~hidden:(R.Mask.Fill "*") ()));
+      ]
+    ()
+
 let config =
   Observe.Config.create_exn ~service:"checkout-example"
-    ~environment:"development" ~min_level:Observe.Level.Debug ()
+    ~environment:"development" ~min_level:Observe.Level.Debug ~redaction ()
 
 let () =
   Printexc.record_backtrace true;

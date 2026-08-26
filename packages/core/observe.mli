@@ -264,6 +264,13 @@ module Log : sig
   type operation_reference
   type operation
   type annotation
+  type redaction
+  type redaction_effect = Removed | Replaced | Masked | Failed_closed
+
+  type redaction_location =
+    | Structured_value of string
+    | Text_message
+    | Annotation_message of int
 
   type kind =
     | Point of { correlation : operation_reference option }
@@ -279,6 +286,15 @@ module Log : sig
   val fields : t -> Value.frozen
   (** The one immutable bounded structured field root shared by text and
       structured events. *)
+
+  val redactions : t -> redaction list
+  (** Disclosure transformations applied before publication. Capture can
+      distinguish authored safe-looking values from package redaction without
+      adding markers to JSON or pretty output. Entries contain no source value.
+  *)
+
+  val redaction_effect : redaction -> redaction_effect
+  val redaction_location : redaction -> redaction_location
 
   val kind : t -> kind
   (** Complete point or wide meaning. Correlation exists only on point logs;
@@ -330,32 +346,14 @@ module Diagnostics : sig
     | Capture_overflow
     | Capture_closed
     | Runtime_closed
+    | Redaction_failed
+    | Redaction_conflict
+    | Drain_redaction_failed
 
   type entry = private { kind : kind; count : int }
 
   val snapshot : unit -> entry list
   (** A non-clearing, finite process snapshot in stable order. *)
-end
-
-module Drain : sig
-  type acceptance = Accepted | Rejected
-  type t
-
-  val create : (Log.t -> acceptance) -> t
-  (** Construct an additional output with a synchronous callback over one
-      immutable completed observation. A drain can retain [Log.t] safely; it
-      must still own destination-specific projection and mutable delivery state.
-      [Accepted] means immediate ownership acceptance only. Ordinary callback
-      exceptions are contained as [Diagnostics.Drain_raised]; runtime control
-      exceptions are preserved. *)
-
-  module Integration : sig
-    val report_failure : t -> unit
-    (** Report that asynchronous work accepted by this drain later failed.
-        Repeated reports for the same drain count once. Reporting increments one
-        bounded, non-recursive process diagnostic and performs no logging,
-        callback, or I/O. *)
-  end
 end
 
 module Formatter : sig
@@ -428,11 +426,12 @@ module Logs : sig
         ordinary collisions. [authoritative_fields] grants replacement only for
         those non-reserved root fields. The callback runs after admission as a
         synchronous context producer and may run concurrently for different
-        observations; it must be safe for concurrent invocation and must not
-        recursively emit Observe logs. Ordinary callback exceptions and invalid
-        contributions are contained and diagnosed. Configured limit exhaustion
-        becomes bounded truncation or omission; runtime control exceptions
-        propagate unchanged. *)
+        observations, so it must be safe for concurrent invocation. An admitted
+        Observe log emitted by the callback can invoke the same enricher again;
+        the callback owns termination of that recursion. Ordinary callback
+        exceptions and invalid contributions are contained and diagnosed.
+        Configured limit exhaustion becomes bounded truncation or omission;
+        runtime control exceptions propagate unchanged. *)
 
     val name : t -> string
     val authoritative_fields : t -> string list
@@ -503,6 +502,107 @@ module Logs : sig
     val max_bytes_length : t -> int
     val max_nodes : t -> int
     val max_total_bytes : t -> int
+    val pp_error : Format.formatter -> error -> unit
+  end
+
+  module Redaction : sig
+    (** Explicit disclosure policy for completed logging values. Observe makes
+        no sensitivity guesses and installs no domain-specific preset. *)
+
+    module Path : sig
+      type t
+
+      val root : t
+      val fields : string list -> t
+      val field : string -> t -> t
+      val index : int -> t -> t
+      val case : string -> t -> t
+      val to_string : t -> string
+    end
+
+    module Matcher : sig
+      type t
+
+      val string_equal : string -> t
+      val string_prefix : string -> t
+      val string_suffix : string -> t
+      val string_contains : string -> t
+      val bool : bool -> t
+      val int : int -> t
+      val int32 : int32 -> t
+      val int64 : int64 -> t
+      val float : float -> t
+      val bytes_equal : bytes -> t
+      val null : t
+    end
+
+    module Mask : sig
+      type hidden = Fill of string | Collapse of string
+      type t
+
+      val keep_prefix : characters:int -> hidden:hidden -> unit -> t
+      val keep_suffix : characters:int -> hidden:hidden -> unit -> t
+      val keep_ends : characters:int -> hidden:hidden -> unit -> t
+
+      val custom : ?fallback:string -> (string -> string) -> t
+      (** Construct an explicitly caller-owned synchronous string mask. The
+          callback receives only one already-bounded immutable matched string.
+          It may run concurrently and owns its own termination. Ordinary
+          exceptions and invalid or over-budget results fail closed to
+          [fallback]; runtime control exceptions propagate. *)
+    end
+
+    module Action : sig
+      type t
+
+      val remove : t
+      val replace : Value.t -> t
+
+      val mask : Mask.t -> t
+      (** Mask a string-valued target. A schema-associated policy rejects a
+          statically known non-string target during policy construction. *)
+    end
+
+    module Rule : sig
+      type t
+
+      val at : Path.t -> Action.t -> t
+      (** Apply one action at an exact structured path. Policy construction
+          rejects known missing, unstable, or action-incompatible typed targets.
+      *)
+
+      val matching : Matcher.t -> Action.t -> t
+      (** Apply replacement or masking to matching structured scalar values,
+          point-text messages, and wide annotation messages. Removal is only a
+          structured-path action. *)
+    end
+
+    type t
+    type error
+
+    exception Invalid_redaction of error
+
+    val none : t
+
+    val create :
+      ?using:('record, 'builder) Schema.t ->
+      rules:Rule.t list ->
+      unit ->
+      (t, error) result
+    (** Validate and normalize one declaration-order-independent policy. [using]
+        associates its rules with that exact generative schema and validates
+        exact paths when the schema publishes a known shape. A custom mapped
+        description whose shape is opaque defers exact lookup to the same safe
+        runtime traversal; unstable positions such as hash-table iteration
+        indexes are rejected. The policy remains inert until selected by
+        configuration or a drain. *)
+
+    val create_exn :
+      ?using:('record, 'builder) Schema.t -> rules:Rule.t list -> unit -> t
+
+    val combine : policies:t list -> unit -> (t, error) result
+    val combine_exn : policies:t list -> unit -> t
+    val is_none : t -> bool
     val pp_error : Format.formatter -> error -> unit
   end
 
@@ -640,6 +740,34 @@ module Logs : sig
       The supplied schema must be the same instance used to start it. *)
 end
 
+module Drain : sig
+  type acceptance = Accepted | Rejected
+  type t
+
+  val create : (Log.t -> acceptance) -> t
+  (** Construct an additional output with a synchronous callback over one
+      immutable disclosure-safe completed observation. A drain can retain
+      [Log.t] safely; it must still own destination-specific projection and
+      mutable delivery state. [Accepted] means immediate ownership acceptance
+      only. Ordinary callback exceptions are contained as
+      [Diagnostics.Drain_raised]; runtime control exceptions are preserved. *)
+
+  val with_redaction : redaction:Logs.Redaction.t -> t -> t
+  (** Strengthen this destination with an additional disclosure policy. Nested
+      wrappers normalize into one order-independent policy. The destination
+      receives only the already globally safe observation, so it cannot recover
+      removed source data. Invalid composition raises
+      [Logs.Redaction.Invalid_redaction]. *)
+
+  module Integration : sig
+    val report_failure : t -> unit
+    (** Report that asynchronous work accepted by this drain later failed.
+        Repeated reports for the same drain count once. Reporting increments one
+        bounded, non-recursive process diagnostic and performs no logging,
+        callback, or I/O. *)
+  end
+end
+
 module Config : sig
   type t
   type console = Auto | Pretty | Ndjson | Silent
@@ -665,14 +793,16 @@ module Config : sig
     ?drains:Drain.t list ->
     ?enrichers:Logs.Enricher.t list ->
     ?limits:Logs.Limits.t ->
+    ?redaction:Logs.Redaction.t ->
     unit ->
     (t, error) result
   (** Construct validated logging behavior. [Auto] selects pretty output when
       [environment] is absent, [dev], or [development], and NDJSON otherwise.
       The other console policies explicitly override that selection. Omitted
-      enrichment is empty and omitted limits use [Logs.Limits.default].
-      Duplicate enricher names and overlapping authoritative ownership are
-      rejected here, so list order never chooses a collision winner. *)
+      enrichment is empty, omitted limits use [Logs.Limits.default], and omitted
+      redaction applies no caller-defined rule. Duplicate enricher names and
+      overlapping authoritative ownership are rejected here, so list order never
+      chooses a collision winner. *)
 
   val create_exn :
     service:string ->
@@ -684,6 +814,7 @@ module Config : sig
     ?drains:Drain.t list ->
     ?enrichers:Logs.Enricher.t list ->
     ?limits:Logs.Limits.t ->
+    ?redaction:Logs.Redaction.t ->
     unit ->
     t
   (** Like {!create}, but raises [Invalid_configuration error]. *)
@@ -697,6 +828,7 @@ module Config : sig
   val drains : t -> Drain.t list
   val enrichers : t -> Logs.Enricher.t list
   val limits : t -> Logs.Limits.t
+  val redaction : t -> Logs.Redaction.t
   val pp_error : Format.formatter -> error -> unit
 end
 

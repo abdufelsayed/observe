@@ -2,6 +2,7 @@ type 'a field_policy = Required | Omit_if of ('a -> bool)
 
 type 'a t = {
   repr : 'a Repr.t;
+  shape : Log_shape.t;
   json : Buffer.t -> 'a -> unit;
   plan : 'a -> Pretty.rendered;
   freeze :
@@ -39,13 +40,14 @@ let guard_freeze ~atomic_freeze freeze context ~depth value =
   | Ok () when atomic_freeze -> freeze context ~depth value
   | Ok () -> Snapshot.localize_apply context ~depth freeze value
 
-let make ?omit_field ?record_name ?(atomic_freeze = false) ~plan ~freeze repr
-    json =
+let make ?omit_field ?record_name ?(atomic_freeze = false) ~shape ~plan ~freeze
+    repr json =
   let field_policy =
     match omit_field with None -> Required | Some omit -> Omit_if omit
   in
   {
     repr;
+    shape;
     json;
     plan;
     freeze = guard_freeze ~atomic_freeze freeze;
@@ -69,6 +71,7 @@ let with_freeze description freeze =
   { description with freeze = guard_freeze ~atomic_freeze:false freeze }
 
 let with_repr description repr = { description with repr }
+let shape description = description.shape
 
 let freeze_into description context ~depth value =
   description.freeze context ~depth value
@@ -88,41 +91,41 @@ type 'a description = 'a t
 
 open Pretty
 
-let scalar_description ?omit_field ~freeze repr json append =
-  make ?omit_field ~atomic_freeze:true ~freeze
+let scalar_description ?omit_field ~shape ~freeze repr json append =
+  make ?omit_field ~atomic_freeze:true ~shape ~freeze
     ~plan:(fun value -> Scalar (fun renderer -> append renderer value))
     repr json
 
 let unit =
-  scalar_description
+  scalar_description ~shape:Log_shape.scalar
     ~freeze:(fun context ~depth () -> Snapshot.object_ context ~depth [])
     Repr.unit Json_writer.unit
     (fun renderer () -> empty_record renderer)
 
 let bool =
-  scalar_description
+  scalar_description ~shape:Log_shape.scalar
     ~freeze:(fun context ~depth value -> Snapshot.bool context ~depth value)
     Repr.bool Json_writer.bool bool
 
 let char =
-  scalar_description
+  scalar_description ~shape:Log_shape.string
     ~freeze:(fun context ~depth value ->
       Snapshot.string context ~depth (String.make 1 value))
     Repr.char Json_writer.char
     (fun renderer value -> string renderer (String.make 1 value))
 
 let int =
-  scalar_description
+  scalar_description ~shape:Log_shape.scalar
     ~freeze:(fun context ~depth value -> Snapshot.int context ~depth value)
     Repr.int Json_writer.int int
 
 let int32 =
-  scalar_description
+  scalar_description ~shape:Log_shape.scalar
     ~freeze:(fun context ~depth value -> Snapshot.int32 context ~depth value)
     Repr.int32 Json_writer.int32 int32
 
 let int63 =
-  scalar_description
+  scalar_description ~shape:Log_shape.scalar
     ~freeze:(fun context ~depth value ->
       Snapshot.int64 context ~depth (Optint.Int63.to_int64 value))
     Repr.int63
@@ -130,22 +133,22 @@ let int63 =
     (fun renderer value -> number renderer (Repr.to_string Repr.int63 value))
 
 let int64 =
-  scalar_description
+  scalar_description ~shape:Log_shape.scalar
     ~freeze:(fun context ~depth value -> Snapshot.int64 context ~depth value)
     Repr.int64 Json_writer.int64 int64
 
 let float =
-  scalar_description
+  scalar_description ~shape:Log_shape.scalar
     ~freeze:(fun context ~depth value -> Snapshot.float context ~depth value)
     Repr.float Json_writer.float float
 
 let string =
-  scalar_description
+  scalar_description ~shape:Log_shape.string
     ~freeze:(fun context ~depth value -> Snapshot.string context ~depth value)
     Repr.string Json_writer.string string
 
 let bytes =
-  scalar_description
+  scalar_description ~shape:Log_shape.scalar
     ~freeze:(fun context ~depth value -> Snapshot.bytes context ~depth value)
     Repr.bytes Json_writer.bytes
     (fun renderer value ->
@@ -235,6 +238,7 @@ let freeze_sequence_values description context ~depth values =
 
 let list ?len description =
   make
+    ~shape:(Log_shape.collection description.shape)
     ~omit_field:(function [] -> true | _ :: _ -> false)
     ~plan:(plan_list description)
     ~freeze:(fun context ~depth values ->
@@ -275,7 +279,9 @@ let array ?len description =
         in
         collect 0)
   in
-  make ~plan ~freeze
+  make
+    ~shape:(Log_shape.collection description.shape)
+    ~plan ~freeze
     (Repr.array ?len description.repr)
     (Json_writer.array description.json)
 
@@ -300,6 +306,7 @@ let freeze_fixed_values context ~depth
 
 let option description =
   make ~atomic_freeze:true
+    ~shape:(Log_shape.option description.shape)
     ~omit_field:(function None -> true | Some _ -> false)
     ~plan:(function
       | None -> Scalar (fun renderer -> null renderer)
@@ -336,7 +343,11 @@ let pair left right =
         (fun () -> right.freeze context ~depth:(depth + 1) right_value);
       ]
   in
-  make ~plan ~freeze (Repr.pair left.repr right.repr) json
+  make
+    ~shape:(Log_shape.tuple [ left.shape; right.shape ])
+    ~plan ~freeze
+    (Repr.pair left.repr right.repr)
+    json
 
 let triple first second third =
   let json buffer (first_value, second_value, third_value) =
@@ -367,7 +378,11 @@ let triple first second third =
         (fun () -> third.freeze context ~depth:(depth + 1) c);
       ]
   in
-  make ~plan ~freeze (Repr.triple first.repr second.repr third.repr) json
+  make
+    ~shape:(Log_shape.tuple [ first.shape; second.shape; third.shape ])
+    ~plan ~freeze
+    (Repr.triple first.repr second.repr third.repr)
+    json
 
 let quad first second third fourth =
   let json buffer (first_value, second_value, third_value, fourth_value) =
@@ -401,7 +416,10 @@ let quad first second third fourth =
         (fun () -> fourth.freeze context ~depth:(depth + 1) d);
       ]
   in
-  make ~plan ~freeze
+  make
+    ~shape:
+      (Log_shape.tuple [ first.shape; second.shape; third.shape; fourth.shape ])
+    ~plan ~freeze
     (Repr.quad first.repr second.repr third.repr fourth.repr)
     json
 
@@ -442,7 +460,11 @@ let result ok error =
     | Ok value -> freeze_case context ~depth "ok" ok value
     | Error value -> freeze_case context ~depth "error" error value
   in
-  make ~plan ~freeze (Repr.result ok.repr error.repr) json
+  make
+    ~shape:(Log_shape.record [ ("ok", ok.shape); ("error", error.shape) ])
+    ~plan ~freeze
+    (Repr.result ok.repr error.repr)
+    json
 
 let seq description =
   let repr = Repr.seq description.repr in
@@ -491,10 +513,10 @@ let seq description =
   let freeze context ~depth values =
     freeze_sequence_values description context ~depth values
   in
-  make ~plan ~freeze repr json
+  make ~shape:(Log_shape.collection description.shape) ~plan ~freeze repr json
 
 let ref description =
-  make ~atomic_freeze:true
+  make ~atomic_freeze:true ~shape:description.shape
     ~plan:(fun value -> description.plan !value)
     ~freeze:(fun context ~depth value ->
       description.freeze context ~depth !value)
@@ -502,7 +524,7 @@ let ref description =
     (fun buffer value -> description.json buffer !value)
 
 let lazy_t description =
-  make ~atomic_freeze:true
+  make ~atomic_freeze:true ~shape:description.shape
     ~plan:(fun value -> description.plan (Lazy.force value))
     ~freeze:(fun context ~depth value ->
       description.freeze context ~depth (Lazy.force value))
@@ -535,7 +557,7 @@ let queue description =
   let freeze context ~depth values =
     freeze_sequence_values description context ~depth (Queue.to_seq values)
   in
-  make ~plan ~freeze repr json
+  make ~shape:(Log_shape.collection description.shape) ~plan ~freeze repr json
 
 let stack description =
   let repr = Repr.stack description.repr in
@@ -553,7 +575,7 @@ let stack description =
   let freeze context ~depth values =
     freeze_sequence_values description context ~depth (Stack.to_seq values)
   in
-  make ~plan ~freeze repr json
+  make ~shape:(Log_shape.collection description.shape) ~plan ~freeze repr json
 
 let hashtbl key value =
   let repr = Repr.hashtbl key.repr value.repr in
@@ -574,12 +596,15 @@ let hashtbl key value =
   let freeze context ~depth table =
     freeze_sequence_values entry context ~depth (Hashtbl.to_seq table)
   in
-  make ~plan ~freeze repr json
+  (* Hash-table iteration order is not a stable semantic position, so an exact
+     index path would be misleading even though the frozen projection is a
+     list. Value matchers can still inspect the completed scalars. *)
+  make ~shape:Log_shape.unaddressable ~plan ~freeze repr json
 
 type empty = Repr.empty = |
 
 let empty =
-  make Repr.empty
+  make ~shape:Log_shape.opaque Repr.empty
     (fun _ (value : empty) -> match value with _ -> .)
     ~plan:(fun (value : empty) -> match value with _ -> .)
     ~freeze:(fun _ ~depth:_ (value : empty) -> match value with _ -> .)
@@ -600,6 +625,7 @@ type 'record freeze_record_field =
 type ('a, 'b, 'c) open_record = {
   record_name : string;
   repr_record : ('a, 'b, 'c) Repr.open_record;
+  shape_fields_rev : (string * Log_shape.t) list;
   json_fields_rev : (Buffer.t -> first:bool -> 'a -> bool) list;
   plan_fields_rev : ('a -> string * Pretty.rendered) list;
   freeze_fields_rev : 'a freeze_record_field list;
@@ -607,6 +633,7 @@ type ('a, 'b, 'c) open_record = {
 
 type ('a, 'b) field = {
   repr_field : ('a, 'b) Repr.field;
+  shape_field : string * Log_shape.t;
   json_record_field : Buffer.t -> first:bool -> 'a -> bool;
   plan_record_field : 'a -> string * Pretty.rendered;
   freeze_record_field : 'a freeze_record_field;
@@ -616,6 +643,7 @@ let record name constructor =
   {
     record_name = name;
     repr_record = Repr.record name constructor;
+    shape_fields_rev = [];
     json_fields_rev = [];
     plan_fields_rev = [];
     freeze_fields_rev = [];
@@ -625,6 +653,7 @@ let field name description getter =
   let owned_name = Snapshot.own_text name in
   {
     repr_field = Repr.field name description.repr getter;
+    shape_field = (name, description.shape);
     json_record_field =
       (fun buffer ~first record ->
         write_field description buffer first name (getter record));
@@ -646,6 +675,7 @@ let ( |+ ) record field =
   {
     repr_record = Repr.( |+ ) record.repr_record field.repr_field;
     record_name = record.record_name;
+    shape_fields_rev = field.shape_field :: record.shape_fields_rev;
     json_fields_rev = field.json_record_field :: record.json_fields_rev;
     plan_fields_rev = field.plan_record_field :: record.plan_fields_rev;
     freeze_fields_rev = field.freeze_record_field :: record.freeze_fields_rev;
@@ -653,6 +683,7 @@ let ( |+ ) record field =
 
 let sealr record =
   let repr = Repr.sealr record.repr_record in
+  let shape = Log_shape.record (List.rev record.shape_fields_rev) in
   let json_fields = List.rev record.json_fields_rev in
   let plan_fields = List.rev record.plan_fields_rev in
   let freeze_fields = List.rev record.freeze_fields_rev in
@@ -720,7 +751,7 @@ let sealr record =
         in
         collect freeze_fields)
   in
-  make ~plan ~freeze ~record_name:record.record_name repr json
+  make ~shape ~plan ~freeze ~record_name:record.record_name repr json
 
 type 'a json_case =
   | Json0 of { name : string; polymorphic : bool; matches : 'a -> bool }
@@ -738,39 +769,49 @@ type 'a selected_case =
 
 type ('a, 'b, 'c) open_variant = {
   repr_variant : ('a, 'b, 'c) Repr.open_variant;
+  shape_cases_rev : (string * Log_shape.t option) list;
   json_cases_rev : 'a json_case list;
 }
 
 type ('a, 'b) case = {
   repr_case : ('a, 'b) Repr.case;
+  shape_case : string * Log_shape.t option;
   json_case : 'a json_case;
 }
 
 type 'a case_p = 'a Repr.case_p
 
 let variant name deconstruct =
-  { repr_variant = Repr.variant name deconstruct; json_cases_rev = [] }
+  {
+    repr_variant = Repr.variant name deconstruct;
+    shape_cases_rev = [];
+    json_cases_rev = [];
+  }
 
 let case0 ?(polymorphic = false) ~is name value =
   {
     repr_case = Repr.case0 name value;
+    shape_case = (name, None);
     json_case = Json0 { name; polymorphic; matches = is };
   }
 
 let case1 ?(polymorphic = false) ~project name description inject =
   {
     repr_case = Repr.case1 name description.repr inject;
+    shape_case = (name, Some description.shape);
     json_case = Json1 { name; polymorphic; description; project };
   }
 
 let ( |~ ) variant case =
   {
     repr_variant = Repr.( |~ ) variant.repr_variant case.repr_case;
+    shape_cases_rev = case.shape_case :: variant.shape_cases_rev;
     json_cases_rev = case.json_case :: variant.json_cases_rev;
   }
 
 let sealv variant =
   let repr = Repr.sealv variant.repr_variant in
+  let shape = Log_shape.variant (List.rev variant.shape_cases_rev) in
   let cases = List.rev variant.json_cases_rev in
   let rec find value = function
     | [] -> None
@@ -819,7 +860,7 @@ let sealv variant =
         | Ok payload ->
             Snapshot.variant context ~depth ~polymorphic name (Some payload))
   in
-  make ~plan ~freeze repr json
+  make ~shape ~plan ~freeze repr json
 
 let enum name cases =
   let repr = Repr.enum name cases in
@@ -844,7 +885,11 @@ let enum name cases =
         Snapshot.variant context ~depth ~polymorphic:false name None
     | None -> Result.Error Snapshot.Conversion_failed
   in
-  make ~atomic_freeze:true ~plan ~freeze repr json
+  make ~atomic_freeze:true
+    ~shape:
+      (Log_shape.variant
+         (List.map (fun (case_name, _) -> (case_name, None)) cases))
+    ~plan ~freeze repr json
 
 (* [mu] forwards through one coherent writer record. [Repr.mu] may re-invoke
    the builder when a generic that unrolls (pretty printing, equality, size,
@@ -854,6 +899,8 @@ let enum name cases =
 let mu (type value) (make_description : value description -> value description)
     =
   let cell = Stdlib.ref None in
+  let shape_knot = Log_shape.knot () in
+  let recursive_shape = Log_shape.knot_shape shape_knot in
   let used_too_early op =
     invalid_arg
       ("Observe.Type.mu: recursive " ^ op ^ " used during construction")
@@ -883,6 +930,7 @@ let mu (type value) (make_description : value description -> value description)
         let recursive =
           {
             repr = machine;
+            shape = recursive_shape;
             json = forward_json;
             plan = forward_plan;
             freeze = guard_freeze ~atomic_freeze:false forward_freeze;
@@ -892,11 +940,13 @@ let mu (type value) (make_description : value description -> value description)
           }
         in
         let description = make_description recursive in
+        Log_shape.tie shape_knot description.shape;
         (match !cell with None -> cell := Some description | Some _ -> ());
         description.repr)
   in
   {
     repr;
+    shape = recursive_shape;
     json = forward_json;
     plan = forward_plan;
     freeze = guard_freeze ~atomic_freeze:false forward_freeze;
@@ -914,6 +964,10 @@ let mu2 (type left right)
       right description ->
       left description * right description) =
   let cell = Stdlib.ref None in
+  let left_shape_knot = Log_shape.knot () in
+  let right_shape_knot = Log_shape.knot () in
+  let left_recursive_shape = Log_shape.knot_shape left_shape_knot in
+  let right_recursive_shape = Log_shape.knot_shape right_shape_knot in
   let used_too_early op =
     invalid_arg
       ("Observe.Type.mu2: recursive " ^ op ^ " used during construction")
@@ -963,6 +1017,7 @@ let mu2 (type left right)
         let left_recursive =
           {
             repr = left_machine;
+            shape = left_recursive_shape;
             json = forward_json_left;
             plan = forward_plan_left;
             freeze = guard_freeze ~atomic_freeze:false forward_freeze_left;
@@ -974,6 +1029,7 @@ let mu2 (type left right)
         let right_recursive =
           {
             repr = right_machine;
+            shape = right_recursive_shape;
             json = forward_json_right;
             plan = forward_plan_right;
             freeze = guard_freeze ~atomic_freeze:false forward_freeze_right;
@@ -985,6 +1041,8 @@ let mu2 (type left right)
         let left_description, right_description =
           make_descriptions left_recursive right_recursive
         in
+        Log_shape.tie left_shape_knot left_description.shape;
+        Log_shape.tie right_shape_knot right_description.shape;
         (match !cell with
         | None -> cell := Some (left_description, right_description)
         | Some _ -> ());
@@ -992,6 +1050,7 @@ let mu2 (type left right)
   in
   ( {
       repr = left_repr;
+      shape = left_recursive_shape;
       json = forward_json_left;
       plan = forward_plan_left;
       freeze = guard_freeze ~atomic_freeze:false forward_freeze_left;
@@ -1004,6 +1063,7 @@ let mu2 (type left right)
     },
     {
       repr = right_repr;
+      shape = right_recursive_shape;
       json = forward_json_right;
       plan = forward_plan_right;
       freeze = guard_freeze ~atomic_freeze:false forward_freeze_right;
@@ -1081,7 +1141,7 @@ let map description decode encode =
     | Omit_if omit -> Some (fun value -> omit (encode value))
   in
   make ?omit_field ?record_name:description.record_name ~atomic_freeze:true
-    ~plan ~freeze repr json
+    ~shape:Log_shape.opaque ~plan ~freeze repr json
 
 module Ppx_runtime = struct
   type renderer = Pretty.t

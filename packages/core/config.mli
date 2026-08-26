@@ -24,6 +24,7 @@ val create :
   ?drains:Drain.t list ->
   ?enrichers:Log_enricher.t list ->
   ?limits:Log_limits.t ->
+  ?redaction:Log_redaction.t ->
   unit ->
   (t, error) result
 (** Construct validated logging behavior.
@@ -45,6 +46,7 @@ val create_exn :
   ?drains:Drain.t list ->
   ?enrichers:Log_enricher.t list ->
   ?limits:Log_limits.t ->
+  ?redaction:Log_redaction.t ->
   unit ->
   t
 (** Like {!create}, but raises [Invalid_configuration error]. *)
@@ -58,4 +60,5 @@ val min_level : t -> Level.t
 val drains : t -> Drain.t list
 val enrichers : t -> Log_enricher.t list
 val limits : t -> Log_limits.t
+val redaction : t -> Log_redaction.t
 val pp_error : Format.formatter -> error -> unit

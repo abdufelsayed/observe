@@ -680,6 +680,71 @@ let wide_parallel_failure_linearization () =
     "failed lifecycle publishes nothing" 0
     (List.length (Observe.Capture.logs capture))
 
+let redaction_concurrency work =
+  let work = max 2 work in
+  let redaction =
+    Observe.Logs.Redaction.create_exn
+      ~rules:
+        [
+          Observe.Logs.Redaction.Rule.matching
+            (Observe.Logs.Redaction.Matcher.string_prefix "secret-")
+            (Observe.Logs.Redaction.Action.replace
+               (Observe.Value.string "[safe]"));
+        ]
+      ()
+  in
+  let config =
+    Observe.Config.create_exn ~service:"redaction-concurrency"
+      ~environment:"test" ~console:Observe.Config.Silent
+      ~min_level:Observe.Level.Debug ~redaction ()
+  in
+  let observer = Observer.create (Test_io.Host.create ()) in
+  let result =
+    Observer.with_capture observer ~config ~capacity:work (fun capture ->
+        let await_start = barrier work in
+        let threads =
+          Array.init work (fun index ->
+              Thread.create
+                (fun () ->
+                  await_start ();
+                  Observe.Logs.info (fun m ->
+                      let open Observe.Logs in
+                      m.untyped
+                      |+ m.field "token" Observe.Type.string
+                           ("secret-" ^ string_of_int index)
+                      |> m.seal))
+                ())
+        in
+        Array.iter Thread.join threads;
+        capture)
+  in
+  let capture =
+    match result with
+    | Ok capture -> capture
+    | Error _ -> Alcotest.fail "redaction concurrency capture was rejected"
+  in
+  let logs = Observe.Capture.logs capture in
+  Alcotest.(check int)
+    "all concurrent logs are retained" work (List.length logs);
+  List.iter
+    (fun log ->
+      match Observe.Log.event log with
+      | Observe.Log.Text _ -> Alcotest.fail "redaction log was text"
+      | Observe.Log.Structured _ ->
+          let json =
+            Observe.Value.frozen_to_json_string (Observe.Log.fields log)
+          in
+          Alcotest.(check bool)
+            "each concurrent secret is replaced" true
+            (contains json "\"token\":\"[safe]\"");
+          Alcotest.(check bool)
+            "no concurrent source value survives" false
+            (contains json "secret-");
+          Alcotest.(check int)
+            "one redaction report per log" 1
+            (List.length (Observe.Log.redactions log)))
+    logs
+
 let () =
   let mode = if Array.length Sys.argv > 1 then Sys.argv.(1) else "missing" in
   let argument index ~default =
@@ -702,4 +767,5 @@ let () =
   | "wide-parallel-materialization" -> wide_parallel_materialization ()
   | "wide-parallel-failure-linearization" ->
       wide_parallel_failure_linearization ()
+  | "redaction-concurrency" -> redaction_concurrency work
   | _ -> Alcotest.failf "unknown concurrency scenario: %s" mode

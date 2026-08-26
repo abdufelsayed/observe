@@ -134,10 +134,11 @@ enricher names are rejected when the configuration is created. One raising,
 invalid, or reserved-field contribution is omitted and diagnosed without
 changing application control flow for ordinary callback failures. Enricher
 callbacks are synchronous and may run concurrently for different observations,
-so they must be safe for concurrent invocation and must not recursively emit
-Observe logs. Configured limit exhaustion becomes bounded truncation or
-omission; runtime control exceptions propagate unchanged. Enricher list order
-never chooses a collision winner.
+so they must be safe for concurrent invocation. If a callback emits an admitted
+Observe log, that log can invoke the same enricher again; the callback owns
+termination of that recursion. Configured limit exhaustion becomes bounded
+truncation or omission; runtime control exceptions propagate unchanged.
+Enricher list order never chooses a collision winner.
 
 `Observe.Logs.Limits.default` supplies finite bounds for depth, object fields,
 collections, individual strings and byte values, total nodes, and deterministic
@@ -175,6 +176,131 @@ promptly return a fresh, non-empty, valid UTF-8 operation ID.
 output and stops its workers. It is terminal and idempotent. Author callbacks
 are not evaluated after it begins, and a later `init` returns
 `Error Observe.Runtime_closed`.
+
+## Disclosure-safe redaction
+
+Redaction is explicit caller policy. Omitting `~redaction` leaves authored
+values unchanged; Observe does not guess from field names, values, or
+environments which data is sensitive. A policy is inert until it is selected
+by `Config` or by a destination drain.
+
+Exact rules address the canonical structured value. Paths can name nested
+objects, list positions, and variant cases. A typed policy can be checked once
+against a schema and reused for both typed point logs and schema-locked wide
+logs:
+
+```ocaml
+module R = Observe.Logs.Redaction
+
+let typed_redaction =
+  R.create_exn
+    ~using:checkout_event_schema
+    ~rules:
+      [ R.Rule.at
+          (R.Path.root
+          |> R.Path.field "payment"
+          |> R.Path.case "Authorized"
+          |> R.Path.field "authorization_id")
+          (R.Action.mask
+             (R.Mask.keep_suffix ~characters:4 ~hidden:(R.Mask.Fill "*") ()))
+      ; R.Rule.at
+          (R.Path.root
+          |> R.Path.field "payment"
+          |> R.Path.case "Declined"
+          |> R.Path.field "code")
+          (R.Action.replace (Observe.Value.string "[payment-code]"))
+      ; R.Rule.at
+          (R.Path.root |> R.Path.field "item_count")
+          R.Action.remove
+      ]
+    ()
+
+let config =
+  Observe.Config.create_exn ~service:"orders"
+    ~redaction:typed_redaction
+    ()
+```
+
+Known typed paths and string-mask targets are checked when the policy is built.
+Custom mapped descriptions whose structural shape is intentionally opaque defer
+exact lookup to the same safe runtime traversal. Unstable positions, such as a
+hash table's iteration index, are not valid exact targets.
+
+The same policy vocabulary works for open structured logs. A policy without
+`~using` can target a canonical path without a schema association, which is
+useful for open values and applies wherever that path exists. A value matcher
+can apply a fixed replacement or a mask wherever a matching scalar occurs:
+
+```ocaml
+let global_redaction =
+  R.create_exn
+    ~rules:
+      [ R.Rule.at (R.Path.fields [ "email" ])
+          (R.Action.mask
+             (R.Mask.custom ~fallback:"[email]" (fun value ->
+                  String.make (String.length value) '*')))
+      ; R.Rule.matching (R.Matcher.string_prefix "sk_live_")
+          (R.Action.replace (Observe.Value.string "[secret]"))
+      ]
+    ()
+
+let redaction =
+  R.combine_exn ~policies:[ typed_redaction; global_redaction ] ()
+
+let config =
+  Observe.Config.create_exn ~service:"orders" ~redaction ()
+```
+
+`Mask.keep_prefix`, `keep_suffix`, and `keep_ends` are finite, package-
+interpreted masks. They operate at UTF-8 scalar boundaries and always hide at
+least one scalar from a non-empty source. `Mask.custom` receives only the
+already bounded matched string. Observe contains ordinary callback failures,
+invalid or over-budget results, and uses the configured fallback; it never
+uses the source value as a fallback. A custom callback must terminate itself:
+portable OCaml cannot preempt a callback that never returns. Custom callbacks
+may run concurrently for different observations, and runtime control exceptions
+propagate unchanged.
+
+`Rule.matching` accepts replacement and masking actions, not structural
+removal. String matchers also inspect point-text messages and wide annotation
+messages; numeric, boolean, null, and byte matchers inspect structured scalar
+values. Exact paths remain structured-only. Rules cannot rewrite package
+metadata such as service, version, timestamp, level, tag, schema identity,
+operation names or identifiers, parent identity, or annotation timestamps.
+
+The effective configured policy runs after canonical materialization and before
+capture, console presentation, or any drain. A matched replacement is rendered
+as its ordinary safe value: JSON and pretty output do not add a redaction
+wrapper. Capture can inspect `Observe.Log.redactions` for bounded effect and
+location evidence without receiving the removed source value.
+
+A destination can impose a stricter branch policy:
+
+```ocaml
+let restricted_policy =
+  R.create_exn
+    ~rules:
+      [ R.Rule.at (R.Path.fields [ "email" ]) R.Action.remove ]
+    ()
+
+let restricted =
+  Observe.Drain.create (fun log ->
+      ignore (Observe.Log.fields log);
+      Observe.Drain.Accepted)
+  |> Observe.Drain.with_redaction ~redaction:restricted_policy
+
+let config =
+  Observe.Config.create_exn ~service:"orders"
+    ~redaction ~drains:[ restricted ] ()
+```
+
+The drain receives only the already globally safe observation. Its additional
+policy can remove or transform more on that branch, but cannot recover data
+removed by the global policy. Conflicting exact rules are rejected when the
+policy is built. Identical rules are deduplicated and rule-list order does not
+choose a winner. If a dynamic matcher conflict or traversal failure remains at
+runtime, only the affected value or destination branch is failed closed and a
+bounded diagnostic is recorded; the raw observation is never delivered.
 
 Identity generation is configured at the Unix composition boundary, not in the
 portable core:

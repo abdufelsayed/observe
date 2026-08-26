@@ -18,6 +18,8 @@
   log_enricher
   log_envelope
   log_limits
+  log_redaction
+  log_shape
   logs
   message
   observer

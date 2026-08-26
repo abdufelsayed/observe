@@ -181,19 +181,25 @@ let evaluate_author t author =
         match author Message.builder with
         | Message.Text { tag; message } ->
             Ok
-              (Log.Producer.Text
-                 { tag; message; fields = empty_fields_fragment })
+              ( Log.Producer.Text
+                  { tag; message; fields = empty_fields_fragment },
+                None )
         | Message.Untyped value ->
             Result.map
               (fun value ->
-                Log.Producer.Structured { origin = Log.Open; fields = value })
+                ( Log.Producer.Structured { origin = Log.Open; fields = value },
+                  None ))
               (Message.materialize_untyped ~limits:(Config.limits t.config)
                  value)
         | Message.Typed (schema, value) ->
             Result.map
               (fun value ->
-                Log.Producer.Structured
-                  { origin = Log.Declared (Schema.name schema); fields = value })
+                ( Log.Producer.Structured
+                    {
+                      origin = Log.Declared (Schema.name schema);
+                      fields = value;
+                    },
+                  Some (Schema.identity schema) ))
               (materialize (Schema.freeze_complete schema value)))
   with
   | Raised -> Raised
@@ -240,7 +246,187 @@ let format_and_offer_console t console formatter log =
       | Returned Io.Rejected -> record_diagnostic t Diagnostics.Console_rejected
       | Raised -> record_diagnostic t Diagnostics.Console_raised)
 
-let offer_drain t drain log =
+type redaction_result = {
+  log : Log.t option;
+  status : Snapshot.Redaction.status;
+  conflict : bool;
+}
+
+let combine_redaction_status left right =
+  match (left, right) with
+  | Snapshot.Redaction.Withheld, _ | _, Snapshot.Redaction.Withheld ->
+      Snapshot.Redaction.Withheld
+  | Snapshot.Redaction.Failed_closed, _ | _, Snapshot.Redaction.Failed_closed ->
+      Snapshot.Redaction.Failed_closed
+  | Snapshot.Redaction.Changed, _ | _, Snapshot.Redaction.Changed ->
+      Snapshot.Redaction.Changed
+  | Snapshot.Redaction.Unchanged, Snapshot.Redaction.Unchanged ->
+      Snapshot.Redaction.Unchanged
+
+let log_redaction_effect = function
+  | Snapshot.Redaction.Removed -> Log.Removed
+  | Snapshot.Redaction.Replaced -> Log.Replaced
+  | Snapshot.Redaction.Masked -> Log.Masked
+  | Snapshot.Redaction.Failed_closed -> Log.Failed_closed
+
+let structured_redactions reports =
+  List.map
+    (fun (report : Snapshot.Redaction.report) ->
+      Log.Producer.redaction ~location:(Log.Structured_value report.path)
+        ~action:(log_redaction_effect report.action))
+    reports
+
+let text_redactions location reports =
+  List.map
+    (fun (report : Snapshot.Redaction.report) ->
+      Log.Producer.redaction ~location
+        ~action:(log_redaction_effect report.action))
+    reports
+
+let invoke_custom t apply value =
+  match
+    contain ~is_control_exception:t.is_control_exception (fun () -> apply value)
+  with
+  | Returned value -> Ok value
+  | Raised -> Error ()
+
+let redact_log_uncontained t policy ~schema_identity log =
+  if Log_redaction.Internal.is_none policy then
+    { log = Some log; status = Snapshot.Redaction.Unchanged; conflict = false }
+  else
+    let limits = Config.limits t.config in
+    let compiled =
+      Log_redaction.Internal.compiled policy ~schema:schema_identity
+    in
+    let exact = Log_redaction.Internal.exact compiled in
+    let matching = Log_redaction.Internal.matching compiled in
+    if Snapshot.Redaction.is_empty ~exact ~matching then
+      {
+        log = Some log;
+        status = Snapshot.Redaction.Unchanged;
+        conflict = false;
+      }
+    else
+      let invoke_custom = invoke_custom t in
+      let fields_outcome =
+        Snapshot.Redaction.transform ~limits ~exact ~matching ~invoke_custom
+          (Log.Producer.fields_fragment log)
+      in
+      let ( message,
+            message_reports,
+            message_status,
+            message_conflict,
+            message_withheld ) =
+        match Log.event log with
+        | Log.Structured _ ->
+            (None, [], Snapshot.Redaction.Unchanged, false, false)
+        | Log.Text { message; _ } ->
+            let outcome =
+              Snapshot.Redaction.transform_text ~limits ~matching ~invoke_custom
+                message
+            in
+            ( outcome.text,
+              text_redactions Log.Text_message outcome.reports,
+              outcome.status,
+              outcome.conflict,
+              Option.is_none outcome.text )
+      in
+      let ( annotations,
+            annotation_reports,
+            annotation_status,
+            annotation_conflict,
+            annotations_withheld ) =
+        match Log.kind log with
+        | Log.Point _ -> (None, [], Snapshot.Redaction.Unchanged, false, false)
+        | Log.Wide { annotations; _ } ->
+            let rec transform index annotations_rev reports_rev status conflict
+                = function
+              | [] ->
+                  ( Some (List.rev annotations_rev),
+                    List.rev reports_rev,
+                    status,
+                    conflict,
+                    false )
+              | annotation :: rest -> (
+                  let outcome =
+                    Snapshot.Redaction.transform_text ~limits ~matching
+                      ~invoke_custom
+                      (Log.annotation_message annotation)
+                  in
+                  let status = combine_redaction_status status outcome.status in
+                  let conflict = conflict || outcome.conflict in
+                  match outcome.text with
+                  | None ->
+                      (None, [], Snapshot.Redaction.Withheld, conflict, true)
+                  | Some message ->
+                      let annotation =
+                        Log.Producer.annotation
+                          ~timestamp:(Log.annotation_timestamp annotation)
+                          ~level:(Log.annotation_level annotation)
+                          ~message
+                      in
+                      let reports =
+                        text_redactions (Log.Annotation_message index)
+                          outcome.reports
+                      in
+                      transform (index + 1)
+                        (annotation :: annotations_rev)
+                        (List.rev_append reports reports_rev)
+                        status conflict rest)
+            in
+            transform 0 [] [] Snapshot.Redaction.Unchanged false annotations
+      in
+      let status =
+        combine_redaction_status fields_outcome.status
+          (combine_redaction_status message_status annotation_status)
+      in
+      let conflict =
+        fields_outcome.conflict || message_conflict || annotation_conflict
+      in
+      if
+        message_withheld
+        || annotations_withheld
+        || status = Snapshot.Redaction.Withheld
+        || Option.is_none fields_outcome.fragment
+      then { log = None; status = Snapshot.Redaction.Withheld; conflict }
+      else if status = Snapshot.Redaction.Unchanged then
+        { log = Some log; status; conflict }
+      else
+        match fields_outcome.fragment with
+        | None -> assert false
+        | Some fields -> (
+            let redactions =
+              structured_redactions fields_outcome.reports
+              @ message_reports
+              @ annotation_reports
+            in
+            let rebuilt =
+              Log.Producer.with_redaction log ~limits ?message ~fields
+                ?annotations ~redactions ()
+            in
+            match rebuilt with
+            | Ok log -> { log = Some log; status; conflict }
+            | Error _ ->
+                { log = None; status = Snapshot.Redaction.Withheld; conflict })
+
+let redact_log t policy ~schema_identity log =
+  match
+    contain ~is_control_exception:t.is_control_exception (fun () ->
+        redact_log_uncontained t policy ~schema_identity log)
+  with
+  | Returned result -> result
+  | Raised ->
+      { log = None; status = Snapshot.Redaction.Withheld; conflict = false }
+
+let record_global_redaction_diagnostics t result =
+  if result.conflict then record_diagnostic t Diagnostics.Redaction_conflict
+  else
+    match result.status with
+    | Snapshot.Redaction.Failed_closed | Snapshot.Redaction.Withheld ->
+        record_diagnostic t Diagnostics.Redaction_failed
+    | Snapshot.Redaction.Unchanged | Snapshot.Redaction.Changed -> ()
+
+let offer_drain_unredacted t drain log =
   match
     contain ~is_control_exception:t.is_control_exception (fun () ->
         Drain.offer drain log)
@@ -249,15 +435,41 @@ let offer_drain t drain log =
   | Returned Drain.Rejected -> record_diagnostic t Diagnostics.Drain_rejected
   | Raised -> record_diagnostic t Diagnostics.Drain_raised
 
-let dispatch t log =
+let offer_drain t drain ~schema_identity log =
+  let policy = Drain.redaction drain in
+  if Log_redaction.Internal.is_none policy then
+    offer_drain_unredacted t drain log
+  else
+    let result = redact_log t policy ~schema_identity log in
+    (match result.status with
+    | Snapshot.Redaction.Failed_closed | Snapshot.Redaction.Withheld ->
+        record_diagnostic t Diagnostics.Drain_redaction_failed
+    | Snapshot.Redaction.Unchanged | Snapshot.Redaction.Changed ->
+        if result.conflict then
+          record_diagnostic t Diagnostics.Drain_redaction_failed);
+    match result.log with
+    | None -> ()
+    | Some log -> offer_drain_unredacted t drain log
+
+let dispatch_safe t ~schema_identity log =
   match (Atomic.get t.accepting, t.output) with
   | true, Capture capture -> offer_capture t capture log
   | true, Outputs { console; drains; formatter } ->
       Option.iter
         (fun formatter -> format_and_offer_console t console formatter log)
         formatter;
-      List.iter (fun drain -> offer_drain t drain log) drains
+      List.iter (fun drain -> offer_drain t drain ~schema_identity log) drains
   | false, (Capture _ | Outputs _) -> ()
+
+let dispatch t ?schema_identity log =
+  if Atomic.get t.accepting then (
+    let policy = Config.redaction t.config in
+    if Log_redaction.Internal.is_none policy then
+      dispatch_safe t ~schema_identity log
+    else
+      let result = redact_log t policy ~schema_identity log in
+      record_global_redaction_diagnostics t result;
+      Option.iter (dispatch_safe t ~schema_identity) result.log)
 
 let emit_point t ?correlation level author =
   if admitted t level then
@@ -288,11 +500,11 @@ let emit_point t ?correlation level author =
         | Raised -> record_diagnostic t Diagnostics.Message_evaluation_raised
         | Returned (Error _) ->
             record_diagnostic t Diagnostics.Canonical_freeze_failed
-        | Returned (Ok body) -> (
+        | Returned (Ok (body, schema_identity)) -> (
             let body = enrich_event t body in
             let kind = Log.Point { correlation } in
             match create_log t level timestamp ~kind body with
-            | Ok log -> dispatch t log
+            | Ok log -> dispatch t ?schema_identity log
             | Error _ -> record_diagnostic t Diagnostics.Canonical_freeze_failed
             ))
 
@@ -327,6 +539,7 @@ let lifecycle_with_phase lifecycle phase =
 type wide = {
   name : string;
   origin : Log.structured_origin;
+  schema_identity : Schema.identity option;
   engine : t option;
   id : string option;
   parent : Log.operation_reference option;
@@ -346,6 +559,7 @@ let inert_wide () =
   {
     name = "";
     origin = Log.Open;
+    schema_identity = None;
     engine = None;
     id = None;
     parent = None;
@@ -395,7 +609,7 @@ let wide_parent_valid t = function
           valid (Log.operation_reference_name reference)
           && valid (Log.operation_reference_id reference))
 
-let create_wide t ?parent ~name ~origin () =
+let create_wide t ?parent ~name ~origin ?schema_identity () =
   if
     (not (Atomic.get t.accepting))
     || (not (Config.enabled t.config))
@@ -441,6 +655,7 @@ let create_wide t ?parent ~name ~origin () =
                     {
                       name;
                       origin;
+                      schema_identity;
                       engine = Some t;
                       id = Some id;
                       parent;
@@ -562,7 +777,9 @@ let complete_wide wide engine =
                     | Raised | Returned (Error _) ->
                         record_diagnostic engine
                           Diagnostics.Canonical_freeze_failed
-                    | Returned (Ok log) -> dispatch engine log)
+                    | Returned (Ok log) ->
+                        dispatch engine ?schema_identity:wide.schema_identity
+                          log)
                 | None, _ | _, None ->
                     record_diagnostic engine Diagnostics.Canonical_freeze_failed
               )))

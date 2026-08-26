@@ -14,11 +14,11 @@ module Timestamp = Timestamp
 module Value = Value
 module Log = Log
 module Diagnostics = Diagnostics
+module Logs = Logs
 module Drain = Drain
 module Formatter = Formatter
 module Capture = Capture
 module Config = Config
-module Logs = Logs
 
 module Ppx_runtime = struct
   type 'a type_description = 'a Type.t

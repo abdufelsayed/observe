@@ -61,6 +61,7 @@ val create_wide :
   ?parent:wide ->
   name:string ->
   origin:Log.structured_origin ->
+  ?schema_identity:Schema.identity ->
   unit ->
   wide
 

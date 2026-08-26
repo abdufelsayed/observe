@@ -1,6 +1,7 @@
 type 'a t
 
 val repr : 'a t -> 'a Repr.t
+val shape : 'a t -> Log_shape.t
 
 val plan : 'a t -> 'a -> Pretty.rendered
 (** Classify and project a value once, returning the rendering step that owns

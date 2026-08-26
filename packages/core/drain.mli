@@ -9,6 +9,16 @@ val create : (Log.t -> acceptance) -> t
     destination-specific projection or mutable delivery state. [Accepted] makes
     no acknowledgement, ordering, or durability claim. *)
 
+val with_redaction : redaction:Log_redaction.t -> t -> t
+(** Strengthen this destination with an additional disclosure policy. Nested
+    wrappers are normalized into one order-independent policy. The destination
+    receives only the already globally safe observation and cannot recover
+    source data removed earlier. Invalid policy composition raises
+    [Log_redaction.Invalid_redaction]. *)
+
+val redaction : t -> Log_redaction.t
+(** Private engine access to the normalized destination policy. *)
+
 val offer : t -> Log.t -> acceptance
 (** Invoke the drain callback. Engine code owns exception containment. *)
 

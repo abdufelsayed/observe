@@ -1,0 +1,39 @@
+(executable
+ (name test_redaction_contracts)
+ (modules test_redaction_contracts)
+ (libraries observe observe_test_support alcotest))
+
+(rule
+ (alias observe-redaction-unit)
+ (package observe)
+ (deps test_redaction_contracts.exe)
+ (action
+  (run %{exe:test_redaction_contracts.exe})))
+
+(executable
+ (name test_redaction_properties)
+ (modules test_redaction_properties)
+ (libraries
+  observe
+  observe_test_support
+  alcotest
+  jsonm
+  qcheck-core
+  qcheck-alcotest))
+
+(rule
+ (alias observe-redaction-properties)
+ (package observe)
+ (deps
+  test_redaction_properties.exe
+  (env_var OBSERVE_QCHECK_COUNT)
+  (env_var QCHECK_SEED))
+ (action
+  (run %{exe:test_redaction_properties.exe})))
+
+(alias
+ (name observe-redaction-contracts)
+ (package observe)
+ (deps
+  (alias observe-redaction-unit)
+  (alias observe-redaction-properties)))

@@ -130,6 +130,23 @@ let extension_drain =
       ignore (inspect log);
       Observe.Drain.Accepted)
 
+let disclosure =
+  Observe.Logs.Redaction.create_exn
+    ~rules:
+      [
+        Observe.Logs.Redaction.Rule.at
+          (Observe.Logs.Redaction.Path.fields [ "value" ])
+          Observe.Logs.Redaction.Action.remove;
+      ]
+    ()
+
+let redacted_config =
+  Observe.Config.create_exn ~service:"consumer" ~redaction:disclosure ()
+
+let redacted_drain =
+  Observe.Drain.create (fun _ -> Observe.Drain.Accepted)
+  |> Observe.Drain.with_redaction ~redaction:disclosure
+
 let _ =
   ( config,
     observer,
@@ -142,4 +159,7 @@ let _ =
     typed_child,
     current,
     extension_formatter,
-    extension_drain )
+    extension_drain,
+    disclosure,
+    redacted_config,
+    redacted_drain )

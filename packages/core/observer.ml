@@ -120,9 +120,10 @@ let emit_point ?correlation ~level author =
   | Missing -> Diagnostics.record Diagnostics.Not_initialized
   | Closed_route -> Diagnostics.record Diagnostics.Runtime_closed
 
-let create_wide ?parent ~name ~origin () =
+let create_wide ?parent ~name ~origin ?schema_identity () =
   match active_engine () with
-  | Engine engine -> Engine.create_wide engine ?parent ~name ~origin ()
+  | Engine engine ->
+      Engine.create_wide engine ?parent ~name ~origin ?schema_identity ()
   | Withhold | Missing | Closed_route -> Engine.inert_wide ()
 
 module Make (IO : Io.S) = struct

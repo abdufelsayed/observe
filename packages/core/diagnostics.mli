@@ -31,6 +31,9 @@ type kind =
   | Capture_overflow
   | Capture_closed
   | Runtime_closed
+  | Redaction_failed
+  | Redaction_conflict
+  | Drain_redaction_failed
 
 type entry = { kind : kind; count : int }
 type store

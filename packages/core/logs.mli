@@ -2,6 +2,7 @@
 
 module Enricher : module type of Log_enricher
 module Limits : module type of Log_limits
+module Redaction : module type of Log_redaction
 
 type message = Message.t
 type object_ = Message.object_

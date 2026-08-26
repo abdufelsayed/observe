@@ -40,6 +40,7 @@ val create_wide :
   ?parent:Engine.wide ->
   name:string ->
   origin:Log.structured_origin ->
+  ?schema_identity:Schema.identity ->
   unit ->
   Engine.wide
 

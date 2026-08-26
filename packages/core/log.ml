@@ -13,6 +13,17 @@ type operation = {
 }
 
 type annotation = { timestamp : Timestamp.t; level : Level.t; message : string }
+type redaction_effect = Removed | Replaced | Masked | Failed_closed
+
+type redaction_location =
+  | Structured_value of string
+  | Text_message
+  | Annotation_message of int
+
+type redaction = {
+  redaction_location : redaction_location;
+  redaction_effect : redaction_effect;
+}
 
 type kind =
   | Point of { correlation : operation_reference option }
@@ -25,8 +36,10 @@ type t = {
   timestamp : Timestamp.t;
   level : Level.t;
   event : event;
+  fields_fragment : Snapshot.fragment;
   fields : Value.frozen;
   kind : kind;
+  redactions : redaction list;
 }
 
 let service log = log.service
@@ -37,6 +50,9 @@ let level log = log.level
 let event log = log.event
 let fields log = log.fields
 let kind log = log.kind
+let redactions log = log.redactions
+let redaction_effect redaction = redaction.redaction_effect
+let redaction_location redaction = redaction.redaction_location
 let operation_reference_name reference = reference.name
 let operation_reference_id reference = reference.id
 let operation_name operation = operation.reference.name
@@ -195,13 +211,42 @@ module Producer = struct
     | Point _ -> 0
     | Wide { annotations; _ } -> List.length annotations
 
+  let redaction_valid limits redaction =
+    match redaction.redaction_location with
+    | Structured_value path -> text_valid limits path
+    | Text_message -> true
+    | Annotation_message index -> index >= 0
+
+  let redactions_valid limits redactions =
+    List.length redactions <= Log_limits.max_collection_length limits
+    && List.for_all (redaction_valid limits) redactions
+
+  let redaction_length_valid limits redaction =
+    match redaction.redaction_location with
+    | Structured_value path -> text_length_valid limits path
+    | Text_message -> true
+    | Annotation_message index -> index >= 0
+
+  let redactions_length_valid limits redactions =
+    List.length redactions <= Log_limits.max_collection_length limits
+    && List.for_all (redaction_length_valid limits) redactions
+
+  let redactions_length redactions =
+    List.fold_left
+      (fun length redaction ->
+        let length = add_lengths length 32 in
+        match redaction.redaction_location with
+        | Structured_value path -> add_lengths length (String.length path)
+        | Text_message | Annotation_message _ -> length)
+      0 redactions
+
   let kind_accepts_event kind event =
     match (kind, event) with
     | Point _, (Text _ | Structured _) | Wide _, Structured _ -> true
     | Wide _, Text _ -> false
 
   let make ~service ?environment ?version ~timestamp ~level ~kind
-      ?(limits = Log_limits.default) event =
+      ?(limits = Log_limits.default) ?(redactions = []) event =
     if annotation_count kind > Log_limits.max_collection_length limits then
       Error Snapshot.Limit_exceeded
     else if
@@ -210,6 +255,7 @@ module Producer = struct
         && option_valid limits environment
         && option_valid limits version
         && kind_valid limits kind
+        && redactions_valid limits redactions
         && kind_accepts_event kind event
         && event_valid limits event)
     then
@@ -221,6 +267,7 @@ module Producer = struct
         && option_length_valid limits environment
         && option_length_valid limits version
         && kind_length_valid limits kind
+        && redactions_length_valid limits redactions
         && event_length_valid limits event
       then Error Snapshot.Invalid_utf8
       else Error Snapshot.Limit_exceeded
@@ -233,7 +280,7 @@ module Producer = struct
                    (option_length environment))
                 (option_length version))
              (kind_length kind))
-          (event_length event)
+          (add_lengths (event_length event) (redactions_length redactions))
       in
       match
         Snapshot.fit_object_extension ~limits (event_snapshot event)
@@ -244,7 +291,7 @@ module Producer = struct
           let fields = Snapshot.complete fields_fragment in
           match own_event fields event with
           | Error _ as error -> error
-          | Ok event ->
+          | Ok completed_event ->
               Ok
                 {
                   (* Configuration, operation references, and annotations are
@@ -255,9 +302,11 @@ module Producer = struct
                   version;
                   timestamp;
                   level;
-                  event;
+                  event = completed_event;
+                  fields_fragment;
                   fields;
                   kind;
+                  redactions;
                 })
 
   let operation_reference ~name ~id = { name; id }
@@ -266,4 +315,33 @@ module Producer = struct
     { reference = operation_reference ~name ~id; parent; duration_ns }
 
   let annotation ~timestamp ~level ~message = { timestamp; level; message }
+  let fields_fragment log = log.fields_fragment
+
+  let redaction ~location ~action =
+    { redaction_location = location; redaction_effect = action }
+
+  let with_redaction log ~limits ?message ?fields ?annotations ~redactions () =
+    let event =
+      match (message, log.event) with
+      | None, event -> event
+      | Some message, Text { tag; message = _ } -> Text { tag; message }
+      | Some _, Structured _ -> invalid_arg "structured log has no text message"
+    in
+    let kind =
+      match (annotations, log.kind) with
+      | None, kind -> kind
+      | Some annotations, Wide { operation; annotations = _ } ->
+          Wide { operation; annotations }
+      | Some _, Point _ -> invalid_arg "point log has no annotations"
+    in
+    let fields = Option.value fields ~default:log.fields_fragment in
+    let producer_event =
+      match event with
+      | Text { tag; message } -> Text { tag; message; fields }
+      | Structured { origin } -> Structured { origin; fields }
+    in
+    make ~service:log.service ?environment:log.environment ?version:log.version
+      ~timestamp:log.timestamp ~level:log.level ~kind ~limits
+      ~redactions:(log.redactions @ redactions)
+      producer_event
 end

@@ -74,6 +74,11 @@ type error =
   | Unsupported
   | Conversion_failed
 
+(* Keep the snapshot error type name available below the [open Pretty] used by
+   the rendering code.  Pretty has its own [error] type, but redaction's
+   replacement rematerializer must continue to use Snapshot errors. *)
+type snapshot_error = error
+
 type context = {
   limits : Log_limits.t;
   mutable nodes : int;
@@ -857,6 +862,7 @@ let import context ~depth fragment =
   | Ok () -> Ok fragment.value
 
 let fragment value = measure_value value
+let fragment_retained_bytes (fragment : fragment) = fragment.retained_bytes
 
 let validate ?(limits = Log_limits.default) (snapshot : fragment) =
   if
@@ -2016,6 +2022,18 @@ let append_root_json_fields buffer ~first = function
   | List _ | Variant _ ->
       invalid_arg "Snapshot.append_root_json_fields: non-object root"
 
+let redaction_null = null
+let redaction_bool = bool
+let redaction_int = int
+let redaction_int32 = int32
+let redaction_int64 = int64
+let redaction_integer = integer
+let redaction_float = float
+let redaction_string = string
+let redaction_bytes = bytes
+let redaction_truncated = truncated
+let redaction_variant = variant
+
 open Pretty
 
 let pretty_integer renderer = function
@@ -2162,3 +2180,1317 @@ let append_root_pretty_fields renderer ~trailing = function
   | Null | Bool _ | Integer _ | Float _ | String _ | Bytes _ | Truncated _
   | List _ | Variant _ ->
       invalid_arg "Snapshot.append_root_pretty_fields: non-object root"
+
+module Redaction = struct
+  type path_step = Field of string | Index of int | Case of string
+  type hidden = Fill of string | Collapse of string
+
+  type finite_mask =
+    | Keep_prefix of { characters : int; hidden : hidden }
+    | Keep_suffix of { characters : int; hidden : hidden }
+    | Keep_ends of { characters : int; hidden : hidden }
+
+  type mask =
+    | Finite of finite_mask
+    | Custom of { fallback : string; apply : string -> string }
+
+  type action = Remove | Replace of fragment | Mask of mask
+  type exact_rule = { path : path_step list; action : action }
+
+  type matcher =
+    | String_equal of string
+    | String_prefix of string
+    | String_suffix of string
+    | String_contains of string
+    | Bool of bool
+    | Int of int
+    | Int32 of int32
+    | Int64 of int64
+    | Float of float
+    | Bytes_equal of string
+    | Null
+
+  type matching_rule = { matcher : matcher; action : action }
+
+  module Path_step_map = Map.Make (struct
+    type t = path_step
+
+    let compare left right =
+      match (left, right) with
+      | Field left, Field right | Case left, Case right ->
+          String.compare left right
+      | Index left, Index right -> Int.compare left right
+      | Field _, (Index _ | Case _) -> -1
+      | Index _, Field _ -> 1
+      | Index _, Case _ -> -1
+      | Case _, (Field _ | Index _) -> 1
+  end)
+
+  type exact_node = {
+    actions : action list;
+    children : exact_node Path_step_map.t;
+  }
+
+  type compiled_exact = { root : exact_node; has_rules : bool }
+
+  let empty_node = { actions = []; children = Path_step_map.empty }
+
+  let rec insert node steps action =
+    match steps with
+    | [] -> { node with actions = action :: node.actions }
+    | step :: rest ->
+        let child =
+          match Path_step_map.find_opt step node.children with
+          | Some child -> insert child rest action
+          | None -> insert empty_node rest action
+        in
+        { node with children = Path_step_map.add step child node.children }
+
+  let compile_exact rules =
+    let root =
+      List.fold_left
+        (fun root rule -> insert root rule.path rule.action)
+        empty_node rules
+    in
+    { root; has_rules = rules <> [] }
+
+  let child node step = Path_step_map.find_opt step node.children
+
+  let is_object_value (value : value) =
+    match value with
+    | Object _ | Truncated { partial = Some (Object _); _ } -> true
+    | Null | Bool _ | Integer _ | Float _ | String _ | Bytes _ | List _
+    | Truncated _ | Variant _ ->
+        false
+
+  let rec has_truncation (value : value) =
+    match value with
+    | Truncated _ -> true
+    | Null | Bool _ | Integer _ | Float _ | String _ | Bytes _ -> false
+    | List values -> List.exists has_truncation values
+    | Object fields ->
+        List.exists
+          (fun (_, value) -> has_truncation value)
+          (object_values fields)
+    | Variant { payload = None; _ } -> false
+    | Variant { payload = Some payload; _ } -> has_truncation payload
+
+  let rec value_fits limits ~depth (value : value) =
+    if depth > Log_limits.max_depth limits then false
+    else
+      match value with
+      | Null | Bool _ | Float _ -> true
+      | Integer (Int _ | Int32 _ | Int64 _) -> true
+      | Integer (Decimal value) ->
+          String.length value <= Log_limits.max_string_bytes limits
+          && Utf8.is_valid value
+      | String value ->
+          String.length value <= Log_limits.max_string_bytes limits
+          && Utf8.is_valid value
+      | Bytes value -> String.length value <= Log_limits.max_bytes_length limits
+      | Truncated { partial = None; _ } -> true
+      | Truncated { partial = Some partial; _ } ->
+          value_fits limits ~depth partial
+      | List values ->
+          List.length values <= Log_limits.max_collection_length limits
+          && List.for_all (value_fits limits ~depth:(depth + 1)) values
+      | Object fields ->
+          let fields = object_values fields in
+          List.length fields <= Log_limits.max_object_fields limits
+          && List.for_all
+               (fun (name, value) ->
+                 String.length name <= Log_limits.max_string_bytes limits
+                 && Utf8.is_valid name
+                 && value_fits limits ~depth:(depth + 1) value)
+               fields
+      | Variant { name; payload; _ } -> (
+          String.length name <= Log_limits.max_string_bytes limits
+          && Utf8.is_valid name
+          &&
+          match payload with
+          | None -> true
+          | Some payload -> value_fits limits ~depth:(depth + 1) payload)
+
+  let fragment_fits limits ~depth fragment =
+    resources_fit limits (resources_of fragment)
+    && value_fits limits ~depth fragment.value
+
+  (* Replacement fragments are policy-owned but may have been frozen under a
+     wider policy than the active log. Re-materialize only replacements against
+     the active bounds; never use a JSON round trip or expose a live caller
+     value. *)
+  let rec rematerialize context ~depth (value : value) :
+      (value, snapshot_error) Stdlib.result =
+    match check_depth context ~depth with
+    | Stdlib.Error Limit_exceeded -> Stdlib.Error Limit_exceeded
+    | Stdlib.Error _ as error -> error
+    | Stdlib.Ok () -> (
+        match value with
+        | Null -> redaction_null context ~depth
+        | Bool value -> redaction_bool context ~depth value
+        | Integer (Int value) -> redaction_int context ~depth value
+        | Integer (Int32 value) -> redaction_int32 context ~depth value
+        | Integer (Int64 value) -> redaction_int64 context ~depth value
+        | Integer (Decimal value) -> redaction_integer context ~depth value
+        | Float value -> redaction_float context ~depth value
+        | String value -> redaction_string context ~depth value
+        | Bytes value -> redaction_bytes context ~depth (Bytes.of_string value)
+        | Truncated { reason; partial = None } ->
+            redaction_truncated context ~depth reason
+        | Truncated { reason; partial = Some partial } ->
+            Result.bind (rematerialize context ~depth partial) (fun partial ->
+                mark_truncated context ~depth reason partial)
+        | List values ->
+            Result.bind (List_builder.create context ~depth) (fun builder ->
+                let rec collect = function
+                  | [] -> List_builder.finish builder
+                  | value :: rest -> (
+                      match List_builder.prepare builder with
+                      | Stop -> List_builder.finish builder
+                      | Ready ->
+                          Result.bind
+                            (rematerialize context ~depth:(depth + 1) value)
+                            (fun value ->
+                              match List_builder.add builder value with
+                              | Stop -> List_builder.finish builder
+                              | Ready -> collect rest))
+                in
+                collect values)
+        | Object object_ ->
+            Result.bind (Object_builder.create context ~depth) (fun builder ->
+                let rec collect = function
+                  | [] -> Object_builder.finish builder
+                  | (name, value) :: rest -> (
+                      match Object_builder.prepare builder name with
+                      | Error _ as error -> error
+                      | Ok Stop -> Object_builder.finish builder
+                      | Ok Ready ->
+                          Result.bind
+                            (rematerialize context ~depth:(depth + 1) value)
+                            (fun value ->
+                              match Object_builder.add builder value with
+                              | Stop -> Object_builder.finish builder
+                              | Ready -> collect rest))
+                in
+                collect (object_values object_))
+        | Variant { name; polymorphic; payload } ->
+            Result.bind
+              (Option.fold ~none:(Ok None)
+                 ~some:(fun payload ->
+                   Result.map
+                     (fun payload -> Some payload)
+                     (rematerialize context ~depth:(depth + 1) payload))
+                 payload)
+              (fun payload ->
+                redaction_variant context ~depth ~polymorphic name payload))
+
+  let strict_replacement limits ~depth replacement =
+    let context = create_context ~limits () in
+    match rematerialize context ~depth replacement.value with
+    | Error _ as error -> error
+    | Ok value when has_truncation value -> Error Limit_exceeded
+    | Ok value -> Ok value
+
+  type redaction_effect = Removed | Replaced | Masked | Failed_closed
+  type report = { path : string; action : redaction_effect }
+  type status = Unchanged | Changed | Failed_closed | Withheld
+
+  type outcome = {
+    fragment : fragment option;
+    reports : report list;
+    status : status;
+    conflict : bool;
+  }
+
+  type text_outcome = {
+    text : string option;
+    reports : report list;
+    status : status;
+    conflict : bool;
+  }
+
+  type report_state = {
+    limits : Log_limits.t;
+    invoke_custom :
+      (string -> string) -> string -> (string, unit) Stdlib.result;
+    mutable reports_rev : report list;
+    mutable report_count : int;
+    mutable report_bytes : int;
+    mutable report_missing : bool;
+    mutable conflict : bool;
+    mutable changed : bool;
+    mutable failed_closed : bool;
+    mutable replacements :
+      (fragment * int * (value, snapshot_error) Stdlib.result) list;
+  }
+
+  let cached_replacement state limits ~depth fragment =
+    let rec find = function
+      | [] ->
+          let value = strict_replacement limits ~depth fragment in
+          state.replacements <- (fragment, depth, value) :: state.replacements;
+          value
+      | (candidate, candidate_depth, value) :: rest ->
+          if candidate == fragment && candidate_depth = depth then value
+          else find rest
+    in
+    find state.replacements
+
+  let report_path limits path_rev =
+    let max_bytes = Log_limits.max_string_bytes limits in
+    let fallback = if max_bytes >= 13 then "$<structured>" else "$" in
+    let buffer = Buffer.create (min 64 max_bytes) in
+    let too_long = ref false in
+    let add text =
+      if String.length text > max_bytes - Buffer.length buffer then
+        too_long := true
+      else Buffer.add_string buffer text
+    in
+    if max_bytes <= 0 then fallback
+    else (
+      add "$";
+      if not !too_long then
+        List.iter
+          (function
+            | Field name ->
+                let escaped = String.escaped name in
+                add "[\"";
+                add escaped;
+                add "\"]"
+            | Index index ->
+                add "[";
+                add (string_of_int index);
+                add "]"
+            | Case name ->
+                let escaped = String.escaped name in
+                add "<";
+                add escaped;
+                add ">")
+          (List.rev path_rev);
+      if !too_long then fallback else Buffer.contents buffer)
+
+  let add_report state path action =
+    let max_reports =
+      min
+        (Log_limits.max_nodes state.limits)
+        (Log_limits.max_collection_length state.limits)
+    in
+    let max_bytes = Log_limits.max_total_bytes state.limits in
+    if state.report_count >= max_reports || state.report_bytes > max_bytes - 32
+    then state.report_missing <- true
+    else
+      let path = report_path state.limits path in
+      let bytes = 32 + String.length path in
+      if bytes <= max_bytes - state.report_bytes then (
+        state.reports_rev <- { path; action } :: state.reports_rev;
+        state.report_count <- state.report_count + 1;
+        state.report_bytes <- state.report_bytes + bytes)
+      else state.report_missing <- true
+
+  let note state path action =
+    state.changed <- true;
+    add_report state path action
+
+  let fail state path =
+    state.failed_closed <- true;
+    note state path Failed_closed
+
+  let hidden_equal left right =
+    match (left, right) with
+    | Fill left, Fill right | Collapse left, Collapse right ->
+        String.equal left right
+    | Fill _, Collapse _ | Collapse _, Fill _ -> false
+
+  let finite_mask_equal left right =
+    match (left, right) with
+    | ( Keep_prefix { characters = left_count; hidden = left_hidden },
+        Keep_prefix { characters = right_count; hidden = right_hidden } )
+    | ( Keep_suffix { characters = left_count; hidden = left_hidden },
+        Keep_suffix { characters = right_count; hidden = right_hidden } )
+    | ( Keep_ends { characters = left_count; hidden = left_hidden },
+        Keep_ends { characters = right_count; hidden = right_hidden } ) ->
+        left_count = right_count && hidden_equal left_hidden right_hidden
+    | Keep_prefix _, (Keep_suffix _ | Keep_ends _)
+    | Keep_suffix _, (Keep_prefix _ | Keep_ends _)
+    | Keep_ends _, (Keep_prefix _ | Keep_suffix _) ->
+        false
+
+  let mask_equal left right =
+    match (left, right) with
+    | Finite left, Finite right -> finite_mask_equal left right
+    | ( Custom { fallback = left_fallback; apply = left_apply },
+        Custom { fallback = right_fallback; apply = right_apply } ) ->
+        String.equal left_fallback right_fallback && left_apply == right_apply
+    | Finite _, Custom _ | Custom _, Finite _ -> false
+
+  let action_equal left right =
+    match (left, right) with
+    | Remove, Remove -> true
+    | Replace left, Replace right ->
+        equal_value (complete left) (complete right)
+    | Mask left, Mask right -> mask_equal left right
+    | Remove, (Replace _ | Mask _)
+    | Replace _, (Remove | Mask _)
+    | Mask _, (Remove | Replace _) ->
+        false
+
+  type selection = No_action | Action of action | Conflict
+
+  let select actions =
+    let rec same first = function
+      | [] -> Action first
+      | action :: rest ->
+          if action_equal first action then same first rest else Conflict
+    in
+    match actions with [] -> No_action | first :: rest -> same first rest
+
+  let selection_merge left right =
+    match (left, right) with
+    | No_action, selection | selection, No_action -> selection
+    | Conflict, _ | _, Conflict -> Conflict
+    | Action left, Action right ->
+        if action_equal left right then Action left else Conflict
+
+  (* Matching rules are indexed once when a policy is compiled.  Prefix and
+     suffix rules use compact byte tries; contains rules use a failure-linked
+     automaton, so a scalar is scanned once instead of comparing every rule at
+     every position. *)
+  module Int32_selection_map = Map.Make (Int32)
+  module Int64_selection_map = Map.Make (Int64)
+  module Float_selection_map = Map.Make (Float)
+
+  type trie_builder_node = {
+    mutable builder_edges : (int * int) list;
+    mutable terminal : selection;
+  }
+
+  type trie_builder = {
+    mutable builder_nodes : trie_builder_node array;
+    mutable builder_length : int;
+  }
+
+  type trie_node = { edges : (int * int) array; terminal : selection }
+  type trie = { nodes : trie_node array; has_patterns : bool }
+
+  type contains_node = {
+    edges : (int * int) array;
+    terminal : selection;
+    mutable failure : int;
+    mutable output : selection;
+  }
+
+  type contains_automaton = { nodes : contains_node array; has_patterns : bool }
+
+  type compiled_matching = {
+    string_equal : selection String_map.t;
+    string_prefix : trie;
+    string_suffix : trie;
+    string_contains : contains_automaton;
+    bool_true : selection;
+    bool_false : selection;
+    int_values : selection Int_map.t;
+    int32_values : selection Int32_selection_map.t;
+    int64_values : selection Int64_selection_map.t;
+    float_values : selection Float_selection_map.t;
+    bytes_equal : selection String_map.t;
+    null : selection;
+    has_rules : bool;
+  }
+
+  let new_trie_builder_node () = { builder_edges = []; terminal = No_action }
+
+  let create_trie_builder () =
+    {
+      builder_nodes = Array.init 16 (fun _ -> new_trie_builder_node ());
+      builder_length = 1;
+    }
+
+  let grow_trie_builder builder =
+    let old_nodes = builder.builder_nodes in
+    let old_length = Array.length old_nodes in
+    let nodes =
+      Array.init (old_length * 2) (fun index ->
+          if index < old_length then old_nodes.(index)
+          else new_trie_builder_node ())
+    in
+    builder.builder_nodes <- nodes
+
+  let new_trie_node builder =
+    if builder.builder_length = Array.length builder.builder_nodes then
+      grow_trie_builder builder;
+    let index = builder.builder_length in
+    builder.builder_nodes.(index) <- new_trie_builder_node ();
+    builder.builder_length <- index + 1;
+    index
+
+  let find_builder_edge edges byte =
+    let rec find = function
+      | [] -> -1
+      | (candidate, target) :: rest ->
+          if candidate = byte then target else find rest
+    in
+    find edges
+
+  let add_trie_pattern builder ~reverse pattern action =
+    let index = ref 0 in
+    let position = ref 0 in
+    let length = String.length pattern in
+    while !position < length do
+      let source_position =
+        if reverse then length - !position - 1 else !position
+      in
+      let byte = Char.code (String.unsafe_get pattern source_position) in
+      let node = builder.builder_nodes.(!index) in
+      let target = find_builder_edge node.builder_edges byte in
+      let target =
+        if target >= 0 then target
+        else
+          let target = new_trie_node builder in
+          node.builder_edges <- (byte, target) :: node.builder_edges;
+          target
+      in
+      index := target;
+      incr position
+    done;
+    let node = builder.builder_nodes.(!index) in
+    node.terminal <- selection_merge node.terminal (Action action)
+
+  let compare_edge (left, _) (right, _) = Int.compare left right
+  let sorted_edges edges = Array.of_list (List.sort compare_edge edges)
+
+  let finalize_trie builder : trie =
+    let nodes =
+      Array.init builder.builder_length (fun index ->
+          let node = builder.builder_nodes.(index) in
+          { edges = sorted_edges node.builder_edges; terminal = node.terminal })
+    in
+    { nodes; has_patterns = builder.builder_length > 1 }
+
+  (* Every transition has a byte in [0, 255].  Keeping sparse edges sorted
+     avoids a 256-way table at every pattern node while retaining a fixed
+     alphabet lookup bound. *)
+  let find_transition edges byte =
+    let rec search low high =
+      if low > high then -1
+      else
+        let middle = low + ((high - low) / 2) in
+        let candidate, target = edges.(middle) in
+        if byte = candidate then target
+        else if byte < candidate then search low (middle - 1)
+        else search (middle + 1) high
+    in
+    search 0 (Array.length edges - 1)
+
+  let trie_match (trie : trie) ~reverse text =
+    let length = String.length text in
+    let root = trie.nodes.(0) in
+    let rec scan offset node_index selected =
+      if offset = length then selected
+      else
+        let source_position = if reverse then length - offset - 1 else offset in
+        let byte = Char.code (String.unsafe_get text source_position) in
+        let target = find_transition trie.nodes.(node_index).edges byte in
+        if target < 0 then selected
+        else
+          match selection_merge selected trie.nodes.(target).terminal with
+          | Conflict -> Conflict
+          | selected -> scan (offset + 1) target selected
+    in
+    match root.terminal with
+    | Conflict -> Conflict
+    | selected -> scan 0 0 selected
+
+  let finalize_contains builder : contains_automaton =
+    let nodes =
+      Array.init builder.builder_length (fun index ->
+          let node = builder.builder_nodes.(index) in
+          {
+            edges = sorted_edges node.builder_edges;
+            terminal = node.terminal;
+            failure = 0;
+            output = No_action;
+          })
+    in
+    let root = nodes.(0) in
+    root.output <- root.terminal;
+    let queue = Queue.create () in
+    Array.iter
+      (fun (_, target) ->
+        let node = nodes.(target) in
+        node.failure <- 0;
+        node.output <- selection_merge node.terminal root.output;
+        Queue.add target queue)
+      root.edges;
+    while not (Queue.is_empty queue) do
+      let current = Queue.take queue in
+      let current_node = nodes.(current) in
+      Array.iter
+        (fun (byte, target) ->
+          let rec find_failure candidate =
+            let next = find_transition nodes.(candidate).edges byte in
+            if next >= 0 then next
+            else if candidate = 0 then 0
+            else find_failure nodes.(candidate).failure
+          in
+          let failure = find_failure current_node.failure in
+          let node = nodes.(target) in
+          node.failure <- failure;
+          node.output <- selection_merge node.terminal nodes.(failure).output;
+          Queue.add target queue)
+        current_node.edges
+    done;
+    { nodes; has_patterns = builder.builder_length > 1 }
+
+  let contains_match (automaton : contains_automaton) text =
+    let length = String.length text in
+    let nodes = automaton.nodes in
+    let rec next_state state byte =
+      let next = find_transition nodes.(state).edges byte in
+      if next >= 0 then next
+      else if state = 0 then 0
+      else next_state nodes.(state).failure byte
+    in
+    let rec scan offset state selected =
+      if offset = length then selected
+      else
+        let byte = Char.code (String.unsafe_get text offset) in
+        let state = next_state state byte in
+        match selection_merge selected nodes.(state).output with
+        | Conflict -> Conflict
+        | selected -> scan (offset + 1) state selected
+    in
+    match nodes.(0).output with
+    | Conflict -> Conflict
+    | selected -> scan 0 0 selected
+
+  let map_add_selection find add map key action =
+    let selected = try find key map with Not_found -> No_action in
+    add key (selection_merge selected (Action action)) map
+
+  let compile_matching rules =
+    let string_equal = ref String_map.empty in
+    let string_prefix = create_trie_builder () in
+    let string_suffix = create_trie_builder () in
+    let string_contains = create_trie_builder () in
+    let bool_true = ref No_action in
+    let bool_false = ref No_action in
+    let int_values = ref Int_map.empty in
+    let int32_values = ref Int32_selection_map.empty in
+    let int64_values = ref Int64_selection_map.empty in
+    let float_values = ref Float_selection_map.empty in
+    let bytes_equal = ref String_map.empty in
+    let null = ref No_action in
+    List.iter
+      (fun (rule : matching_rule) ->
+        let action = rule.action in
+        match rule.matcher with
+        | String_equal value ->
+            string_equal :=
+              map_add_selection String_map.find String_map.add !string_equal
+                value action
+        | String_prefix value ->
+            add_trie_pattern string_prefix ~reverse:false value action
+        | String_suffix value ->
+            add_trie_pattern string_suffix ~reverse:true value action
+        | String_contains value ->
+            add_trie_pattern string_contains ~reverse:false value action
+        | Bool true -> bool_true := selection_merge !bool_true (Action action)
+        | Bool false ->
+            bool_false := selection_merge !bool_false (Action action)
+        | Int value ->
+            int_values :=
+              map_add_selection Int_map.find Int_map.add !int_values value
+                action
+        | Int32 value ->
+            int32_values :=
+              map_add_selection Int32_selection_map.find Int32_selection_map.add
+                !int32_values value action
+        | Int64 value ->
+            int64_values :=
+              map_add_selection Int64_selection_map.find Int64_selection_map.add
+                !int64_values value action
+        | Float value ->
+            float_values :=
+              map_add_selection Float_selection_map.find Float_selection_map.add
+                !float_values value action
+        | Bytes_equal value ->
+            bytes_equal :=
+              map_add_selection String_map.find String_map.add !bytes_equal
+                value action
+        | Null -> null := selection_merge !null (Action action))
+      rules;
+    {
+      string_equal = !string_equal;
+      string_prefix = finalize_trie string_prefix;
+      string_suffix = finalize_trie string_suffix;
+      string_contains = finalize_contains string_contains;
+      bool_true = !bool_true;
+      bool_false = !bool_false;
+      int_values = !int_values;
+      int32_values = !int32_values;
+      int64_values = !int64_values;
+      float_values = !float_values;
+      bytes_equal = !bytes_equal;
+      null = !null;
+      has_rules = rules <> [];
+    }
+
+  let is_empty ~(exact : compiled_exact) ~(matching : compiled_matching) =
+    (not exact.has_rules) && not matching.has_rules
+
+  type node_result = Keep of value * bool | Drop
+  type list_result = Same_list | Changed_list of value list
+  type object_result = Same_object | Changed_object of (string * value) list
+
+  let empty_object_value = Object (Flat [])
+
+  (* [fold_redaction_object_values] walks each representation in authored
+     order without materialising a field list.  In particular, this keeps the
+     common policy-no-match path allocation-free for packed and indexed
+     objects as well as flat ones. *)
+  let fold_redaction_object_values callback accumulator = function
+    | Flat fields ->
+        List.fold_left
+          (fun accumulator (name, value) -> callback accumulator name value)
+          accumulator fields
+    | Single (name, value) -> callback accumulator name value
+    | Packed packed ->
+        List.fold_left
+          (fun accumulator (name, fragment) ->
+            callback accumulator name fragment.value)
+          accumulator packed.fields
+    | Indexed indexed ->
+        fold_indexed indexed
+          (fun accumulator name fragment ->
+            callback accumulator name fragment.value)
+          accumulator indexed.order_rev
+
+  (* The prefix is only requested after a child changed.  Keeping this
+     operation separate from the first pass means unchanged objects do not
+     allocate a reversed copy merely to discover that they can be reused. *)
+  let object_prefix object_ count =
+    let fields_rev = ref [] in
+    let seen = ref 0 in
+    ignore
+      (fold_redaction_object_values
+         (fun () name value ->
+           if !seen < count then (
+             incr seen;
+             fields_rev := (name, value) :: !fields_rev);
+           ())
+         () object_);
+    List.rev !fields_rev
+
+  let transform_object_values object_ process =
+    let changed = ref false in
+    let fields_rev = ref [] in
+    let seen = ref 0 in
+    let add_prefix count =
+      fields_rev := List.rev_append (object_prefix object_ count) !fields_rev
+    in
+    let add name value = fields_rev := (name, value) :: !fields_rev in
+    ignore
+      (fold_redaction_object_values
+         (fun () name value ->
+           let index = !seen in
+           let result = process index name value in
+           incr seen;
+           match result with
+           | Keep (value, value_changed) ->
+               if !changed then add name value
+               else if value_changed then (
+                 add_prefix index;
+                 changed := true;
+                 add name value)
+           | Drop ->
+               if not !changed then (
+                 add_prefix index;
+                 changed := true))
+         () object_);
+    if !changed then Changed_object (List.rev !fields_rev) else Same_object
+
+  let transform_list_values process values =
+    let rec collect_all index = function
+      | [] -> []
+      | value :: rest -> (
+          match process index value with
+          | Drop -> collect_all (index + 1) rest
+          | Keep (value, _) -> value :: collect_all (index + 1) rest)
+    in
+    let rec first_change index = function
+      | [] -> Same_list
+      | value :: rest -> (
+          match process index value with
+          | Keep (value, false) -> (
+              match first_change (index + 1) rest with
+              | Same_list -> Same_list
+              | Changed_list rest -> Changed_list (value :: rest))
+          | Keep (value, true) ->
+              Changed_list (value :: collect_all (index + 1) rest)
+          | Drop -> Changed_list (collect_all (index + 1) rest))
+    in
+    first_change 0 values
+
+  let bounded_text limits text =
+    String.length text <= Log_limits.max_string_bytes limits
+    && Utf8.is_valid text
+
+  let safe_text limits text =
+    if bounded_text limits text then copy_string text else ""
+
+  let checked_add left right =
+    if right < 0 || left > max_int - right then None else Some (left + right)
+
+  let checked_mul left right =
+    if left < 0 || right < 0 then None
+    else if left = 0 || right = 0 then Some 0
+    else if left > max_int / right then None
+    else Some (left * right)
+
+  let hidden_text = function Fill text | Collapse text -> text
+
+  (* Keep every slice at a scalar boundary.  When an input is non-empty, the
+     requested visible region is deliberately reduced as necessary so at
+     least one source scalar is always hidden. *)
+  let finite_mask_text limits text mask =
+    let fallback hidden failed =
+      (safe_text limits (hidden_text hidden), failed)
+    in
+    if not (bounded_text limits text) then ("", true)
+    else
+      let source_characters = Utf8.scalar_count text in
+      if source_characters = 0 then ("", false)
+      else
+        let visible_prefix, visible_suffix, hidden =
+          match mask with
+          | Keep_prefix { characters; hidden } ->
+              (min (max 0 characters) (source_characters - 1), 0, hidden)
+          | Keep_suffix { characters; hidden } ->
+              (0, min (max 0 characters) (source_characters - 1), hidden)
+          | Keep_ends { characters; hidden } ->
+              let visible =
+                min (max 0 characters) ((source_characters - 1) / 2)
+              in
+              (visible, visible, hidden)
+        in
+        let hidden_characters =
+          source_characters - visible_prefix - visible_suffix
+        in
+        let prefix_bytes = Utf8.byte_offset text ~characters:visible_prefix in
+        let suffix_start =
+          Utf8.byte_offset text ~characters:(source_characters - visible_suffix)
+        in
+        let suffix_bytes = String.length text - suffix_start in
+        let hidden_value = hidden_text hidden in
+        if not (Utf8.is_valid hidden_value) then fallback hidden true
+        else
+          let hidden_bytes =
+            match hidden with
+            | Collapse _ -> Some (String.length hidden_value)
+            | Fill _ ->
+                checked_mul (String.length hidden_value) hidden_characters
+          in
+          match hidden_bytes with
+          | None -> fallback hidden true
+          | Some hidden_bytes -> (
+              match checked_add prefix_bytes suffix_bytes with
+              | None -> fallback hidden true
+              | Some visible_bytes -> (
+                  match checked_add visible_bytes hidden_bytes with
+                  | None -> fallback hidden true
+                  | Some output_bytes
+                    when output_bytes > Log_limits.max_string_bytes limits ->
+                      fallback hidden true
+                  | Some output_bytes ->
+                      let buffer = Buffer.create output_bytes in
+                      Buffer.add_substring buffer text 0 prefix_bytes;
+                      (match hidden with
+                      | Collapse _ -> Buffer.add_string buffer hidden_value
+                      | Fill _ ->
+                          for _ = 1 to hidden_characters do
+                            Buffer.add_string buffer hidden_value
+                          done);
+                      Buffer.add_substring buffer text suffix_start suffix_bytes;
+                      (Buffer.contents buffer, false)))
+
+  let custom_mask_text limits ~invoke_custom ~fallback ~apply text =
+    if not (bounded_text limits text) then (safe_text limits fallback, true)
+    else
+      match invoke_custom apply text with
+      | Stdlib.Ok value when bounded_text limits value ->
+          (copy_string value, false)
+      | Stdlib.Ok _ | Stdlib.Error () -> (safe_text limits fallback, true)
+
+  let render_mask limits ~invoke_custom text = function
+    | Finite mask -> finite_mask_text limits text mask
+    | Custom { fallback; apply } ->
+        custom_mask_text limits ~invoke_custom ~fallback ~apply text
+
+  type materialized_mask = Mask_value of value * bool | Mask_failed
+
+  let materialize_mask limits ~depth ~invoke_custom text mask =
+    let text, failed = render_mask limits ~invoke_custom text mask in
+    let context = create_context ~limits () in
+    match redaction_string context ~depth text with
+    | Stdlib.Ok value when not (has_truncation value) ->
+        Mask_value (value, failed)
+    | Stdlib.Ok _ | Stdlib.Error _ -> Mask_failed
+
+  let select_matching_value (matching : compiled_matching) value =
+    let map_find find_opt map key =
+      match find_opt key map with Some value -> value | None -> No_action
+    in
+    let string_selection (matching : compiled_matching) value =
+      match map_find String_map.find_opt matching.string_equal value with
+      | Conflict -> Conflict
+      | selected -> (
+          let prefix =
+            if matching.string_prefix.has_patterns then
+              trie_match matching.string_prefix ~reverse:false value
+            else No_action
+          in
+          match selection_merge selected prefix with
+          | Conflict -> Conflict
+          | selected -> (
+              let suffix =
+                if matching.string_suffix.has_patterns then
+                  trie_match matching.string_suffix ~reverse:true value
+                else No_action
+              in
+              match selection_merge selected suffix with
+              | Conflict -> Conflict
+              | selected ->
+                  if matching.string_contains.has_patterns then
+                    selection_merge selected
+                      (contains_match matching.string_contains value)
+                  else selected))
+    in
+    match value with
+    | String value -> string_selection matching value
+    | Null -> matching.null
+    | Bool true -> matching.bool_true
+    | Bool false -> matching.bool_false
+    | Integer (Int value) -> map_find Int_map.find_opt matching.int_values value
+    | Integer (Int32 value) ->
+        map_find Int32_selection_map.find_opt matching.int32_values value
+    | Integer (Int64 value) ->
+        map_find Int64_selection_map.find_opt matching.int64_values value
+    | Integer (Decimal _) -> No_action
+    | Float value ->
+        map_find Float_selection_map.find_opt matching.float_values value
+    | Bytes value -> map_find String_map.find_opt matching.bytes_equal value
+    | Truncated _ | List _ | Object _ | Variant _ -> No_action
+
+  let select_matching_text (matching : compiled_matching) text =
+    let map_find find_opt map key =
+      match find_opt key map with Some value -> value | None -> No_action
+    in
+    match map_find String_map.find_opt matching.string_equal text with
+    | Conflict -> Conflict
+    | selected -> (
+        let prefix =
+          if matching.string_prefix.has_patterns then
+            trie_match matching.string_prefix ~reverse:false text
+          else No_action
+        in
+        match selection_merge selected prefix with
+        | Conflict -> Conflict
+        | selected -> (
+            let suffix =
+              if matching.string_suffix.has_patterns then
+                trie_match matching.string_suffix ~reverse:true text
+              else No_action
+            in
+            match selection_merge selected suffix with
+            | Conflict -> Conflict
+            | selected ->
+                if matching.string_contains.has_patterns then
+                  selection_merge selected
+                    (contains_match matching.string_contains text)
+                else selected))
+
+  let apply_action state limits ~depth ~path ~root action value =
+    match action with
+    | Remove ->
+        note state path Removed;
+        Drop
+    | Replace replacement -> (
+        match cached_replacement state limits ~depth replacement with
+        | Ok replacement when (not root) || is_object_value replacement ->
+            note state path Replaced;
+            Keep (replacement, true)
+        | Ok _ | Error _ ->
+            fail state path;
+            Drop)
+    | Mask mask -> (
+        match value with
+        | String source when not root -> (
+            match
+              materialize_mask limits ~depth ~invoke_custom:state.invoke_custom
+                source mask
+            with
+            | Mask_failed ->
+                fail state path;
+                Drop
+            | Mask_value (value, failed) ->
+                if failed then (
+                  state.failed_closed <- true;
+                  note state path Failed_closed)
+                else note state path Masked;
+                Keep (value, true))
+        | String _ | Null | Bool _ | Integer _ | Float _ | Bytes _ | Truncated _
+        | List _ | Object _ | Variant _ ->
+            fail state path;
+            Drop)
+
+  let apply_matching_action state limits ~depth ~path ~root action value =
+    match action with
+    | Remove ->
+        (* Matching removal is not part of the accepted public policy. Keep
+           this defensive branch fail-closed if a neutral rule is assembled
+           internally despite that validation. *)
+        state.conflict <- true;
+        fail state path;
+        Drop
+    | Replace _ | Mask _ ->
+        apply_action state limits ~depth ~path ~root action value
+
+  let rec exact_value state limits node ~depth ~path ~root value =
+    match select node.actions with
+    | Action action -> (
+        match apply_action state limits ~depth ~path ~root action value with
+        | Drop -> Drop
+        | Keep (value, changed) when not (Path_step_map.is_empty node.children)
+          -> (
+            match exact_children state limits node ~depth ~path ~root value with
+            | Drop -> Drop
+            | Keep (value, descendants_changed) ->
+                Keep (value, changed || descendants_changed))
+        | Keep _ as result -> result)
+    | Conflict ->
+        fail state path;
+        Drop
+    | No_action ->
+        if Path_step_map.is_empty node.children then Keep (value, false)
+        else exact_children state limits node ~depth ~path ~root value
+
+  and exact_children state limits node ~depth ~path ~root value =
+    match value with
+    | Truncated { reason; partial = None } -> Keep (value, false)
+    | Truncated { reason; partial = Some partial } -> (
+        match
+          exact_children state limits node ~depth ~path ~root:false partial
+        with
+        | Drop -> Drop
+        | Keep (partial, changed) ->
+            if changed then
+              Keep (Truncated { reason; partial = Some partial }, true)
+            else Keep (value, false))
+    | Object object_ -> (
+        let process _ name value =
+          match child node (Field name) with
+          | None -> Keep (value, false)
+          | Some child_node ->
+              exact_value state limits child_node ~depth:(depth + 1)
+                ~path:(Field name :: path) ~root:false value
+        in
+        match transform_object_values object_ process with
+        | Same_object -> Keep (value, false)
+        | Changed_object fields ->
+            Keep
+              ( Object
+                  (match fields with
+                  | [ (name, value) ] -> Single (name, value)
+                  | fields -> Flat fields),
+                true ))
+    | List values -> (
+        let process index value =
+          match child node (Index index) with
+          | None -> Keep (value, false)
+          | Some child_node ->
+              exact_value state limits child_node ~depth:(depth + 1)
+                ~path:(Index index :: path) ~root:false value
+        in
+        match transform_list_values process values with
+        | Same_list -> Keep (value, false)
+        | Changed_list values -> Keep (List values, true))
+    | Variant ({ name; payload = None; _ } as value) -> (
+        (* A zero-payload case has no child value to replace or mask.  Removal
+           still addresses the case occurrence itself; all other direct
+           actions fail closed rather than silently accepting a rule that had
+           no effect. *)
+        match child node (Case name) with
+        | None -> Keep (Variant value, false)
+        | Some case_node -> (
+            match select case_node.actions with
+            | No_action -> Keep (Variant value, false)
+            | Action Remove ->
+                note state (Case name :: path) Removed;
+                Drop
+            | Action (Replace _ | Mask _) | Conflict ->
+                fail state (Case name :: path);
+                Drop))
+    | Variant ({ name; polymorphic; payload = Some payload } as original) -> (
+        match child node (Case name) with
+        | None -> Keep (Variant original, false)
+        | Some case_node -> (
+            match select case_node.actions with
+            | Conflict ->
+                fail state (Case name :: path);
+                Drop
+            | Action Remove ->
+                note state (Case name :: path) Removed;
+                Drop
+            | Action action -> (
+                match
+                  apply_action state limits ~depth:(depth + 1)
+                    ~path:(Case name :: path) ~root:false action payload
+                with
+                | Drop -> Drop
+                | Keep (payload, changed) -> (
+                    match
+                      if Path_step_map.is_empty case_node.children then
+                        Keep (payload, false)
+                      else
+                        exact_children state limits case_node ~depth:(depth + 1)
+                          ~path:(Case name :: path) ~root:false payload
+                    with
+                    | Drop -> Drop
+                    | Keep (payload, descendants_changed) ->
+                        Keep
+                          ( Variant { name; polymorphic; payload = Some payload },
+                            changed || descendants_changed )))
+            | No_action -> (
+                match
+                  exact_value state limits case_node ~depth:(depth + 1)
+                    ~path:(Case name :: path) ~root:false payload
+                with
+                | Drop -> Drop
+                | Keep (payload, changed) ->
+                    if changed then
+                      Keep
+                        ( Variant { name; polymorphic; payload = Some payload },
+                          true )
+                    else Keep (Variant original, false))))
+    | Null | Bool _ | Integer _ | Float _ | String _ | Bytes _ ->
+        Keep (value, false)
+
+  let rec matching_value state limits (matching : compiled_matching) ~depth
+      ~path ~root (value : value) =
+    match value with
+    | Null | Bool _ | Integer _ | Float _ | String _ | Bytes _ -> (
+        match select_matching_value matching value with
+        | No_action -> Keep (value, false)
+        | Conflict ->
+            state.conflict <- true;
+            fail state path;
+            Drop
+        | Action action ->
+            apply_matching_action state limits ~depth ~path ~root action value)
+    | Truncated { reason; partial = None } -> Keep (value, false)
+    | Truncated { reason; partial = Some partial } -> (
+        match
+          matching_value state limits matching ~depth ~path ~root partial
+        with
+        | Drop -> Drop
+        | Keep (partial, changed) ->
+            if changed then
+              Keep (Truncated { reason; partial = Some partial }, true)
+            else Keep (value, false))
+    | List values -> (
+        let process index value =
+          matching_value state limits matching ~depth:(depth + 1)
+            ~path:(Index index :: path) ~root:false value
+        in
+        match transform_list_values process values with
+        | Same_list -> Keep (value, false)
+        | Changed_list values -> Keep (List values, true))
+    | Object object_ -> (
+        let process _ name value =
+          matching_value state limits matching ~depth:(depth + 1)
+            ~path:(Field name :: path) ~root:false value
+        in
+        match transform_object_values object_ process with
+        | Same_object -> Keep (value, false)
+        | Changed_object fields ->
+            Keep
+              ( Object
+                  (match fields with
+                  | [ (name, value) ] -> Single (name, value)
+                  | fields -> Flat fields),
+                true ))
+    | Variant ({ name; payload = None; _ } as original) ->
+        Keep (Variant original, false)
+    | Variant ({ name; polymorphic; payload = Some payload } as original) -> (
+        match
+          matching_value state limits matching ~depth:(depth + 1)
+            ~path:(Case name :: path) ~root:false payload
+        with
+        | Drop -> Drop
+        | Keep (payload, changed) ->
+            if changed then
+              Keep (Variant { name; polymorphic; payload = Some payload }, true)
+            else Keep (Variant original, false))
+
+  type text_action_result = Text_value of string * redaction_effect
+
+  let text_replacement state limits replacement =
+    match cached_replacement state limits ~depth:0 replacement with
+    | Stdlib.Ok (String value) -> Some (copy_string value)
+    | Stdlib.Ok _ | Stdlib.Error _ -> None
+
+  let apply_text_action state limits ~invoke_custom action text =
+    match action with
+    | Remove -> Text_value (safe_text limits "[REDACTED]", Failed_closed)
+    | Replace replacement -> (
+        match text_replacement state limits replacement with
+        | Some value -> Text_value (value, Replaced)
+        | None -> Text_value (safe_text limits "[REDACTED]", Failed_closed))
+    | Mask mask ->
+        let value, failed = render_mask limits ~invoke_custom text mask in
+        Text_value (value, if failed then Failed_closed else Masked)
+
+  let transform_text ~limits ~(matching : compiled_matching) ~invoke_custom text
+      =
+    let empty_outcome text status conflict =
+      { text; reports = []; status; conflict }
+    in
+    if not (bounded_text limits text) then empty_outcome None Withheld false
+    else if not matching.has_rules then
+      empty_outcome (Some text) Unchanged false
+    else
+      let state =
+        {
+          limits;
+          invoke_custom;
+          reports_rev = [];
+          report_count = 0;
+          report_bytes = 0;
+          report_missing = false;
+          conflict = false;
+          changed = false;
+          failed_closed = false;
+          replacements = [];
+        }
+      in
+      let result =
+        match select_matching_text matching text with
+        | No_action -> None
+        | Conflict ->
+            state.conflict <- true;
+            let value = safe_text limits "[REDACTED]" in
+            state.failed_closed <- true;
+            note state [] Failed_closed;
+            Some value
+        | Action action ->
+            (match action with
+            | Remove -> state.conflict <- true
+            | Replace _ | Mask _ -> ());
+            let (Text_value (value, action)) =
+              apply_text_action state limits ~invoke_custom action text
+            in
+            (match action with
+            | Failed_closed -> state.failed_closed <- true
+            | Removed | Replaced | Masked -> ());
+            note state [] action;
+            Some value
+      in
+      (* [select_matching_text] has already resolved all matching rules against
+         the original text.  In particular, do not run it on a replacement. *)
+      match result with
+      | None ->
+          {
+            text = Some text;
+            reports = [];
+            status = Unchanged;
+            conflict = state.conflict;
+          }
+      | Some text when state.report_missing ->
+          {
+            text = None;
+            reports = List.rev state.reports_rev;
+            status = Withheld;
+            conflict = state.conflict;
+          }
+      | Some text ->
+          {
+            text = Some text;
+            reports = List.rev state.reports_rev;
+            status = (if state.failed_closed then Failed_closed else Changed);
+            conflict = state.conflict;
+          }
+
+  let transform ~limits ~(exact : compiled_exact)
+      ~(matching : compiled_matching) ~invoke_custom source =
+    (* The normal no-rule fast path remains allocation-free. *)
+    if (not exact.has_rules) && not matching.has_rules then
+      {
+        fragment = Some source;
+        reports = [];
+        status = Unchanged;
+        conflict = false;
+      }
+    else
+      let state =
+        {
+          limits;
+          invoke_custom;
+          reports_rev = [];
+          report_count = 0;
+          report_bytes = 0;
+          report_missing = false;
+          conflict = false;
+          changed = false;
+          failed_closed = false;
+          replacements = [];
+        }
+      in
+      let value =
+        match
+          exact_value state limits exact.root ~depth:0 ~path:[] ~root:true
+            source.value
+        with
+        | Keep (value, _) -> value
+        | Drop -> empty_object_value
+      in
+      let value =
+        if not matching.has_rules then value
+        else
+          match
+            matching_value state limits matching ~depth:0 ~path:[] ~root:true
+              value
+          with
+          | Keep (value, _) -> value
+          | Drop -> empty_object_value
+      in
+      if not state.changed then
+        {
+          fragment = Some source;
+          reports = [];
+          status = Unchanged;
+          conflict = state.conflict;
+        }
+      else if state.report_missing then
+        {
+          fragment = None;
+          reports = List.rev state.reports_rev;
+          status = Withheld;
+          conflict = state.conflict;
+        }
+      else
+        let output = fragment value in
+        if not (fragment_fits limits ~depth:0 output) then
+          {
+            fragment = None;
+            reports = List.rev state.reports_rev;
+            status = Withheld;
+            conflict = state.conflict;
+          }
+        else
+          {
+            fragment = Some output;
+            reports = List.rev state.reports_rev;
+            status = (if state.failed_closed then Failed_closed else Changed);
+            conflict = state.conflict;
+          }
+end

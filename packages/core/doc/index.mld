@@ -73,9 +73,10 @@ to the same canonical fields as caller authoring. Their callbacks run only for
 admitted completion. Caller fields win ordinary collisions; composition may
 grant one enricher authority over named non-reserved root fields. Duplicate
 enricher names and overlapping authority are configuration errors. Enricher
-callbacks are synchronous and may run concurrently for different observations;
-they must be safe for concurrent invocation and must not recursively emit
-Observe logs. Ordinary failures are contained, configured limit exhaustion
+callbacks are synchronous and may run concurrently for different observations,
+so they must be safe for concurrent invocation. An admitted Observe log emitted
+by a callback can invoke the same enricher again; the callback owns termination
+of that recursion. Ordinary failures are contained, configured limit exhaustion
 becomes bounded truncation or omission, and runtime control exceptions propagate
 unchanged.
 
@@ -85,6 +86,76 @@ configuration may choose another validated finite value, but cannot disable
 the bounds. Total-size accounting charges canonical nodes, object fields, list
 entries, payload bytes, truncation markers, and required completed-log metadata;
 the exact public units are documented on {!val:Observe.Logs.Limits.create}.
+
+{1 Disclosure-safe redaction}
+
+Redaction is an explicit caller policy. Omitting [~redaction] leaves values
+unchanged; Observe does not infer sensitivity from names, values, or the
+environment. A policy is inert until selected by [Config] or a destination
+drain.
+
+Exact paths address the canonical structured root, including nested objects,
+list positions, and variant cases. A policy associated with [~using] is checked
+against one declared schema and can be reused by typed point logs and
+schema-locked wide logs:
+
+{[
+module R = Observe.Logs.Redaction
+
+let typed_redaction =
+  R.create_exn
+    ~using:checkout_event_schema
+    ~rules:
+      [ R.Rule.at
+          (R.Path.root
+          |> R.Path.field "payment"
+          |> R.Path.case "Authorized"
+          |> R.Path.field "authorization_id")
+          (R.Action.mask
+             (R.Mask.keep_suffix ~characters:4 ~hidden:(R.Mask.Fill "*") ()))
+      ; R.Rule.at
+          (R.Path.root |> R.Path.field "item_count")
+          R.Action.remove
+      ]
+    ()
+
+let config =
+  Observe.Config.create_exn ~service:"orders"
+    ~redaction:typed_redaction ()
+]}
+
+The same hierarchy supports open structured paths and value matchers. Matching
+rules can replace or mask matching structured scalars, point-text messages, and
+wide annotation messages; structural removal is available only for an exact
+structured path. Known typed paths and string-mask targets are validated during
+policy construction. Opaque custom mapped descriptions defer exact lookup to
+safe runtime traversal, while unstable positions such as hash-table iteration
+indexes are rejected. String masks are finite and operate on UTF-8 scalar boundaries.
+The finite prefix, suffix, and ends masks always hide at least one scalar from a
+non-empty source. A custom mask receives only the already bounded matched
+string. Ordinary callback failures and invalid or over-budget results use the
+safe fallback or withhold the affected branch; a callback that never returns
+cannot be preempted by portable OCaml, so custom callback termination remains
+the caller's responsibility. Runtime control exceptions remain native.
+
+Redaction cannot rewrite package metadata such as service, version, timestamp,
+level, tag, schema identity, operation names or identifiers, parent identity, or
+annotation timestamps. The effective policy runs after canonical
+materialization and before capture, presentation, or drains. JSON and pretty
+output render a successful replacement as its ordinary safe value, while
+capture can inspect bounded effect and location evidence through
+{!val:Observe.Log.redactions} without receiving the removed source.
+
+{!val:Observe.Drain.with_redaction} adds a stricter policy to one destination
+branch. The destination receives only the already globally safe observation and
+cannot recover an earlier removal. Conflicting exact actions are rejected when
+the policy is built; identical rules are deduplicated and declaration order is
+not semantic. A dynamic conflict or traversal failure fails closed locally and
+records a bounded diagnostic rather than delivering the raw observation.
+Use {!val:Observe.Logs.Redaction.combine} or
+{!val:Observe.Logs.Redaction.combine_exn} to select typed and global reusable
+policies together; composition rejects known conflicts and does not make list
+order semantic.
 
 {1 I/O composition and capture}
 

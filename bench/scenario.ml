@@ -51,9 +51,10 @@ let prepared ?(retained_bytes = no_size) ?(encoded_bytes = no_size) operation =
   { operation; retained_bytes; encoded_bytes; cleanup = no_cleanup }
 
 let config ?(environment = "production") ?(console = Observe.Config.Auto)
-    ?(min_level = Observe.Level.Debug) ?(drains = []) ?enrichers ?limits () =
+    ?(min_level = Observe.Level.Debug) ?(drains = []) ?enrichers ?limits
+    ?redaction () =
   Observe.Config.create_exn ~service:"benchmark" ~environment ~console
-    ~min_level ~drains ?enrichers ?limits ()
+    ~min_level ~drains ?enrichers ?limits ?redaction ()
 
 let accepted_drain () =
   Observe.Drain.create (fun log ->
@@ -339,6 +340,163 @@ let open_small () (m : Observe.Logs.builder) =
   |+ m.field "user_id" Observe.Type.int 42
   |+ m.field "remembered" Observe.Type.bool true
   |> m.seal
+
+let redaction_token () (m : Observe.Logs.builder) =
+  let open Observe.Logs in
+  m.untyped |+ m.field "token" Observe.Type.string "secret-open" |> m.seal
+
+let redaction_tokens count () (m : Observe.Logs.builder) =
+  let open Observe.Logs in
+  m.untyped
+  |+ m.field "tokens"
+       Observe.Type.(list string)
+       (List.init count (fun index -> Printf.sprintf "secret-%04d" index))
+  |> m.seal
+
+let redaction_text () (m : Observe.Logs.builder) =
+  m.text ~tag:"checkout" "%s" "secret-point"
+
+let redaction_annotation () =
+  let wide = Observe.Logs.create ~name:"redaction-annotation" () in
+  Observe.Logs.annotate wide ~level:Observe.Level.Info (fun () ->
+      "secret-annotation");
+  Observe.Logs.emit wide
+
+let redaction_open_wide_nested () =
+  let wide = Observe.Logs.create ~name:"redaction-open-wide" () in
+  Observe.Logs.set wide (fun m ->
+      let open Observe.Logs in
+      m.untyped
+      |+ m.object_ "user" (fun user ->
+          user.untyped
+          |+ user.field "plan" Observe.Type.string "pro"
+          |> user.seal)
+      |> m.seal);
+  Observe.Logs.emit wide
+
+let redaction_path fields = Observe.Logs.Redaction.Path.fields fields
+let redaction_policy rules = Observe.Logs.Redaction.create_exn ~rules ()
+
+let redaction_matching prefix action =
+  Observe.Logs.Redaction.Rule.matching
+    (Observe.Logs.Redaction.Matcher.string_prefix prefix)
+    action
+
+let redaction_exact fields action =
+  Observe.Logs.Redaction.Rule.at (redaction_path fields) action
+
+let redaction_exact_nested_remove =
+  redaction_policy
+    [ redaction_exact [ "user"; "plan" ] Observe.Logs.Redaction.Action.remove ]
+
+let redaction_exact_typed_nested_remove =
+  Observe.Logs.Redaction.create_exn ~using:Payload.nested_schema
+    ~rules:
+      [
+        redaction_exact [ "user"; "plan" ] Observe.Logs.Redaction.Action.remove;
+      ]
+    ()
+
+let redaction_unmatched =
+  redaction_policy
+    [
+      redaction_matching "never-"
+        (Observe.Logs.Redaction.Action.replace
+           (Observe.Value.string "[unmatched]"));
+    ]
+
+let redaction_unmatched_prefixes count =
+  let replacement =
+    Observe.Logs.Redaction.Action.replace (Observe.Value.string "[unmatched]")
+  in
+  redaction_policy
+    (List.init count (fun index ->
+         redaction_matching
+           (Printf.sprintf "never-prefix-%04d-" index)
+           replacement))
+
+let redaction_unmatched_contains count =
+  let replacement =
+    Observe.Logs.Redaction.Action.replace (Observe.Value.string "[unmatched]")
+  in
+  redaction_policy
+    (List.init count (fun index ->
+         Observe.Logs.Redaction.Rule.matching
+           (Observe.Logs.Redaction.Matcher.string_contains
+              (Printf.sprintf "never-contains-%04d" index))
+           replacement))
+
+let redaction_unmatched_prefixes_256 = redaction_unmatched_prefixes 256
+let redaction_unmatched_contains_256 = redaction_unmatched_contains 256
+
+let redaction_unmatched_exact_256 =
+  redaction_policy
+    (List.init 256 (fun index ->
+         redaction_exact
+           [ Printf.sprintf "absent-%04d" index ]
+           Observe.Logs.Redaction.Action.remove))
+
+let redaction_matching_replace =
+  redaction_policy
+    [
+      redaction_matching "secret-"
+        (Observe.Logs.Redaction.Action.replace
+           (Observe.Value.string "[matched]"));
+    ]
+
+let redaction_finite_mask =
+  let mask =
+    Observe.Logs.Redaction.Mask.keep_suffix ~characters:4
+      ~hidden:(Observe.Logs.Redaction.Mask.Fill "*") ()
+  in
+  redaction_policy
+    [ redaction_exact [ "token" ] (Observe.Logs.Redaction.Action.mask mask) ]
+
+let redaction_custom_mask =
+  let mask =
+    Observe.Logs.Redaction.Mask.custom (fun value ->
+        String.make (String.length value) '*')
+  in
+  redaction_policy
+    [ redaction_exact [ "token" ] (Observe.Logs.Redaction.Action.mask mask) ]
+
+let redaction_failing_custom_mask =
+  let mask =
+    Observe.Logs.Redaction.Mask.custom (fun _ -> raise (Failure "benchmark"))
+  in
+  redaction_policy
+    [ redaction_exact [ "token" ] (Observe.Logs.Redaction.Action.mask mask) ]
+
+let redaction_drain_policy =
+  redaction_policy
+    [ redaction_exact [ "token" ] Observe.Logs.Redaction.Action.remove ]
+
+let redaction_core_operation ?(redaction = Observe.Logs.Redaction.none)
+    make_message =
+  core_operation
+    (config ~console:Observe.Config.Silent
+       ~drains:[ accepted_drain () ]
+       ~redaction ())
+    make_message
+
+let redaction_core_unit_operation ?(redaction = Observe.Logs.Redaction.none)
+    operation =
+  core_unit_operation
+    (config ~console:Observe.Config.Silent
+       ~drains:[ accepted_drain () ]
+       ~redaction ())
+    operation
+
+let redaction_stricter_drain_operation make_message =
+  let drain =
+    Observe.Drain.create (fun log ->
+        consume log;
+        Observe.Drain.Accepted)
+    |> Observe.Drain.with_redaction ~redaction:redaction_drain_policy
+  in
+  core_operation
+    (config ~console:Observe.Config.Silent ~drains:[ drain ] ())
+    make_message
 
 let benchmark_enricher name fields =
   Observe.Logs.Enricher.create_exn ~name (fun () ->
@@ -1024,6 +1182,86 @@ let core_scenarios =
       make ~name:"core/canonical/open-point" ~suite:Core
         ~boundary:"open-fragment" ~payload:"open-small" (fun () ->
           retained_core_operation (fun () -> Observe.Logs.info (open_small ())));
+      make ~name:"core/redaction/none" ~suite:Core ~boundary:"redaction"
+        ~payload:"open-token" (fun () ->
+          redaction_core_operation redaction_token);
+      make ~name:"core/redaction/unmatched" ~suite:Core ~boundary:"redaction"
+        ~payload:"open-token" (fun () ->
+          redaction_core_operation ~redaction:redaction_unmatched
+            redaction_token);
+      make ~name:"core/redaction/unmatched-prefixes-256" ~suite:Core
+        ~boundary:"redaction-scaling" ~payload:"open-token" (fun () ->
+          redaction_core_operation ~redaction:redaction_unmatched_prefixes_256
+            redaction_token);
+      make ~name:"core/redaction/unmatched-contains-256" ~suite:Core
+        ~boundary:"redaction-scaling" ~payload:"open-token" (fun () ->
+          redaction_core_operation ~redaction:redaction_unmatched_contains_256
+            redaction_token);
+      make ~name:"core/redaction/unmatched-exact-256" ~suite:Core
+        ~boundary:"redaction-scaling" ~payload:"open-token" (fun () ->
+          redaction_core_operation ~redaction:redaction_unmatched_exact_256
+            redaction_token);
+      make ~name:"core/redaction/baseline-open-nested" ~suite:Core
+        ~boundary:"redaction-baseline" ~payload:"open-nested" (fun () ->
+          redaction_core_operation untyped_nested);
+      make ~name:"core/redaction/exact-open-nested" ~suite:Core
+        ~boundary:"redaction-exact" ~payload:"open-nested" (fun () ->
+          redaction_core_operation ~redaction:redaction_exact_nested_remove
+            untyped_nested);
+      make ~name:"core/redaction/baseline-open-wide-nested" ~suite:Core
+        ~boundary:"redaction-baseline-wide" ~payload:"open-nested-wide"
+        (fun () -> redaction_core_unit_operation redaction_open_wide_nested);
+      make ~name:"core/redaction/exact-open-wide-nested" ~suite:Core
+        ~boundary:"redaction-exact-wide" ~payload:"open-nested-wide" (fun () ->
+          redaction_core_unit_operation ~redaction:redaction_exact_nested_remove
+            redaction_open_wide_nested);
+      make ~name:"core/redaction/baseline-typed-point" ~suite:Core
+        ~boundary:"redaction-baseline-typed" ~payload:"typed-nested" (fun () ->
+          redaction_core_operation typed_nested);
+      make ~name:"core/redaction/exact-typed-point" ~suite:Core
+        ~boundary:"redaction-exact-typed" ~payload:"typed-nested" (fun () ->
+          redaction_core_operation
+            ~redaction:redaction_exact_typed_nested_remove typed_nested);
+      make ~name:"core/redaction/baseline-typed-wide" ~suite:Core
+        ~boundary:"redaction-baseline-typed" ~payload:"typed-nested-wide"
+        (fun () -> redaction_core_unit_operation nested_typed_wide);
+      make ~name:"core/redaction/exact-typed-wide" ~suite:Core
+        ~boundary:"redaction-exact-typed" ~payload:"typed-nested-wide"
+        (fun () ->
+          redaction_core_unit_operation
+            ~redaction:redaction_exact_typed_nested_remove nested_typed_wide);
+      make ~name:"core/redaction/structured-matcher" ~suite:Core
+        ~boundary:"redaction-matcher" ~payload:"open-token" (fun () ->
+          redaction_core_operation ~redaction:redaction_matching_replace
+            redaction_token);
+      make ~name:"core/redaction/structured-matcher-128" ~suite:Core
+        ~boundary:"redaction-matcher-scaling" ~payload:"open-token-list"
+        (fun () ->
+          redaction_core_operation ~redaction:redaction_matching_replace
+            (redaction_tokens 128));
+      make ~name:"core/redaction/point-text" ~suite:Core
+        ~boundary:"redaction-text" ~payload:"point-text" (fun () ->
+          redaction_core_operation ~redaction:redaction_matching_replace
+            redaction_text);
+      make ~name:"core/redaction/wide-annotation" ~suite:Core
+        ~boundary:"redaction-annotation" ~payload:"wide-annotation" (fun () ->
+          redaction_core_unit_operation ~redaction:redaction_matching_replace
+            redaction_annotation);
+      make ~name:"core/redaction/finite-mask" ~suite:Core
+        ~boundary:"redaction-mask" ~payload:"open-token" (fun () ->
+          redaction_core_operation ~redaction:redaction_finite_mask
+            redaction_token);
+      make ~name:"core/redaction/custom-mask" ~suite:Core
+        ~boundary:"redaction-mask" ~payload:"open-token" (fun () ->
+          redaction_core_operation ~redaction:redaction_custom_mask
+            redaction_token);
+      make ~name:"core/redaction/custom-mask-failure" ~suite:Core
+        ~boundary:"redaction-mask" ~payload:"open-token" (fun () ->
+          redaction_core_operation ~redaction:redaction_failing_custom_mask
+            redaction_token);
+      make ~name:"core/redaction/stricter-drain" ~suite:Core
+        ~boundary:"redaction-drain" ~payload:"open-token" (fun () ->
+          redaction_stricter_drain_operation redaction_token);
       make ~name:"core/wide/open-fragment" ~suite:Core
         ~boundary:"open-wide-fragment" ~payload:"open-small" (fun () ->
           retained_wide_operation open_wide);

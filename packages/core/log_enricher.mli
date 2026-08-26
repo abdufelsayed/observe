@@ -19,8 +19,9 @@ val create :
     [name] must be non-empty valid UTF-8. Authoritative field names must also be
     non-empty valid UTF-8, unique within the enricher, and outside Observe's
     reserved envelope. [author] is synchronous and may run concurrently for
-    different observations; it must be safe for concurrent invocation and must
-    not recursively emit Observe logs. *)
+    different observations, so it must be safe for concurrent invocation. An
+    admitted Observe log emitted by [author] can invoke the same enricher again;
+    the callback owns termination of that recursion. *)
 
 val create_exn :
   name:string -> ?authoritative_fields:string list -> (unit -> Value.t) -> t

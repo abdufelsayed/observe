@@ -142,6 +142,9 @@ val object_from_owned :
   ?limits:Log_limits.t -> (string * fragment) list -> (fragment, error) result
 
 val complete : fragment -> t
+
+(* Recover owned resource accounting for an immutable completed value. *)
+val fragment_retained_bytes : fragment -> int
 val view : t -> view
 
 val is_object : t -> bool
@@ -212,3 +215,83 @@ val append_root_pretty_fields : Pretty.t -> trailing:int -> t -> unit
 (** Append an object root as top-level tree fields. [trailing] is the number of
     fields the caller will render afterwards and determines the final branch
     marker. Raises [Invalid_argument] for a non-object root. *)
+
+(** The private, representation-local redaction seam used by the logging policy.
+    [Snapshot] itself is a private core module; keeping this contract here lets
+    policy compilation cache normalized rules without exposing the value tree or
+    introducing a second traversal representation. *)
+module Redaction : sig
+  type path_step = Field of string | Index of int | Case of string
+  type hidden = Fill of string | Collapse of string
+
+  type finite_mask =
+    | Keep_prefix of { characters : int; hidden : hidden }
+    | Keep_suffix of { characters : int; hidden : hidden }
+    | Keep_ends of { characters : int; hidden : hidden }
+
+  type mask =
+    | Finite of finite_mask
+    | Custom of { fallback : string; apply : string -> string }
+
+  type action = Remove | Replace of fragment | Mask of mask
+  type exact_rule = { path : path_step list; action : action }
+
+  type matcher =
+    | String_equal of string
+    | String_prefix of string
+    | String_suffix of string
+    | String_contains of string
+    | Bool of bool
+    | Int of int
+    | Int32 of int32
+    | Int64 of int64
+    | Float of float
+    | Bytes_equal of string
+    | Null
+
+  type matching_rule = { matcher : matcher; action : action }
+  type compiled_exact
+  type compiled_matching
+
+  val compile_exact : exact_rule list -> compiled_exact
+  val compile_matching : matching_rule list -> compiled_matching
+  val is_empty : exact:compiled_exact -> matching:compiled_matching -> bool
+
+  type redaction_effect = Removed | Replaced | Masked | Failed_closed
+  type report = { path : string; action : redaction_effect }
+  type status = Unchanged | Changed | Failed_closed | Withheld
+
+  type outcome = {
+    fragment : fragment option;
+    reports : report list;
+    status : status;
+        (** Whether incompatible matching actions were observed at runtime. *)
+    conflict : bool;
+  }
+
+  type text_outcome = {
+    text : string option;
+    reports : report list;
+    status : status;
+        (** Whether incompatible matching actions were observed at runtime. *)
+    conflict : bool;
+  }
+
+  val transform :
+    limits:Log_limits.t ->
+    exact:compiled_exact ->
+    matching:compiled_matching ->
+    invoke_custom:((string -> string) -> string -> (string, unit) Stdlib.result) ->
+    fragment ->
+    outcome
+
+  val transform_text :
+    limits:Log_limits.t ->
+    matching:compiled_matching ->
+    invoke_custom:((string -> string) -> string -> (string, unit) Stdlib.result) ->
+    string ->
+    text_outcome
+  (** Transform one already-owned valid point or annotation message. Changed
+      text results are package-owned copies. Exact paths do not apply and text
+      matching never removes a message. *)
+end

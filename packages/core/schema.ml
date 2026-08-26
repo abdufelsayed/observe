@@ -1,6 +1,7 @@
 type ('record, 'builder) t = {
   identity : identity;
   name : string;
+  shape : Log_shape.t;
   builder : 'builder;
   freeze_complete : 'record -> materializer;
 }
@@ -32,6 +33,7 @@ let record ?name ~builder description =
       {
         identity;
         name;
+        shape = Type.shape description;
         builder = builder patch_builder;
         freeze_complete =
           (fun value context ~depth ->
@@ -43,6 +45,7 @@ let name schema = schema.name
 let identity schema = schema.identity
 let same_identity left right = left == right
 let builder schema = schema.builder
+let shape schema = schema.shape
 
 let freeze_complete schema value context ~depth =
   schema.freeze_complete value context ~depth

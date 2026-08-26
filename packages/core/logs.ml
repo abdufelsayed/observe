@@ -1,5 +1,6 @@
 module Enricher = Log_enricher
 module Limits = Log_limits
+module Redaction = Log_redaction
 
 type message = Message.t
 type object_ = Message.object_
@@ -137,7 +138,7 @@ let create_typed ?parent ~name ~using () =
     ?parent:(Option.map engine_wide parent)
     ~name
     ~origin:(Log.Declared (Schema.name using))
-    ()
+    ~schema_identity:(Schema.identity using) ()
   |> fun wide -> typed_handle wide using
 
 let current () =
@@ -185,7 +186,7 @@ module Runtime = struct
       ~parent:(Engine.current_wide parent)
       ~name
       ~origin:(Log.Declared (Schema.name using))
-      ()
+      ~schema_identity:(Schema.identity using) ()
     |> fun wide -> typed_handle wide using
 
   let contribute_error = contribute_error
