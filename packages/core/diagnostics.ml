@@ -32,6 +32,11 @@ type kind =
   | Redaction_failed
   | Redaction_conflict
   | Drain_redaction_failed
+  | Sampling_discarded
+  | Sampling_source_raised
+  | Sampling_source_invalid
+  | Retention_raised
+  | Routing_raised
 
 type entry = { kind : kind; count : int }
 type store = int Atomic.t array
@@ -71,6 +76,11 @@ let kinds =
     Redaction_failed;
     Redaction_conflict;
     Drain_redaction_failed;
+    Sampling_discarded;
+    Sampling_source_raised;
+    Sampling_source_invalid;
+    Retention_raised;
+    Routing_raised;
   |]
 
 let index = function
@@ -107,6 +117,11 @@ let index = function
   | Redaction_failed -> 30
   | Redaction_conflict -> 31
   | Drain_redaction_failed -> 32
+  | Sampling_discarded -> 33
+  | Sampling_source_raised -> 34
+  | Sampling_source_invalid -> 35
+  | Retention_raised -> 36
+  | Routing_raised -> 37
 
 let create_store () = Array.init (Array.length kinds) (fun _ -> Atomic.make 0)
 

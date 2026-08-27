@@ -5,6 +5,7 @@ type t = {
   clock : unit -> (Observe.Timestamp.t, Observe.IO.clock_error) result;
   monotonic_now : unit -> (int64, Observe.IO.clock_error) result;
   next_id : unit -> (string, Observe.IO.clock_error) result;
+  sampling_draw : unit -> float;
   console : string -> Observe.IO.console_acceptance;
 }
 
@@ -14,11 +15,12 @@ let create ?(style = Observe.Formatter.Plain)
     ?(clock = fun () -> Ok (Observe.Timestamp.of_unix_ns 42L))
     ?(monotonic_now = fun () -> Ok 0L)
     ?(next_id = fun () -> Ok "benchmark-operation")
+    ?(sampling_draw = fun () -> 0.)
     ?(console =
       fun output ->
         ignore (Sys.opaque_identity output : string);
         Observe.IO.Accepted) () =
-  { style; clock; monotonic_now; next_id; console }
+  { style; clock; monotonic_now; next_id; sampling_draw; console }
 
 module IO = struct
   type +'a t = 'a
@@ -55,6 +57,14 @@ module IO = struct
 
   module Identity = struct
     let next state = state.next_id ()
+  end
+
+  module Sampling = struct
+    type stable = float Lazy.t
+
+    let draw state = state.sampling_draw ()
+    let create_stable state = lazy (state.sampling_draw ())
+    let draw_stable _state stable = Lazy.force stable
   end
 
   module Console = struct

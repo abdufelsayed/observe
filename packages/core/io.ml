@@ -26,6 +26,14 @@ module type S = sig
     val next : state -> (string, clock_error) result
   end
 
+  module Sampling : sig
+    type stable
+
+    val draw : state -> float
+    val create_stable : state -> stable
+    val draw_stable : state -> stable -> float
+  end
+
   module Console : sig
     val style : state -> Formatter.style
     val offer : state -> string -> console_acceptance

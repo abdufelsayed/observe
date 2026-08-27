@@ -58,7 +58,12 @@ amortized. Report schema version 3 adds this field.
   measure zero, one, multiple, and many configured enrichers. Materialization
   scenarios cover a representative default payload, depth, object width,
   collection length, node count, embedded typed values, byte and string
-  truncation, and a total-byte budget that withholds the observation. The
+  truncation, and a total-byte budget that withholds the observation. Retention
+  scenarios separate exact early rejection, probabilistic keep and drop,
+  completion rescue and defer, realistic safe-field inspection, and wide
+  completion, including final wide rejection before canonical projection.
+  Routing scenarios separate
+  unmatched, matched, multi-drain, and stricter-redaction branches. The
   boundary probes use deliberately small limits so their behavior is cheap to
   measure; they are not substitutes for correctness tests. These boundaries are
   named separately in the report; no latency number is treated as proof of
@@ -72,7 +77,10 @@ amortized. Report schema version 3 adds this field.
   and completed delivery rather than a full queue's rejection path. Standard
   error is redirected to `/dev/null` before initialization, so the adapter uses
   its non-TTY plain style and does not flood the caller's terminal. Point and
-  wide JSON and pretty scenarios use the same worker and flush boundary.
+  wide JSON and pretty scenarios use the same worker and flush boundary. The
+  stable-sampling fan-in probe is the exception: it uses a silent immediate
+  drain and no flush so it isolates repeated access to one runtime-owned
+  correlation decision.
 - `fs-lwt-unix` writes to a fresh temporary directory through the ready
   filesystem package. `completed` scenarios include one log and one shared
   lifecycle flush. `batch-100` scenarios write 100 logs and flush once; their

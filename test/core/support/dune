@@ -2,4 +2,4 @@
  (name observe_test_support)
  (wrapped false)
  (modules generated_logging test_io test_profile)
- (libraries observe alcotest))
+ (libraries observe alcotest threads.posix))

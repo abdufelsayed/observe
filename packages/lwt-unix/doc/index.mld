@@ -19,7 +19,8 @@ let () =
 
 The initializer is synchronous. It installs Lwt callback-local context, the OS
 wall clock, cryptographically random UUID v4 operation identities, and
-automatic formatted output on standard error. Console records
+runtime-owned random sampling draws when configured, and automatic formatted
+output on standard error. Console records
 are submitted without blocking the producer and written in order by one bounded
 Lwt worker. Merely linking the package allocates no writer, notification, or
 background Lwt work; those resources start during successful initialization
@@ -52,6 +53,16 @@ and wide annotation messages. Observe does not guess sensitive fields, rewrite
 package metadata, or deliver an original value when a redaction operation fails.
 See {!module:Observe.Logs.Redaction} for typed schema policies, finite and
 custom masks, and stricter per-drain branches.
+
+Sampling and completion retention are also selected through [Observe.Config].
+Omitted sampling is inert. The Unix composition supplies the ordinary random
+source; deterministic tests can pass [~sampling_draw] to
+{!val:Observe_lwt_unix.init}. Observe serializes a custom source, validates each
+finite draw, diagnoses failures, and retains the affected log when a decision
+cannot be produced. Exact zero and 100 percent policies perform no draw or
+entropy initialization. Drain routes run only after the completed global safety
+floor. Scoped capture bypasses sampling and external routing so test results do
+not depend on randomness or production destinations.
 
 Before process exit, run {!val:Observe_lwt_unix.shutdown} through the active Lwt
 scheduler. Use {!val:Observe_lwt_unix.flush} when the worker should remain open.

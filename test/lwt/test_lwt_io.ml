@@ -1,4 +1,5 @@
 module IO = Observe_lwt.IO
+module Fail_open_runtime = Observe.Make (Observe_lwt.IO)
 
 let owner_thread = Thread.id (Thread.self ())
 
@@ -7,6 +8,8 @@ let state =
     ~clock:(fun () -> Ok (Observe.Timestamp.of_unix_ns 0L))
     ~monotonic_now:(fun () -> Ok 0L)
     ~next_id:(fun () -> Ok "test-operation")
+    ~sampling_draw:(fun () -> 0.)
+    ~create_stable_sampling_draw:(fun () -> fun () -> 0.)
     ~console_style:(fun () -> Observe.Formatter.Plain)
     ~offer_console:(fun _ -> Observe.IO.Accepted)
     ~can_lookup_context:(fun () -> Thread.id (Thread.self ()) = owner_thread)
@@ -124,6 +127,57 @@ let test_foreign_thread_lookup () =
   Alcotest.(check (option string))
     "foreign thread has no Lwt context" None !seen
 
+let diagnostic_count kind =
+  Observe.Diagnostics.snapshot ()
+  |> List.find_map (fun (entry : Observe.Diagnostics.entry) ->
+      if entry.kind = kind then Some entry.count else None)
+  |> Option.value ~default:0
+
+let test_stable_sampling_factory_failure () =
+  let delivered = ref 0 in
+  let independent_draws = ref 0 in
+  let before = diagnostic_count Observe.Diagnostics.Sampling_source_raised in
+  let state =
+    Observe_lwt.create
+      ~clock:(fun () -> Ok (Observe.Timestamp.of_unix_ns 0L))
+      ~monotonic_now:(fun () -> Ok 0L)
+      ~next_id:(fun () -> Ok "stable-factory-failure")
+      ~sampling_draw:(fun () ->
+        incr independent_draws;
+        0.99)
+      ~create_stable_sampling_draw:(fun () -> raise Exit)
+      ~console_style:(fun () -> Observe.Formatter.Plain)
+      ~offer_console:(fun _ -> Observe.IO.Accepted)
+      ~can_lookup_context:(fun () -> true)
+      ()
+  in
+  let runtime = Fail_open_runtime.create state in
+  let drain =
+    Observe.Drain.create (fun _ ->
+        incr delivered;
+        Observe.Drain.Accepted)
+  in
+  let sampling =
+    Observe.Logs.Sampling.create
+      ~info:(Observe.Logs.Sampling.Rate.percent_exn 50.)
+      ~stability:Observe.Logs.Sampling.Correlation_stable ()
+  in
+  let config =
+    Observe.Config.create_exn ~service:"sampling-factory-failure"
+      ~console:Observe.Config.Silent ~drains:[ drain ] ~sampling ()
+  in
+  Fail_open_runtime.init_exn runtime config;
+  let wide = Observe.Logs.create ~name:"factory-failure" () in
+  Observe.Logs.emit wide;
+  Fail_open_runtime.close runtime;
+  Alcotest.(check int) "factory failure retains the wide log" 1 !delivered;
+  Alcotest.(check int)
+    "factory failure does not fall back to independent sampling" 0
+    !independent_draws;
+  Alcotest.(check int)
+    "factory failure is diagnosed once" (before + 1)
+    (diagnostic_count Observe.Diagnostics.Sampling_source_raised)
+
 let () =
   Alcotest.run "observe-lwt"
     [
@@ -143,5 +197,7 @@ let () =
             test_observed_cancellation;
           Alcotest.test_case "foreign thread lookup" `Quick
             test_foreign_thread_lookup;
+          Alcotest.test_case "stable sampling factory failure" `Quick
+            test_stable_sampling_factory_failure;
         ] );
     ]

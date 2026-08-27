@@ -30,6 +30,59 @@ module Direct = struct
   let is_control_exception () = function Control -> true | _ -> false
 end
 
+module Stable_sampling = struct
+  type outcome = Returned of float | Raised of exn * Printexc.raw_backtrace
+  type state = Pending | Running of int | Resolved of outcome
+
+  type t = {
+    source : unit -> float;
+    mutex : Mutex.t;
+    available : Condition.t;
+    mutable state : state;
+  }
+
+  let create source =
+    {
+      source;
+      mutex = Mutex.create ();
+      available = Condition.create ();
+      state = Pending;
+    }
+
+  let replay = function
+    | Returned value -> value
+    | Raised (raised, backtrace) ->
+        Printexc.raise_with_backtrace raised backtrace
+
+  let rec draw t =
+    let thread = Thread.id (Thread.self ()) in
+    Mutex.lock t.mutex;
+    match t.state with
+    | Resolved outcome ->
+        Mutex.unlock t.mutex;
+        replay outcome
+    | Running owner when owner = thread ->
+        Mutex.unlock t.mutex;
+        invalid_arg "Test_io: reentrant stable sampling source"
+    | Running _ ->
+        Condition.wait t.available t.mutex;
+        Mutex.unlock t.mutex;
+        draw t
+    | Pending ->
+        t.state <- Running thread;
+        Mutex.unlock t.mutex;
+        let outcome =
+          match t.source () with
+          | value -> Returned value
+          | exception raised -> Raised (raised, Printexc.get_raw_backtrace ())
+        in
+        Mutex.lock t.mutex;
+        t.state <- Resolved outcome;
+        Condition.broadcast t.available;
+        Mutex.unlock t.mutex;
+        replay outcome
+end
+
 module Inherited = struct
   type +'a t = 'a
   type binding = int * Obj.t
@@ -113,12 +166,14 @@ module Host = struct
     now : unit -> (Observe.Timestamp.t, Observe.IO.clock_error) result;
     monotonic_now : unit -> (int64, Observe.IO.clock_error) result;
     next_id : unit -> (string, Observe.IO.clock_error) result;
+    sampling_draw : unit -> float;
     offer_console : string -> Observe.IO.console_acceptance;
   }
 
   let create ?(console_style = Observe.Formatter.Plain)
       ?(now = fun () -> Ok (Observe.Timestamp.of_unix_ns 42L)) ?monotonic_now
-      ?next_id ?(offer_console = fun _ -> Observe.IO.Accepted) () =
+      ?next_id ?(sampling_draw = fun () -> 0.)
+      ?(offer_console = fun _ -> Observe.IO.Accepted) () =
     let monotonic_now =
       match monotonic_now with
       | Some monotonic_now -> monotonic_now
@@ -138,12 +193,13 @@ module Host = struct
             incr next;
             Ok ("operation-" ^ string_of_int !next)
     in
-    { console_style; now; monotonic_now; next_id; offer_console }
+    { console_style; now; monotonic_now; next_id; sampling_draw; offer_console }
 
   let console_style t = t.console_style
   let now t = t.now ()
   let monotonic_now t = t.monotonic_now ()
   let next_id t = t.next_id ()
+  let sampling_draw t = t.sampling_draw ()
   let offer_console t output = t.offer_console output
 end
 
@@ -172,6 +228,17 @@ module IO = struct
 
   module Identity = struct
     let next = Host.next_id
+  end
+
+  module Sampling = struct
+    type stable = Stable_sampling.t
+
+    let draw = Host.sampling_draw
+
+    let create_stable state =
+      Stable_sampling.create (fun () -> Host.sampling_draw state)
+
+    let draw_stable _state stable = Stable_sampling.draw stable
   end
 
   module Console = struct
@@ -211,6 +278,17 @@ module Inherited_io = struct
     let next state = Host.next_id state.host
   end
 
+  module Sampling = struct
+    type stable = Stable_sampling.t
+
+    let draw state = Host.sampling_draw state.host
+
+    let create_stable state =
+      Stable_sampling.create (fun () -> Host.sampling_draw state.host)
+
+    let draw_stable _state stable = Stable_sampling.draw stable
+  end
+
   module Console = struct
     let style state = Host.console_style state.host
     let offer state output = Host.offer_console state.host output
@@ -218,9 +296,9 @@ module Inherited_io = struct
 end
 
 let config ?environment ?version ?enabled ?console ?min_level ?drains ?enrichers
-    ?limits service =
+    ?limits ?redaction ?sampling ?retention service =
   Observe.Config.create_exn ~service ?environment ?version ?enabled ?console
-    ?min_level ?drains ?enrichers ?limits ()
+    ?min_level ?drains ?enrichers ?limits ?redaction ?sampling ?retention ()
 
 let diagnostic_count entries kind =
   List.fold_left

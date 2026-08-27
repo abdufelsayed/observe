@@ -5,6 +5,7 @@ val create :
   ?clock:(unit -> (Observe.Timestamp.t, Observe.IO.clock_error) result) ->
   ?monotonic_now:(unit -> (int64, Observe.IO.clock_error) result) ->
   ?next_id:(unit -> (string, Observe.IO.clock_error) result) ->
+  ?sampling_draw:(unit -> float) ->
   ?console:(string -> Observe.IO.console_acceptance) ->
   unit ->
   t

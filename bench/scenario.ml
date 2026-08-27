@@ -52,9 +52,9 @@ let prepared ?(retained_bytes = no_size) ?(encoded_bytes = no_size) operation =
 
 let config ?(environment = "production") ?(console = Observe.Config.Auto)
     ?(min_level = Observe.Level.Debug) ?(drains = []) ?enrichers ?limits
-    ?redaction () =
+    ?redaction ?sampling ?retention () =
   Observe.Config.create_exn ~service:"benchmark" ~environment ~console
-    ~min_level ~drains ?enrichers ?limits ?redaction ()
+    ~min_level ~drains ?enrichers ?limits ?redaction ?sampling ?retention ()
 
 let accepted_drain () =
   Observe.Drain.create (fun log ->
@@ -76,11 +76,18 @@ let retained_log_probe () =
   in
   (drain, retained_bytes)
 
-let core_operation ?(style = Observe.Formatter.Plain) config make_message =
-  let state = Benchmark_io.create ~style () in
+let core_operation ?(style = Observe.Formatter.Plain)
+    ?(sampling_draw = fun () -> 0.) config make_message =
+  let state = Benchmark_io.create ~style ~sampling_draw () in
   let observer = Observer.create state in
   Observer.init_exn observer config;
   prepared (fun () -> Observe.Logs.info (make_message ()))
+
+let core_author_operation ?(sampling_draw = fun () -> 0.) config author =
+  let state = Benchmark_io.create ~sampling_draw () in
+  let observer = Observer.create state in
+  Observer.init_exn observer config;
+  prepared (fun () -> Observe.Logs.info author)
 
 let core_unit_operation config operation =
   let state = Benchmark_io.create () in
@@ -171,15 +178,15 @@ let redirect_standard_error () =
       Unix.dup2 saved Unix.stderr;
       Unix.close saved)
 
-let prepare_lwt_unix_operation config emit =
+let prepare_lwt_unix_operation ?sampling_draw ?(flush = true) config emit =
   let restore = redirect_standard_error () in
   try
-    Observe_lwt_unix.init_exn config;
+    Observe_lwt_unix.init_exn ?sampling_draw config;
     {
       operation =
         (fun () ->
           emit ();
-          Lwt_main.run (Observe_lwt_unix.flush ()));
+          if flush then Lwt_main.run (Observe_lwt_unix.flush ()));
       retained_bytes = no_size;
       encoded_bytes = no_size;
       cleanup =
@@ -195,6 +202,14 @@ let prepare_lwt_unix_operation config emit =
 let lwt_unix_operation config make_message =
   prepare_lwt_unix_operation config (fun () ->
       Observe.Logs.info (make_message ()))
+
+let lwt_stable_fan_in () =
+  let wide = Observe.Logs.create ~name:"stable-fan-in" () in
+  for _ = 1 to 8 do
+    Observe.Logs.info ~operation:wide (fun builder ->
+        builder.text ~tag:"sampling" "correlated point")
+  done;
+  Observe.Logs.emit wide
 
 let temporary_directory () =
   let path = Filename.temp_file "observe-bench-fs" ".dir" in
@@ -497,6 +512,34 @@ let redaction_stricter_drain_operation make_message =
   core_operation
     (config ~console:Observe.Config.Silent ~drains:[ drain ] ())
     make_message
+
+let info_half =
+  Observe.Logs.Sampling.create
+    ~info:(Observe.Logs.Sampling.Rate.percent_exn 50.)
+    ()
+
+let info_never =
+  Observe.Logs.Sampling.create ~info:Observe.Logs.Sampling.Rate.never ()
+
+let retain_completed = Observe.Logs.Retention.create ~keep:(fun _ -> true)
+let defer_completed = Observe.Logs.Retention.create ~keep:(fun _ -> false)
+
+let inspect_completed =
+  Observe.Logs.Retention.create ~keep:(fun log ->
+      match
+        Observe.Value.find [ "token" ] (Observe.Log.fields log)
+        |> Option.map Observe.Value.view
+      with
+      | Some (`String "secret-open") -> true
+      | _ -> false)
+
+let routed_drain predicate =
+  accepted_drain () |> Observe.Drain.with_route ~when_:predicate
+
+let routed_stricter_drain predicate =
+  accepted_drain ()
+  |> Observe.Drain.with_redaction ~redaction:redaction_drain_policy
+  |> Observe.Drain.with_route ~when_:predicate
 
 let benchmark_enricher name fields =
   Observe.Logs.Enricher.create_exn ~name (fun () ->
@@ -838,6 +881,29 @@ let open_wide_annotate () =
 let explicit_correlated_point wide () =
   Observe.Logs.info ~operation:wide (text ())
 
+let retained_correlated_point_operation () =
+  let drain, retained_bytes = retained_log_probe () in
+  let sampling =
+    Observe.Logs.Sampling.create
+      ~info:(Observe.Logs.Sampling.Rate.percent_exn 50.)
+      ~stability:Observe.Logs.Sampling.Correlation_stable ()
+  in
+  let state = Benchmark_io.create ~sampling_draw:(fun () -> 0.25) () in
+  let observer = Observer.create state in
+  Observer.init_exn observer
+    (config ~console:Observe.Config.Silent ~drains:[ drain ] ~sampling ());
+  let wide = Observe.Logs.create ~name:"point-parent" () in
+  prepared ~retained_bytes (explicit_correlated_point wide)
+
+let rejected_wide_operation emit =
+  let state = Benchmark_io.create () in
+  let observer = Observer.create state in
+  Observer.init_exn observer
+    (config ~console:Observe.Config.Silent
+       ~drains:[ accepted_drain () ]
+       ~sampling:info_never ());
+  prepared emit
+
 let operation_point observer () =
   Observer.with_operation observer ~name:"point-operation" (fun () ->
       Observe.Logs.info (text ()))
@@ -1041,6 +1107,68 @@ let core_scenarios =
       make ~name:"core/filtered/tagged-text" ~suite:Core ~boundary:"filtered"
         ~payload:"tagged-text" (fun () ->
           core_operation (config ~min_level:Observe.Level.Warn ()) filtered_text);
+      make ~name:"core/retention/baseline" ~suite:Core
+        ~boundary:"retention-baseline" ~payload:"tagged-text" (fun () ->
+          core_operation
+            (config ~console:Observe.Config.Silent
+               ~drains:[ accepted_drain () ]
+               ())
+            text);
+      make ~name:"core/retention/sample-never" ~suite:Core
+        ~boundary:"sampling-early-rejection" ~payload:"tagged-text" (fun () ->
+          core_author_operation
+            (config ~console:Observe.Config.Silent
+               ~drains:[ accepted_drain () ]
+               ~sampling:info_never ())
+            (text ()));
+      make ~name:"core/retention/wide-sample-never" ~suite:Core
+        ~boundary:"sampling-wide-final-rejection" ~payload:"open-wide"
+        (fun () -> rejected_wide_operation open_wide);
+      make ~name:"core/retention/sample-drop" ~suite:Core
+        ~boundary:"sampling-base-rejection" ~payload:"tagged-text" (fun () ->
+          core_operation
+            ~sampling_draw:(fun () -> 0.75)
+            (config ~console:Observe.Config.Silent
+               ~drains:[ accepted_drain () ]
+               ~sampling:info_half ())
+            text);
+      make ~name:"core/retention/sample-keep" ~suite:Core
+        ~boundary:"sampling-base-retention" ~payload:"tagged-text" (fun () ->
+          core_operation
+            ~sampling_draw:(fun () -> 0.25)
+            (config ~console:Observe.Config.Silent
+               ~drains:[ accepted_drain () ]
+               ~sampling:info_half ())
+            text);
+      make ~name:"core/retention/completion-rescue" ~suite:Core
+        ~boundary:"sampling-completion-rescue" ~payload:"tagged-text" (fun () ->
+          core_operation
+            (config ~console:Observe.Config.Silent
+               ~drains:[ accepted_drain () ]
+               ~sampling:info_never ~retention:retain_completed ())
+            text);
+      make ~name:"core/retention/completion-defer" ~suite:Core
+        ~boundary:"sampling-completion-defer" ~payload:"tagged-text" (fun () ->
+          core_operation
+            (config ~console:Observe.Config.Silent
+               ~drains:[ accepted_drain () ]
+               ~sampling:info_never ~retention:defer_completed ())
+            text);
+      make ~name:"core/retention/completion-inspect" ~suite:Core
+        ~boundary:"sampling-completion-inspection" ~payload:"open-token"
+        (fun () ->
+          core_operation
+            (config ~console:Observe.Config.Silent
+               ~drains:[ accepted_drain () ]
+               ~sampling:info_never ~retention:inspect_completed ())
+            redaction_token);
+      make ~name:"core/retention/wide-rescue" ~suite:Core
+        ~boundary:"sampling-wide-rescue" ~payload:"open-wide" (fun () ->
+          core_unit_operation
+            (config ~console:Observe.Config.Silent
+               ~drains:[ accepted_drain () ]
+               ~sampling:info_never ~retention:retain_completed ())
+            open_wide);
       make ~name:"core/routing/one-drain" ~suite:Core ~boundary:"routing"
         ~payload:"tagged-text" (fun () ->
           core_operation
@@ -1061,6 +1189,40 @@ let core_scenarios =
                  ]
                ())
             text);
+      make ~name:"core/routing/unmatched" ~suite:Core
+        ~boundary:"routing-unmatched" ~payload:"tagged-text" (fun () ->
+          core_operation
+            (config ~console:Observe.Config.Silent
+               ~drains:[ routed_drain (fun _ -> false) ]
+               ())
+            text);
+      make ~name:"core/routing/matched" ~suite:Core ~boundary:"routing-matched"
+        ~payload:"tagged-text" (fun () ->
+          core_operation
+            (config ~console:Observe.Config.Silent
+               ~drains:[ routed_drain (fun _ -> true) ]
+               ())
+            text);
+      make ~name:"core/routing/multiple-matched" ~suite:Core
+        ~boundary:"routing-multiple" ~payload:"tagged-text" (fun () ->
+          core_operation
+            (config ~console:Observe.Config.Silent
+               ~drains:
+                 [
+                   routed_drain (fun _ -> true);
+                   routed_drain (fun _ -> true);
+                   routed_drain (fun _ -> true);
+                   routed_drain (fun _ -> true);
+                 ]
+               ())
+            text);
+      make ~name:"core/routing/stricter-redaction" ~suite:Core
+        ~boundary:"routing-redaction" ~payload:"open-token" (fun () ->
+          core_operation
+            (config ~console:Observe.Config.Silent
+               ~drains:[ routed_stricter_drain (fun _ -> true) ]
+               ())
+            redaction_token);
       make ~name:"core/enrichment/zero" ~suite:Core ~boundary:"enrichment"
         ~payload:"zero-enrichers" (fun () ->
           core_operation
@@ -1343,8 +1505,7 @@ let core_scenarios =
           retained_wide_operation open_wide_annotate);
       make ~name:"core/correlation/explicit-point" ~suite:Core
         ~boundary:"correlated-point" ~payload:"tagged-text" (fun () ->
-          let wide = Observe.Logs.create ~name:"point-parent" () in
-          retained_core_operation (explicit_correlated_point wide));
+          retained_correlated_point_operation ());
       make ~name:"core/operation/point" ~suite:Core ~boundary:"operation-point"
         ~payload:"tagged-text" (fun () ->
           retained_core_with_observer (fun observer -> operation_point observer));
@@ -1463,6 +1624,20 @@ let lwt_unix_scenarios =
     make ~name:"lwt-unix/operation/parent-child" ~suite:Lwt_unix
       ~boundary:"operation-parent-child" ~payload:"open-empty" (fun () ->
         lwt_operation_prepare `Parent_child);
+    make ~logical_operations:9 ~name:"lwt-unix/sampling/stable-fan-in"
+      ~suite:Lwt_unix ~boundary:"stable-sampling" ~payload:"nine-related-logs"
+      (fun () ->
+        prepare_lwt_unix_operation
+          ~sampling_draw:(fun () -> 0.25)
+          ~flush:false
+          (config ~console:Observe.Config.Silent
+             ~drains:[ accepted_drain () ]
+             ~sampling:
+               (Observe.Logs.Sampling.create
+                  ~info:(Observe.Logs.Sampling.Rate.percent_exn 50.)
+                  ~stability:Observe.Logs.Sampling.Correlation_stable ())
+             ())
+          lwt_stable_fan_in);
   ]
 
 let fs_lwt_unix_scenarios =

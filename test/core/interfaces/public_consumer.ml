@@ -35,6 +35,14 @@ module IO = struct
     let next () = Ok "consumer-operation"
   end
 
+  module Sampling = struct
+    type stable = float Lazy.t
+
+    let draw () = 0.
+    let create_stable () = lazy 0.
+    let draw_stable () stable = Lazy.force stable
+  end
+
   module Console = struct
     let style () = Observe.Formatter.Plain
     let offer () _ = Observe.IO.Accepted
@@ -147,6 +155,24 @@ let redacted_drain =
   Observe.Drain.create (fun _ -> Observe.Drain.Accepted)
   |> Observe.Drain.with_redaction ~redaction:disclosure
 
+let sampling =
+  Observe.Logs.Sampling.create
+    ~info:(Observe.Logs.Sampling.Rate.percent_exn 25.)
+    ~stability:Observe.Logs.Sampling.Correlation_stable ()
+
+let retention =
+  Observe.Logs.Retention.create ~keep:(fun log ->
+      Option.is_some (Observe.Value.find [ "value" ] (Observe.Log.fields log)))
+
+let routed_drain =
+  extension_drain
+  |> Observe.Drain.with_route ~when_:(fun log ->
+      Observe.Level.equal (Observe.Log.level log) Observe.Level.Error)
+
+let sampled_config =
+  Observe.Config.create_exn ~service:"consumer" ~sampling ~retention
+    ~drains:[ routed_drain ] ()
+
 let _ =
   ( config,
     observer,
@@ -162,4 +188,8 @@ let _ =
     extension_drain,
     disclosure,
     redacted_config,
-    redacted_drain )
+    redacted_drain,
+    sampling,
+    retention,
+    routed_drain,
+    sampled_config )

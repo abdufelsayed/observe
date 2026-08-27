@@ -10,4 +10,9 @@ context.
 
 Use {!module:Observe_lwt.IO} with [Observe.Make] when an
 application needs a custom Lwt composition. Most Lwt applications on Unix can
-use the ready [observe-lwt-unix] package instead.
+use the ready [observe-lwt-unix] package instead. A custom composition supplies
+[sampling_draw] and [create_stable_sampling_draw] to
+{!val:Observe_lwt.create}. A draw returns a finite value in the half-open
+interval from zero to one, promptly. The stable factory performs no draw itself
+and returns a concurrency-safe one-shot callback that invokes the source at
+most once.

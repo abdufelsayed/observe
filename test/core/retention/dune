@@ -1,0 +1,83 @@
+(executable
+ (name retention_scenario)
+ (modules retention_scenario)
+ (libraries observe observe_test_support alcotest threads.posix))
+
+(executable
+ (name test_retention_properties)
+ (modules test_retention_properties)
+ (libraries
+  observe
+  observe_test_support
+  alcotest
+  qcheck-core
+  qcheck-alcotest))
+
+(rule
+ (alias observe-retention-contracts)
+ (package observe)
+ (deps retention_scenario.exe)
+ (action
+  (progn
+   (run %{exe:retention_scenario.exe} rate-contract)
+   (run %{exe:retention_scenario.exe} inert)
+   (run %{exe:retention_scenario.exe} omitted-sampling)
+   (run %{exe:retention_scenario.exe} early-discard)
+   (run %{exe:retention_scenario.exe} deterministic-draw)
+   (run %{exe:retention_scenario.exe} per-level)
+   (run %{exe:retention_scenario.exe} error-default)
+   (run %{exe:retention_scenario.exe} error-override)
+   (run %{exe:retention_scenario.exe} wide-error-default)
+   (run %{exe:retention_scenario.exe} wide-error-override)
+   (run %{exe:retention_scenario.exe} safe-retention)
+   (run %{exe:retention_scenario.exe} failed-redaction-stays-safe)
+   (run %{exe:retention_scenario.exe} safe-text-and-annotation-views)
+   (run %{exe:retention_scenario.exe} retention-failure)
+   (run %{exe:retention_scenario.exe} source-failure)
+   (run %{exe:retention_scenario.exe} source-invalid-boundaries)
+   (run %{exe:retention_scenario.exe} source-raise)
+   (run %{exe:retention_scenario.exe} wide-source-invalid)
+   (run %{exe:retention_scenario.exe} wide-source-raise)
+   (run %{exe:retention_scenario.exe} source-control)
+   (run %{exe:retention_scenario.exe} retention-control)
+   (run %{exe:retention_scenario.exe} capture-bypass)
+   (run %{exe:retention_scenario.exe} route-fanout)
+   (run %{exe:retention_scenario.exe} point-retention-fanout)
+   (run %{exe:retention_scenario.exe} retention-precedes-base)
+   (run %{exe:retention_scenario.exe} base-fallback)
+   (run %{exe:retention_scenario.exe} wide-completion-retention)
+   (run %{exe:retention_scenario.exe} wide-final-drop)
+   (run %{exe:retention_scenario.exe} safe-route)
+   (run %{exe:retention_scenario.exe} nested-routes)
+   (run %{exe:retention_scenario.exe} routed-redaction)
+   (run %{exe:retention_scenario.exe} routed-redaction-failure)
+   (run %{exe:retention_scenario.exe} route-failure)
+   (run %{exe:retention_scenario.exe} route-control)
+   (run %{exe:retention_scenario.exe} stable-correlation)
+   (run %{exe:retention_scenario.exe} stable-exact-rates)
+   (run %{exe:retention_scenario.exe} stable-concurrent-one-shot)
+   (run %{exe:retention_scenario.exe} independent-correlation)
+   (run %{exe:retention_scenario.exe} composition-default)
+   (run %{exe:retention_scenario.exe} composition-selected))))
+
+(rule
+ (alias observe-retention-properties)
+ (package observe)
+ (deps
+  test_retention_properties.exe
+  (env_var OBSERVE_QCHECK_COUNT)
+  (env_var QCHECK_SEED))
+ (action
+  (run %{exe:test_retention_properties.exe})))
+
+(alias
+ (name observe-retention-contracts)
+ (package observe)
+ (deps
+  (alias observe-retention-properties)))
+
+(alias
+ (name discovery)
+ (package observe)
+ (deps
+  (alias observe-retention-contracts)))

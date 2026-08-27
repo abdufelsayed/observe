@@ -9,6 +9,7 @@ val contain : is_control_exception:(exn -> bool) -> (unit -> 'a) -> 'a contained
     is then re-raised unchanged rather than replaced. *)
 
 type t
+type wide
 
 val create_outputs :
   Config.t ->
@@ -16,7 +17,9 @@ val create_outputs :
   clock:(unit -> (Timestamp.t, Io.clock_error) result) ->
   monotonic_now:(unit -> (int64, Io.clock_error) result) ->
   next_id:(unit -> (string, Io.clock_error) result) ->
-  resolve_operation:(unit -> Log.operation_reference option) ->
+  sampling_draw:(unit -> float) ->
+  create_stable_sampling_draw:(unit -> unit -> float) ->
+  resolve_operation:(unit -> wide option) ->
   console:(string -> Io.console_acceptance) ->
   is_control_exception:(exn -> bool) ->
   t
@@ -26,7 +29,9 @@ val create_capture :
   clock:(unit -> (Timestamp.t, Io.clock_error) result) ->
   monotonic_now:(unit -> (int64, Io.clock_error) result) ->
   next_id:(unit -> (string, Io.clock_error) result) ->
-  resolve_operation:(unit -> Log.operation_reference option) ->
+  sampling_draw:(unit -> float) ->
+  create_stable_sampling_draw:(unit -> unit -> float) ->
+  resolve_operation:(unit -> wide option) ->
   is_control_exception:(exn -> bool) ->
   Capture.t ->
   t
@@ -41,10 +46,8 @@ val close : t -> unit
 val record_diagnostic : t -> Diagnostics.kind -> unit
 (** Record through the engine's active output or capture diagnostic boundary. *)
 
-val emit_point :
-  t -> ?correlation:Log.operation_reference -> Level.t -> Message.author -> unit
+val emit_point : t -> ?operation:wide -> Level.t -> Message.author -> unit
 
-type wide
 type current = Open of wide | Typed of wide * Schema.identity
 
 val current_reference : current -> Log.operation_reference option

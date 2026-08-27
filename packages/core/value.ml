@@ -36,6 +36,27 @@ type frozen_view =
   | `Object of (string * frozen) list
   | `Variant of string * bool * frozen option ]
 
+let find path value =
+  let rec field named = function
+    | [] -> None
+    | (name, value) :: rest ->
+        if String.equal name named then Some value else field named rest
+  in
+  let rec descend path value =
+    match path with
+    | [] -> Some value
+    | name :: rest -> (
+        match Snapshot.view value with
+        | `Object fields | `Truncated_object (fields, _) -> (
+            match field name fields with
+            | None -> None
+            | Some value -> descend rest value)
+        | `Null | `Bool _ | `Integer _ | `Float _ | `String _ | `Bytes _
+        | `Truncated _ | `Truncated_list _ | `List _ | `Variant _ ->
+            None)
+  in
+  descend path value
+
 let null = Null
 let bool value = Bool value
 let int value = Int value

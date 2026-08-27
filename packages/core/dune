@@ -19,6 +19,8 @@
   log_envelope
   log_limits
   log_redaction
+  log_retention
+  log_sampling
   log_shape
   logs
   message

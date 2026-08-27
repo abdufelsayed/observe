@@ -28,6 +28,93 @@ module Clock = struct
   let monotonic_now () = Ok (Mtime_clock.elapsed_ns ())
 end
 
+module Serialized_callback = struct
+  let wrap callback =
+    let mutex = Mutex.create () in
+    let available = Condition.create () in
+    let owner = ref None in
+    fun () ->
+      let thread = Thread.id (Thread.self ()) in
+      Mutex.lock mutex;
+      let rec acquire () =
+        match !owner with
+        | None -> owner := Some thread
+        | Some active when active = thread ->
+            Mutex.unlock mutex;
+            invalid_arg "Observe_lwt_unix: reentrant serialized callback"
+        | Some _ ->
+            Condition.wait available mutex;
+            acquire ()
+      in
+      acquire ();
+      Mutex.unlock mutex;
+      Fun.protect
+        ~finally:(fun () ->
+          Mutex.lock mutex;
+          owner := None;
+          Condition.broadcast available;
+          Mutex.unlock mutex)
+        callback
+end
+
+module One_shot_callback = struct
+  type 'a outcome = Returned of 'a | Raised of exn * Printexc.raw_backtrace
+  type 'a state = Pending | Running of int | Resolved of 'a outcome
+
+  type 'a t = {
+    callback : unit -> 'a;
+    mutex : Mutex.t;
+    available : Condition.t;
+    state : 'a state Atomic.t;
+  }
+
+  let create callback =
+    {
+      callback;
+      mutex = Mutex.create ();
+      available = Condition.create ();
+      state = Atomic.make Pending;
+    }
+
+  let replay = function
+    | Returned value -> value
+    | Raised (raised, backtrace) ->
+        Printexc.raise_with_backtrace raised backtrace
+
+  let rec get t =
+    match Atomic.get t.state with
+    | Resolved outcome -> replay outcome
+    | Running owner ->
+        if owner = Thread.id (Thread.self ()) then
+          invalid_arg "Observe_lwt_unix: reentrant one-shot callback"
+        else (
+          Mutex.lock t.mutex;
+          while
+            match Atomic.get t.state with
+            | Running _ -> true
+            | Pending | Resolved _ -> false
+          do
+            Condition.wait t.available t.mutex
+          done;
+          Mutex.unlock t.mutex;
+          get t)
+    | Pending ->
+        let thread = Thread.id (Thread.self ()) in
+        if not (Atomic.compare_and_set t.state Pending (Running thread)) then
+          get t
+        else
+          let outcome =
+            match t.callback () with
+            | value -> Returned value
+            | exception raised -> Raised (raised, Printexc.get_raw_backtrace ())
+          in
+          Mutex.lock t.mutex;
+          Atomic.set t.state (Resolved outcome);
+          Condition.broadcast t.available;
+          Mutex.unlock t.mutex;
+          replay outcome
+end
+
 module Identity = struct
   type generator = unit -> string
   type t = { selected : generator Atomic.t }
@@ -41,17 +128,87 @@ module Identity = struct
   let create () = { selected = Atomic.make default }
   let get t = Atomic.get t.selected
   let set t generator = Atomic.set t.selected generator
-
-  let serialize generator =
-    let lock = Mutex.create () in
-    fun () ->
-      Mutex.lock lock;
-      Fun.protect ~finally:(fun () -> Mutex.unlock lock) generator
-
+  let serialize = Serialized_callback.wrap
   let next t () = Ok ((get t) ())
 end
 
 type id_generator = Identity.generator
+
+module Sampling = struct
+  type draw = unit -> float
+  type t = { selected : draw Atomic.t }
+
+  let seed () =
+    let bytes = Mirage_crypto_rng_unix.getrandom 8 in
+    let value = ref 0L in
+    for index = 0 to 7 do
+      value :=
+        Int64.logor !value
+          (Int64.shift_left
+             (Int64.of_int (Char.code (String.unsafe_get bytes index)))
+             (index * 8))
+    done;
+    !value
+
+  let mix value =
+    let value =
+      Int64.mul
+        (Int64.logxor value (Int64.shift_right_logical value 30))
+        (-4658895280553007687L)
+    in
+    let value =
+      Int64.mul
+        (Int64.logxor value (Int64.shift_right_logical value 27))
+        (-7723592293110705685L)
+    in
+    Int64.logxor value (Int64.shift_right_logical value 31)
+
+  let create_default () =
+    let initial =
+      match seed () with
+      | initial -> Ok initial
+      | exception ((Out_of_memory | Stack_overflow | Sys.Break) as raised) ->
+          raise raised
+      | exception raised -> Error (raised, Printexc.get_raw_backtrace ())
+    in
+    let shard_count = 64 in
+    let counters = Array.init shard_count (fun _ -> Atomic.make 0) in
+    fun () ->
+      match initial with
+      | Error (raised, backtrace) ->
+          Printexc.raise_with_backtrace raised backtrace
+      | Ok initial ->
+          let shard = Thread.id (Thread.self ()) land (shard_count - 1) in
+          let offset = Atomic.fetch_and_add counters.(shard) 1 in
+          let position =
+            Int64.add
+              (Int64.mul (Int64.of_int offset) (Int64.of_int shard_count))
+              (Int64.of_int shard)
+          in
+          let value =
+            Int64.add initial (Int64.mul position (-7046029254386353131L))
+            |> mix
+          in
+          let mantissa = Int64.shift_right_logical value 11 in
+          Int64.to_float mantissa /. 9_007_199_254_740_992.
+
+  let default () =
+    let source = One_shot_callback.create create_default in
+    fun () -> (One_shot_callback.get source) ()
+
+  let unavailable () = nan
+  let create () = { selected = Atomic.make unavailable }
+  let get t = Atomic.get t.selected
+  let set t draw = Atomic.set t.selected draw
+  let serialize = Serialized_callback.wrap
+  let draw t () = (get t) ()
+
+  let create_stable t () =
+    let stable = One_shot_callback.create (get t) in
+    fun () -> One_shot_callback.get stable
+end
+
+type sampling_draw = Sampling.draw
 
 module Console = struct
   let lowercase = String.lowercase_ascii
@@ -108,6 +265,7 @@ type hook = {
 
 type context = {
   identity : Identity.t;
+  sampling : Sampling.t;
   owner_thread : int Atomic.t;
   console : Writer.t option Atomic.t;
   observer : Observer.t;
@@ -134,11 +292,14 @@ let create_hook ~flush ~shutdown =
 
 let create_context () =
   let identity = Identity.create () in
+  let sampling = Sampling.create () in
   let owner_thread = Atomic.make (Thread.id (Thread.self ())) in
   let console = Atomic.make None in
   let io =
     Observe_lwt.create ~clock:Clock.now ~monotonic_now:Clock.monotonic_now
       ~next_id:(Identity.next identity) ~console_style:Console.style
+      ~sampling_draw:(Sampling.draw sampling)
+      ~create_stable_sampling_draw:(Sampling.create_stable sampling)
       ~offer_console:(fun output ->
         match Atomic.get console with
         | None -> Observe.IO.Rejected
@@ -150,7 +311,7 @@ let create_context () =
         Thread.id (Thread.self ()) = Atomic.get owner_thread)
       ()
   in
-  { identity; owner_thread; console; observer = Observer.create io }
+  { identity; sampling; owner_thread; console; observer = Observer.create io }
 
 let register_hook writers (hook : hook) =
   match
@@ -182,7 +343,7 @@ let get_or_create_context () =
       | Prepared (context, _) | Running { context; _ } -> Some context
       | Closing _ | Closed _ -> None)
 
-let init ?id_generator config =
+let init ?id_generator ?sampling_draw config =
   with_lifecycle (fun () ->
       match !lifecycle with
       | Running _ -> Error Observe.Already_initialized
@@ -196,12 +357,20 @@ let init ?id_generator config =
           in
           lifecycle := Prepared (context, pending);
           let previous_identity = Identity.get context.identity in
+          let previous_sampling = Sampling.get context.sampling in
           let previous_owner_thread = Atomic.get context.owner_thread in
           let selected_identity =
             Option.fold ~none:Identity.default ~some:Identity.serialize
               id_generator
           in
           Identity.set context.identity selected_identity;
+          let selected_sampling =
+            match (sampling_draw, Observe.Config.sampling config) with
+            | Some draw, Some _ -> Sampling.serialize draw
+            | None, Some _ -> Sampling.default ()
+            | _, None -> Sampling.unavailable
+          in
+          Sampling.set context.sampling selected_sampling;
           Atomic.set context.owner_thread (Thread.id (Thread.self ()));
           let writer =
             try
@@ -214,6 +383,7 @@ let init ?id_generator config =
                   Some (Writer.create ~capacity:1_024 Lwt_unix.stderr)
             with raised ->
               Identity.set context.identity previous_identity;
+              Sampling.set context.sampling previous_sampling;
               Atomic.set context.owner_thread previous_owner_thread;
               lifecycle := Prepared (context, pending);
               raise raised
@@ -222,6 +392,7 @@ let init ?id_generator config =
           let rollback () =
             Atomic.set context.console None;
             Identity.set context.identity previous_identity;
+            Sampling.set context.sampling previous_sampling;
             Atomic.set context.owner_thread previous_owner_thread;
             Option.iter Writer.abort writer;
             lifecycle := Prepared (context, pending)
@@ -242,8 +413,8 @@ let init ?id_generator config =
                   rollback ();
                   error)))
 
-let init_exn ?id_generator config =
-  match init ?id_generator config with
+let init_exn ?id_generator ?sampling_draw config =
+  match init ?id_generator ?sampling_draw config with
   | Ok () -> ()
   | Error error -> raise (Observe.Init_error error)
 

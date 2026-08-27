@@ -2,6 +2,8 @@ type state = {
   clock : unit -> (Observe.Timestamp.t, Observe.IO.clock_error) result;
   monotonic_now : unit -> (int64, Observe.IO.clock_error) result;
   next_id : unit -> (string, Observe.IO.clock_error) result;
+  sampling_draw : unit -> float;
+  create_stable_sampling_draw : unit -> unit -> float;
   console_style : unit -> Observe.Formatter.style;
   offer_console : string -> Observe.IO.console_acceptance;
   can_lookup_context : unit -> bool;
@@ -9,12 +11,15 @@ type state = {
 
 type t = state
 
-let create ~clock ~monotonic_now ~next_id ~console_style ~offer_console
+let create ~clock ~monotonic_now ~next_id ~sampling_draw
+    ~create_stable_sampling_draw ~console_style ~offer_console
     ~can_lookup_context () =
   {
     clock;
     monotonic_now;
     next_id;
+    sampling_draw;
+    create_stable_sampling_draw;
     console_style;
     offer_console;
     can_lookup_context;
@@ -58,6 +63,14 @@ module IO = struct
 
   module Identity = struct
     let next state = state.next_id ()
+  end
+
+  module Sampling = struct
+    type stable = unit -> float
+
+    let draw state = state.sampling_draw ()
+    let create_stable state = state.create_stable_sampling_draw ()
+    let draw_stable _state stable = stable ()
   end
 
   module Console = struct

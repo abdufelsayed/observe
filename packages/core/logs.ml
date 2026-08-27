@@ -1,6 +1,8 @@
 module Enricher = Log_enricher
 module Limits = Log_limits
 module Redaction = Log_redaction
+module Retention = Log_retention
+module Sampling = Log_sampling
 
 type message = Message.t
 type object_ = Message.object_
@@ -67,11 +69,11 @@ let engine_current handle =
   | Open -> Engine.Open handle.wide
   | Typed schema_id -> Engine.Typed (handle.wide, schema_id)
 
-let operation_reference handle = Engine.wide_reference handle.wide
-
 let log ?operation ~level author =
-  let correlation = Option.bind operation operation_reference in
-  Observer.emit_point ?correlation ~level author
+  match operation with
+  | None -> Observer.emit_point ~level author
+  | Some operation ->
+      Observer.emit_point ~operation:(engine_wide operation) ~level author
 
 let debug ?operation author = log ?operation ~level:Level.Debug author
 let info ?operation author = log ?operation ~level:Level.Info author

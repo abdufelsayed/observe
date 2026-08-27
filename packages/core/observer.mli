@@ -30,10 +30,7 @@ module Make (IO : Io.S) : sig
 end
 
 val emit_point :
-  ?correlation:Log.operation_reference ->
-  level:Level.t ->
-  Message.author ->
-  unit
+  ?operation:Engine.wide -> level:Level.t -> Message.author -> unit
 (** Internal entry point for the static [Logs] API. *)
 
 val create_wide :

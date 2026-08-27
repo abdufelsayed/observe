@@ -113,9 +113,9 @@ let current_operation () =
       | Engine.Returned (Some scope) ->
           if Atomic.get scope.closed then None else Some scope.current)
 
-let emit_point ?correlation ~level author =
+let emit_point ?operation ~level author =
   match active_engine () with
-  | Engine engine -> Engine.emit_point engine ?correlation level author
+  | Engine engine -> Engine.emit_point engine ?operation level author
   | Withhold -> ()
   | Missing -> Diagnostics.record Diagnostics.Not_initialized
   | Closed_route -> Diagnostics.record Diagnostics.Runtime_closed
@@ -147,13 +147,18 @@ module Make (IO : Io.S) = struct
   let clock t () = IO.Clock.now t.state
   let monotonic_now t () = IO.Clock.monotonic_now t.state
   let next_id t () = IO.Identity.next t.state
+  let sampling_draw t () = IO.Sampling.draw t.state
+
+  let create_stable_sampling_draw t () =
+    let stable = IO.Sampling.create_stable t.state in
+    fun () -> IO.Sampling.draw_stable t.state stable
 
   let resolve_operation t () =
     match IO.get t.state operation_key with
     | None -> None
     | Some scope ->
         if Atomic.get scope.closed then None
-        else Engine.current_reference scope.current
+        else Some (Engine.current_wide scope.current)
 
   let offer_console t output = IO.Console.offer t.state output
 
@@ -163,11 +168,15 @@ module Make (IO : Io.S) = struct
     | `Outputs ->
         Engine.create_outputs config ~console_style:(IO.Console.style t.state)
           ~clock:(clock t) ~monotonic_now:(monotonic_now t) ~next_id:(next_id t)
+          ~sampling_draw:(sampling_draw t)
+          ~create_stable_sampling_draw:(create_stable_sampling_draw t)
           ~resolve_operation:(resolve_operation t) ~console:(offer_console t)
           ~is_control_exception
     | `Capture capture ->
         Engine.create_capture config ~clock:(clock t)
           ~monotonic_now:(monotonic_now t) ~next_id:(next_id t)
+          ~sampling_draw:(sampling_draw t)
+          ~create_stable_sampling_draw:(create_stable_sampling_draw t)
           ~resolve_operation:(resolve_operation t) ~is_control_exception capture
 
   let init t config = publish t.io (engine t config `Outputs)

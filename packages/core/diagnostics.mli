@@ -34,6 +34,11 @@ type kind =
   | Redaction_failed
   | Redaction_conflict
   | Drain_redaction_failed
+  | Sampling_discarded
+  | Sampling_source_raised
+  | Sampling_source_invalid
+  | Retention_raised
+  | Routing_raised
 
 type entry = { kind : kind; count : int }
 type store

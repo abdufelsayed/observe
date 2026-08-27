@@ -38,6 +38,11 @@ type frozen_view =
   | `Object of (string * frozen) list
   | `Variant of string * bool * frozen option ]
 
+val find : string list -> frozen -> frozen option
+(** Find a nested object field in already completed meaning. An empty path
+    returns the supplied root. Truncated objects expose only their retained safe
+    prefix; missing, removed, and unretained fields return [None]. *)
+
 val null : t
 val bool : bool -> t
 val int : int -> t

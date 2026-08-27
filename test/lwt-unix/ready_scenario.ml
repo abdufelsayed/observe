@@ -63,8 +63,8 @@ let discard_stderr callback =
       Unix.close saved)
     callback
 
-let config ?environment ?console ?drains service =
-  Observe.Config.create_exn ~service ?environment ?console ?drains ()
+let config ?environment ?console ?drains ?sampling service =
+  Observe.Config.create_exn ~service ?environment ?console ?drains ?sampling ()
 
 let text_tag log =
   match Observe.Log.event log with
@@ -79,6 +79,13 @@ let diagnostic_count capture kind =
       if entry.kind = kind then total + entry.count else total)
     0
     (Observe.Capture.diagnostics capture)
+
+let process_diagnostic_count kind =
+  List.fold_left
+    (fun total (entry : Observe.Diagnostics.entry) ->
+      if entry.kind = kind then total + entry.count else total)
+    0
+    (Observe.Diagnostics.snapshot ())
 
 let wide_operation = function
   | log -> (
@@ -309,6 +316,137 @@ let repeated_init () =
       fail "unexpected initialization exception: %s" (Printexc.to_string exn)
   | () -> fail "second init_exn unexpectedly succeeded"
 
+let custom_sampling () =
+  let delivered = Atomic.make 0 in
+  let drain =
+    Observe.Drain.create (fun _ ->
+        ignore (Atomic.fetch_and_add delivered 1 : int);
+        Observe.Drain.Accepted)
+  in
+  let active = Atomic.make false in
+  let calls = Atomic.make 0 in
+  let sampling_draw () =
+    if not (Atomic.compare_and_set active false true) then
+      failwith "sampling source invoked concurrently";
+    Fun.protect
+      ~finally:(fun () -> Atomic.set active false)
+      (fun () ->
+        let call = Atomic.fetch_and_add calls 1 in
+        if call mod 2 = 0 then 0.25 else 0.75)
+  in
+  let sampling =
+    Observe.Logs.Sampling.create
+      ~info:(Observe.Logs.Sampling.Rate.percent_exn 50.)
+      ()
+  in
+  Observe_lwt_unix.init_exn ~sampling_draw
+    (config ~console:Observe.Config.Silent ~drains:[ drain ] ~sampling
+       "sampling");
+  let threads =
+    List.init 16 (fun _ ->
+        Thread.create
+          (fun () -> Observe.Logs.info (text ~tag:"sample" "value"))
+          ())
+  in
+  List.iter Thread.join threads;
+  check (Atomic.get calls = 16) "custom sampling source call count changed";
+  check (Atomic.get delivered = 8) "custom sampling decisions were not used"
+
+let unused_custom_sampling () =
+  let calls = ref 0 in
+  let delivered = ref 0 in
+  let drain =
+    Observe.Drain.create (fun _ ->
+        incr delivered;
+        Observe.Drain.Accepted)
+  in
+  Observe_lwt_unix.init_exn
+    ~sampling_draw:(fun () ->
+      incr calls;
+      0.99)
+    (config ~console:Observe.Config.Silent ~drains:[ drain ]
+       ~sampling:(Observe.Logs.Sampling.create ())
+       "unused-sampling");
+  Observe.Logs.info (text ~tag:"sample" "value");
+  check (!calls = 0) "exact sampling invoked its source";
+  check (!delivered = 1) "inert configured sampling changed retention"
+
+let stable_custom_sampling () =
+  let thread_count = 16 in
+  let started = Atomic.make 0 in
+  let release = Atomic.make false in
+  let calls = Atomic.make 0 in
+  let delivered = Atomic.make 0 in
+  let drain =
+    Observe.Drain.create (fun _ ->
+        ignore (Atomic.fetch_and_add delivered 1 : int);
+        Observe.Drain.Accepted)
+  in
+  let sampling_draw () =
+    ignore (Atomic.fetch_and_add calls 1 : int);
+    while not (Atomic.get release) do
+      Thread.yield ()
+    done;
+    0.25
+  in
+  let sampling =
+    Observe.Logs.Sampling.create
+      ~info:(Observe.Logs.Sampling.Rate.percent_exn 50.)
+      ~stability:Observe.Logs.Sampling.Correlation_stable ()
+  in
+  Observe_lwt_unix.init_exn ~sampling_draw
+    (config ~console:Observe.Config.Silent ~drains:[ drain ] ~sampling
+       "stable-sampling");
+  let root = Observe.Logs.create ~name:"stable-root" () in
+  let threads =
+    List.init thread_count (fun _ ->
+        Thread.create
+          (fun () ->
+            ignore (Atomic.fetch_and_add started 1 : int);
+            Observe.Logs.info ~operation:root (text ~tag:"sample" "value"))
+          ())
+  in
+  while Atomic.get started < thread_count do
+    Thread.yield ()
+  done;
+  Atomic.set release true;
+  List.iter Thread.join threads;
+  Observe.Logs.emit root;
+  check
+    (Atomic.get calls = 1)
+    "stable sampling invoked its source more than once";
+  check
+    (Atomic.get delivered = thread_count + 1)
+    "stable sampling did not share one keep decision"
+
+let reentrant_sampling () =
+  let delivered = ref 0 in
+  let entered = ref false in
+  let drain =
+    Observe.Drain.create (fun _ ->
+        incr delivered;
+        Observe.Drain.Accepted)
+  in
+  let sampling_draw () =
+    if not !entered then (
+      entered := true;
+      Observe.Logs.info (text ~tag:"sample" "nested"));
+    0.25
+  in
+  let sampling =
+    Observe.Logs.Sampling.create
+      ~info:(Observe.Logs.Sampling.Rate.percent_exn 50.)
+      ()
+  in
+  Observe_lwt_unix.init_exn ~sampling_draw
+    (config ~console:Observe.Config.Silent ~drains:[ drain ] ~sampling
+       "reentrant-sampling");
+  Observe.Logs.info (text ~tag:"sample" "outer");
+  check (!delivered = 2) "reentrant sampling did not fail open";
+  check
+    (process_diagnostic_count Observe.Diagnostics.Sampling_source_raised = 1)
+    "reentrant sampling was not diagnosed exactly once"
+
 let init_rollback () =
   let module Conflict = Observe.Make (Observe_lwt.IO) in
   let state =
@@ -316,6 +454,8 @@ let init_rollback () =
       ~clock:(fun () -> Ok (Observe.Timestamp.of_unix_ns 0L))
       ~monotonic_now:(fun () -> Ok 0L)
       ~next_id:(fun () -> Ok "conflicting-operation")
+      ~sampling_draw:(fun () -> 0.)
+      ~create_stable_sampling_draw:(fun () -> fun () -> 0.)
       ~console_style:(fun () -> Observe.Formatter.Plain)
       ~offer_console:(fun _ -> Observe.IO.Accepted)
       ~can_lookup_context:(fun () -> true)
@@ -1025,6 +1165,10 @@ let scenarios =
     ("default-identity", default_identity);
     ("custom-identity", custom_identity);
     ("failing-identity", failing_identity);
+    ("custom-sampling", custom_sampling);
+    ("unused-custom-sampling", unused_custom_sampling);
+    ("stable-custom-sampling", stable_custom_sampling);
+    ("reentrant-sampling", reentrant_sampling);
     ("console", console);
     ("json-console", json_console);
     ("wide-json-console", wide_json_console);

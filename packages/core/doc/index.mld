@@ -36,7 +36,8 @@ Ordinary code logs through {!module:Observe.Logs}:
 ]}
 
 The callback and every text, untyped, or typed value constructed inside it run
-only after route and level admission. Before production
+only after an active output path and level admission. A configured drain route
+predicate runs later because it inspects the completed safe log. Before production
 initialization, logs outside an active capture are withheld and counted rather
 than raising an initialization exception.
 
@@ -86,6 +87,29 @@ configuration may choose another validated finite value, but cannot disable
 the bounds. Total-size accounting charges canonical nodes, object fields, list
 entries, payload bytes, truncation markers, and required completed-log metadata;
 the exact public units are documented on {!val:Observe.Logs.Limits.create}.
+
+{1 Sampling, completion retention, and routing}
+
+{!module:Observe.Logs.Sampling} configures validated per-level base rates.
+Omitting [~sampling] is inert, and omitted rates retain every log. Errors are
+therefore retained by default unless [~error] is explicitly configured.
+[Correlation_stable] aligns the base draw for related parent, child, and point
+observations without turning them into one atomic retention unit.
+
+{!module:Observe.Logs.Retention} can rescue one completed log before fan-out.
+Its callback receives only the bounded log after global disclosure safety.
+Returning [false] defers to base sampling and cannot force a drop. Ordinary
+callback failures are diagnosed and fail open; runtime control exceptions remain
+native.
+
+{!val:Observe.Drain.with_route} selects one drain from that same safe immutable
+log. Nested routes form a conjunction. A route failure skips only its drain, and
+{!val:Observe.Drain.with_redaction} can then strengthen disclosure policy on the
+selected branch. Ordinary route exceptions are contained; runtime control
+exceptions remain native. Route and drain callbacks run synchronously, may run
+concurrently for different observations, and must promptly return. Capture
+bypasses probabilistic retention and external routing while preserving level
+admission, finite materialization, and global redaction.
 
 {1 Disclosure-safe redaction}
 
@@ -160,9 +184,10 @@ order semantic.
 {1 I/O composition and capture}
 
 {!module-type:Observe.IO.S} owns effects, dynamic binding, cleanup, native
-control exceptions, the wall clock, console presentation capability, and
-console offers. {!module:Observe.Make} consumes that completed contract without
-adding a runtime or operating-system dependency to the core.
+control exceptions, the wall clock, occurrence identity, sampling draws,
+console presentation capability, and console offers. {!module:Observe.Make}
+consumes that completed contract without adding a runtime or operating-system
+dependency to the core.
 
 {!val:Observe.Make.with_capture} installs capture as the innermost
 dynamic route, suppresses production delivery for the callback, restores the

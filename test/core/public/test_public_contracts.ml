@@ -103,10 +103,22 @@ let test_config_contract () =
   Alcotest.(check int)
     "no drains" 0
     (List.length (Observe.Config.drains defaults));
+  Alcotest.(check bool)
+    "no sampling" true
+    (Option.is_none (Observe.Config.sampling defaults));
+  Alcotest.(check bool)
+    "no retention" true
+    (Option.is_none (Observe.Config.retention defaults));
+  let sampling =
+    Observe.Logs.Sampling.create
+      ~info:(Observe.Logs.Sampling.Rate.percent_exn 25.)
+      ()
+  in
+  let retention = Observe.Logs.Retention.create ~keep:(fun _ -> false) in
   let explicit =
     Observe.Config.create_exn ~service:"api" ~environment:"test" ~version:"1"
       ~enabled:false ~console:Observe.Config.Silent
-      ~min_level:Observe.Level.Error ()
+      ~min_level:Observe.Level.Error ~sampling ~retention ()
   in
   Alcotest.(check (option string))
     "explicit environment" (Some "test")
@@ -124,6 +136,12 @@ let test_config_contract () =
     "explicit minimum level" true
     (Observe.Level.equal Observe.Level.Error
        (Observe.Config.min_level explicit));
+  Alcotest.(check bool)
+    "explicit sampling" true
+    (Option.is_some (Observe.Config.sampling explicit));
+  Alcotest.(check bool)
+    "explicit retention" true
+    (Option.is_some (Observe.Config.retention explicit));
   let development =
     Observe.Config.create_exn ~service:"api" ~environment:"development" ()
   in

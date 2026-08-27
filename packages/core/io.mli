@@ -61,6 +61,26 @@ module type S = sig
     (** Return a non-empty identifier for one active wide-log occurrence. *)
   end
 
+  module Sampling : sig
+    type stable
+
+    val draw : state -> float
+    (** Return one finite draw greater than or equal to zero and less than one.
+        The core validates the result and contains ordinary exceptions. The
+        runtime owns concrete randomness. *)
+
+    val create_stable : state -> stable
+    (** Allocate a fresh, initially unresolved one-shot draw without invoking
+        the random source or performing concrete I/O. *)
+
+    val draw_stable : state -> stable -> float
+    (** Resolve the one-shot draw at most once and return the same result to
+        every caller. Concurrent callers must not invoke the source more than
+        once. A source exception is likewise replayed with its original
+        backtrace. Core contains and diagnoses ordinary failures while
+        preserving runtime control exceptions. *)
+  end
+
   module Console : sig
     val style : state -> Formatter.style
     (** Report the console's maximum supported presentation capability. Return

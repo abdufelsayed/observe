@@ -206,6 +206,11 @@ module Value : sig
     | `Object of (string * frozen) list
     | `Variant of string * bool * frozen option ]
 
+  val find : string list -> frozen -> frozen option
+  (** Find a nested object field in completed meaning. An empty path returns the
+      supplied root. Truncated objects expose only their retained safe prefix.
+  *)
+
   val view : frozen -> frozen_view
   (** Inspect already completed structured meaning without parsing JSON or
       receiving mutable snapshot internals. Children remain [frozen] and are
@@ -349,6 +354,11 @@ module Diagnostics : sig
     | Redaction_failed
     | Redaction_conflict
     | Drain_redaction_failed
+    | Sampling_discarded
+    | Sampling_source_raised
+    | Sampling_source_invalid
+    | Retention_raised
+    | Routing_raised
 
   type entry = private { kind : kind; count : int }
 
@@ -606,6 +616,53 @@ module Logs : sig
     val pp_error : Format.formatter -> error -> unit
   end
 
+  module Sampling : sig
+    (** Validated probabilistic base sampling for logs. *)
+
+    module Rate : sig
+      type t
+      type error = Not_finite | Out_of_range
+
+      exception Invalid_rate of error
+
+      val never : t
+      val always : t
+      val percent : float -> (t, error) result
+      val percent_exn : float -> t
+      val to_percent : t -> float
+      val pp_error : Format.formatter -> error -> unit
+    end
+
+    type stability = Independent | Correlation_stable
+    type t
+
+    val create :
+      ?debug:Rate.t ->
+      ?info:Rate.t ->
+      ?warn:Rate.t ->
+      ?error:Rate.t ->
+      ?stability:stability ->
+      unit ->
+      t
+    (** Omitted rates retain every log. Errors are therefore always retained
+        unless [error] is explicitly supplied. Exact zero and 100 percent
+        decisions consume no runtime draw. *)
+  end
+
+  module Retention : sig
+    (** Completion-aware retention over a disclosure-safe completed log. *)
+
+    type t
+
+    val create : keep:(Log.t -> bool) -> t
+    (** A [true] result rescues the completed log from base sampling. [false]
+        defers to the base decision and does not force a drop. Ordinary callback
+        exceptions are contained, diagnosed, and fail open for retention. [keep]
+        runs synchronously while an observation completes and may be invoked
+        concurrently for different observations, so shared callback state must
+        be concurrency-safe. Runtime control exceptions remain native. *)
+  end
+
   (** Process-wide admission-first logging. Every level function checks the
       active route and configured level before invoking its authoring callback:
 
@@ -749,8 +806,10 @@ module Drain : sig
       immutable disclosure-safe completed observation. A drain can retain
       [Log.t] safely; it must still own destination-specific projection and
       mutable delivery state. [Accepted] means immediate ownership acceptance
-      only. Ordinary callback exceptions are contained as
-      [Diagnostics.Drain_raised]; runtime control exceptions are preserved. *)
+      only. The callback may run concurrently for different observations and
+      must therefore be concurrency-safe and promptly return. Ordinary callback
+      exceptions are contained as [Diagnostics.Drain_raised]; runtime control
+      exceptions are preserved. *)
 
   val with_redaction : redaction:Logs.Redaction.t -> t -> t
   (** Strengthen this destination with an additional disclosure policy. Nested
@@ -758,6 +817,13 @@ module Drain : sig
       receives only the already globally safe observation, so it cannot recover
       removed source data. Invalid composition raises
       [Logs.Redaction.Invalid_redaction]. *)
+
+  val with_route : when_:(Log.t -> bool) -> t -> t
+  (** Select this drain from the globally safe completed observation. Nested
+      routes compose by conjunction. Ordinary callback exceptions are contained,
+      diagnosed, and fail closed for this drain only. Route callbacks run
+      synchronously, may run concurrently for different observations, and must
+      promptly return. *)
 
   module Integration : sig
     val report_failure : t -> unit
@@ -794,13 +860,16 @@ module Config : sig
     ?enrichers:Logs.Enricher.t list ->
     ?limits:Logs.Limits.t ->
     ?redaction:Logs.Redaction.t ->
+    ?sampling:Logs.Sampling.t ->
+    ?retention:Logs.Retention.t ->
     unit ->
     (t, error) result
   (** Construct validated logging behavior. [Auto] selects pretty output when
       [environment] is absent, [dev], or [development], and NDJSON otherwise.
       The other console policies explicitly override that selection. Omitted
       enrichment is empty, omitted limits use [Logs.Limits.default], and omitted
-      redaction applies no caller-defined rule. Duplicate enricher names and
+      redaction applies no caller-defined rule. Sampling and completion
+      retention are inactive when omitted. Duplicate enricher names and
       overlapping authoritative ownership are rejected here, so list order never
       chooses a collision winner. *)
 
@@ -815,6 +884,8 @@ module Config : sig
     ?enrichers:Logs.Enricher.t list ->
     ?limits:Logs.Limits.t ->
     ?redaction:Logs.Redaction.t ->
+    ?sampling:Logs.Sampling.t ->
+    ?retention:Logs.Retention.t ->
     unit ->
     t
   (** Like {!create}, but raises [Invalid_configuration error]. *)
@@ -829,6 +900,8 @@ module Config : sig
   val enrichers : t -> Logs.Enricher.t list
   val limits : t -> Logs.Limits.t
   val redaction : t -> Logs.Redaction.t
+  val sampling : t -> Logs.Sampling.t option
+  val retention : t -> Logs.Retention.t option
   val pp_error : Format.formatter -> error -> unit
 end
 
@@ -1050,6 +1123,26 @@ module IO : sig
     module Identity : sig
       val next : state -> (string, clock_error) result
       (** Return a non-empty identifier for one active wide-log occurrence. *)
+    end
+
+    module Sampling : sig
+      type stable
+
+      val draw : state -> float
+      (** Return one finite draw greater than or equal to zero and less than
+          one. The core validates the result and contains ordinary exceptions.
+          Runtime composition owns concrete randomness. *)
+
+      val create_stable : state -> stable
+      (** Allocate a fresh unresolved one-shot draw without invoking the random
+          source or performing concrete I/O. *)
+
+      val draw_stable : state -> stable -> float
+      (** Resolve that draw at most once. Concurrent callers receive the same
+          result without invoking the source more than once. A source exception
+          is replayed with its original backtrace. Core contains and diagnoses
+          ordinary source failures while preserving runtime control exceptions.
+      *)
     end
 
     module Console : sig

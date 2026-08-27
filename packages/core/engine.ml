@@ -28,16 +28,44 @@ type production = {
 
 type output = Outputs of production | Capture of Capture.t
 
+type sampling_basis =
+  | Independent
+  | Stable of (unit -> float)
+  | Sampling_failed_open
+
+type annotations = { rev : Log.annotation list; count : int; bytes : int }
+
 type t = {
   config : Config.t;
   clock : unit -> (Timestamp.t, Io.clock_error) result;
   monotonic_now : unit -> (int64, Io.clock_error) result;
   next_id : unit -> (string, Io.clock_error) result;
-  resolve_operation : unit -> Log.operation_reference option;
+  sampling_draw : unit -> float;
+  create_stable_sampling_draw : unit -> unit -> float;
+  resolve_operation : unit -> wide option;
   is_control_exception : exn -> bool;
   output : output;
   accepting : bool Atomic.t;
+  sampling_discarded_reported : bool Atomic.t;
 }
+
+and wide = {
+  name : string;
+  origin : Log.structured_origin;
+  schema_identity : Schema.identity option;
+  engine : t option;
+  id : string option;
+  parent : Log.operation_reference option;
+  sampling_basis : sampling_basis;
+  start_ns : int64 option;
+  lifecycle : int Atomic.t;
+  body : Snapshot.Object_accumulator.state Atomic.t;
+  explicit_level : Level.t option Atomic.t;
+  derived_level : Level.t Atomic.t;
+  annotations : annotations Atomic.t;
+}
+
+type current = Open of wide | Typed of wide * Schema.identity
 
 let automatic_console environment =
   match environment with
@@ -48,7 +76,8 @@ let automatic_console environment =
       | _ -> Config.Ndjson)
 
 let create_outputs config ~console_style ~clock ~monotonic_now ~next_id
-    ~resolve_operation ~console ~is_control_exception =
+    ~sampling_draw ~create_stable_sampling_draw ~resolve_operation ~console
+    ~is_control_exception =
   let policy =
     match Config.console config with
     | Config.Auto -> automatic_console (Config.environment config)
@@ -66,29 +95,145 @@ let create_outputs config ~console_style ~clock ~monotonic_now ~next_id
     clock;
     monotonic_now;
     next_id;
+    sampling_draw;
+    create_stable_sampling_draw;
     resolve_operation;
     is_control_exception;
     output = Outputs { console; drains = Config.drains config; formatter };
     accepting = Atomic.make true;
+    sampling_discarded_reported = Atomic.make false;
   }
 
-let create_capture config ~clock ~monotonic_now ~next_id ~resolve_operation
-    ~is_control_exception capture =
+let create_capture config ~clock ~monotonic_now ~next_id ~sampling_draw
+    ~create_stable_sampling_draw ~resolve_operation ~is_control_exception
+    capture =
   {
     config;
     clock;
     monotonic_now;
     next_id;
+    sampling_draw;
+    create_stable_sampling_draw;
     resolve_operation;
     is_control_exception;
     output = Capture capture;
     accepting = Atomic.make true;
+    sampling_discarded_reported = Atomic.make false;
   }
 
 let record_diagnostic t kind =
   match t.output with
   | Outputs _ -> Diagnostics.record kind
   | Capture capture -> Capture.record capture kind
+
+let record_sampling_discarded t =
+  if
+    (not (Atomic.get t.sampling_discarded_reported))
+    && Atomic.compare_and_set t.sampling_discarded_reported false true
+  then record_diagnostic t Diagnostics.Sampling_discarded
+
+let sampling_enabled t =
+  match (t.output, Config.sampling t.config) with
+  | Capture _, _ | _, None -> false
+  | Outputs _, Some sampling -> not (Log_sampling.is_inert sampling)
+
+let validated_sampling_draw t draw =
+  match contain ~is_control_exception:t.is_control_exception draw with
+  | Raised ->
+      record_diagnostic t Diagnostics.Sampling_source_raised;
+      None
+  | Returned draw when Float.is_finite draw && draw >= 0. && draw < 1. ->
+      Some draw
+  | Returned _ ->
+      record_diagnostic t Diagnostics.Sampling_source_invalid;
+      None
+
+let sampling_draw t = validated_sampling_draw t t.sampling_draw
+
+let root_sampling_basis t =
+  match Config.sampling t.config with
+  | Some sampling
+    when sampling_enabled t
+         && Log_sampling.requires_draw sampling
+         && Log_sampling.stability sampling = Log_sampling.Correlation_stable
+    -> (
+      match
+        contain ~is_control_exception:t.is_control_exception
+          t.create_stable_sampling_draw
+      with
+      | Returned draw -> Stable draw
+      | Raised ->
+          record_diagnostic t Diagnostics.Sampling_source_raised;
+          Sampling_failed_open)
+  | None | Some _ -> Independent
+
+let sampling_fraction sampling level =
+  Log_sampling.rate sampling level |> Log_sampling.Internal.fraction
+
+let base_retained t sampling basis level =
+  let fraction = sampling_fraction sampling level in
+  if fraction <= 0. then false
+  else if fraction >= 1. then true
+  else
+    match basis with
+    | Independent -> (
+        match sampling_draw t with None -> true | Some draw -> draw < fraction)
+    | Stable draw -> (
+        match validated_sampling_draw t draw with
+        | None -> true
+        | Some draw -> draw < fraction)
+    | Sampling_failed_open -> true
+
+let retention_keeps t log =
+  match Config.retention t.config with
+  | None -> false
+  | Some retention -> (
+      match
+        contain ~is_control_exception:t.is_control_exception (fun () ->
+            Log_retention.keep retention log)
+      with
+      | Returned keep -> keep
+      | Raised ->
+          record_diagnostic t Diagnostics.Retention_raised;
+          true)
+
+let retained t sampling basis log =
+  let level = Log.level log in
+  if sampling_fraction sampling level >= 1. then true
+  else retention_keeps t log || base_retained t sampling basis level
+
+type early_decision = Deferred | Retained_early | Discarded_early
+
+let early_decision t basis level =
+  match (t.output, Config.sampling t.config) with
+  | Capture _, _ | Outputs _, None -> Retained_early
+  | Outputs _, Some sampling ->
+      if sampling_fraction sampling level >= 1. then Retained_early
+      else if Option.is_some (Config.retention t.config) then Deferred
+      else if base_retained t sampling basis level then Retained_early
+      else Discarded_early
+
+let sampling_basis_of_operation = function
+  | None -> Independent
+  | Some operation -> operation.sampling_basis
+
+let resolve_point_operation t =
+  match
+    contain ~is_control_exception:t.is_control_exception t.resolve_operation
+  with
+  | Raised ->
+      record_diagnostic t Diagnostics.Operation_lookup_raised;
+      None
+  | Returned operation -> operation
+
+let needs_operation_for_early_sampling t level =
+  match (t.output, Config.sampling t.config, Config.retention t.config) with
+  | Capture _, _, _ | Outputs _, None, _ | Outputs _, _, Some _ -> false
+  | Outputs _, Some sampling, None ->
+      let fraction = sampling_fraction sampling level in
+      Log_sampling.stability sampling = Log_sampling.Correlation_stable
+      && fraction > 0.
+      && fraction < 1.
 
 let has_active_route = function
   | Capture _ -> true
@@ -111,6 +256,11 @@ let admitted t level =
   && Config.enabled t.config
   && has_active_route t.output
   && Level.compare level (Config.min_level t.config) >= 0
+
+let operation_reference wide =
+  Option.map
+    (fun id -> Log.Producer.operation_reference ~name:wide.name ~id)
+    wide.id
 
 let empty_fields_fragment =
   Snapshot.Object_accumulator.as_fragment Snapshot.Object_accumulator.empty
@@ -441,15 +591,28 @@ let offer_drain t drain ~schema_identity log =
     offer_drain_unredacted t drain log
   else
     let result = redact_log t policy ~schema_identity log in
-    (match result.status with
-    | Snapshot.Redaction.Failed_closed | Snapshot.Redaction.Withheld ->
+    match (result.status, result.conflict, result.log) with
+    | (Snapshot.Redaction.Failed_closed | Snapshot.Redaction.Withheld), _, _
+    | _, true, _ ->
         record_diagnostic t Diagnostics.Drain_redaction_failed
-    | Snapshot.Redaction.Unchanged | Snapshot.Redaction.Changed ->
-        if result.conflict then
-          record_diagnostic t Diagnostics.Drain_redaction_failed);
-    match result.log with
-    | None -> ()
-    | Some log -> offer_drain_unredacted t drain log
+    | (Snapshot.Redaction.Unchanged | Snapshot.Redaction.Changed), false, None
+      ->
+        record_diagnostic t Diagnostics.Drain_redaction_failed
+    | ( (Snapshot.Redaction.Unchanged | Snapshot.Redaction.Changed),
+        false,
+        Some log ) ->
+        offer_drain_unredacted t drain log
+
+let route_and_offer_drain t drain ~schema_identity log =
+  if not (Drain.has_route drain) then offer_drain t drain ~schema_identity log
+  else
+    match
+      contain ~is_control_exception:t.is_control_exception (fun () ->
+          Drain.routed drain log)
+    with
+    | Returned true -> offer_drain t drain ~schema_identity log
+    | Returned false -> ()
+    | Raised -> record_diagnostic t Diagnostics.Routing_raised
 
 let dispatch_safe t ~schema_identity log =
   match (Atomic.get t.accepting, t.output) with
@@ -458,55 +621,80 @@ let dispatch_safe t ~schema_identity log =
       Option.iter
         (fun formatter -> format_and_offer_console t console formatter log)
         formatter;
-      List.iter (fun drain -> offer_drain t drain ~schema_identity log) drains
+      List.iter
+        (fun drain -> route_and_offer_drain t drain ~schema_identity log)
+        drains
   | false, (Capture _ | Outputs _) -> ()
 
-let dispatch t ?schema_identity log =
+let dispatch_retained t ~schema_identity ~sampling_basis ~retained_early log =
+  match t.output with
+  | Capture _ -> dispatch_safe t ~schema_identity log
+  | Outputs _ -> (
+      match Config.sampling t.config with
+      | None -> dispatch_safe t ~schema_identity log
+      | Some sampling ->
+          if retained_early || retained t sampling sampling_basis log then
+            dispatch_safe t ~schema_identity log
+          else record_sampling_discarded t)
+
+let dispatch t ?schema_identity ~sampling_basis ~retained_early log =
   if Atomic.get t.accepting then (
     let policy = Config.redaction t.config in
     if Log_redaction.Internal.is_none policy then
-      dispatch_safe t ~schema_identity log
+      dispatch_retained t ~schema_identity ~sampling_basis ~retained_early log
     else
       let result = redact_log t policy ~schema_identity log in
       record_global_redaction_diagnostics t result;
-      Option.iter (dispatch_safe t ~schema_identity) result.log)
+      Option.iter
+        (dispatch_retained t ~schema_identity ~sampling_basis ~retained_early)
+        result.log)
 
-let emit_point t ?correlation level author =
+let emit_point t ?operation level author =
   if admitted t level then
-    let correlation =
-      match correlation with
-      | Some _ as explicit -> explicit
-      | None -> (
-          match
-            contain ~is_control_exception:t.is_control_exception
-              t.resolve_operation
-          with
-          | Raised ->
-              record_diagnostic t Diagnostics.Operation_lookup_raised;
-              None
-          | Returned correlation -> correlation)
+    let resolve_after_authoring =
+      Option.is_none operation
+      && not (needs_operation_for_early_sampling t level)
     in
-    match
-      contain ~is_control_exception:t.is_control_exception (fun () ->
-          t.clock ())
-    with
-    | Raised -> record_diagnostic t Diagnostics.Clock_raised
-    | Returned (Error Io.Unavailable) ->
-        record_diagnostic t Diagnostics.Clock_unavailable
-    | Returned (Ok _) when not (Atomic.get t.accepting) ->
-        record_diagnostic t Diagnostics.Runtime_closed
-    | Returned (Ok timestamp) -> (
-        match evaluate_author t author with
-        | Raised -> record_diagnostic t Diagnostics.Message_evaluation_raised
-        | Returned (Error _) ->
-            record_diagnostic t Diagnostics.Canonical_freeze_failed
-        | Returned (Ok (body, schema_identity)) -> (
-            let body = enrich_event t body in
-            let kind = Log.Point { correlation } in
-            match create_log t level timestamp ~kind body with
-            | Ok log -> dispatch t ?schema_identity log
-            | Error _ -> record_diagnostic t Diagnostics.Canonical_freeze_failed
-            ))
+    let operation =
+      match operation with
+      | Some _ as operation -> operation
+      | None when not resolve_after_authoring -> resolve_point_operation t
+      | None -> None
+    in
+    let sampling_basis = sampling_basis_of_operation operation in
+    let early_decision = early_decision t sampling_basis level in
+    if early_decision = Discarded_early then record_sampling_discarded t
+    else
+      match
+        contain ~is_control_exception:t.is_control_exception (fun () ->
+            t.clock ())
+      with
+      | Raised -> record_diagnostic t Diagnostics.Clock_raised
+      | Returned (Error Io.Unavailable) ->
+          record_diagnostic t Diagnostics.Clock_unavailable
+      | Returned (Ok _) when not (Atomic.get t.accepting) ->
+          record_diagnostic t Diagnostics.Runtime_closed
+      | Returned (Ok timestamp) -> (
+          match evaluate_author t author with
+          | Raised -> record_diagnostic t Diagnostics.Message_evaluation_raised
+          | Returned (Error _) ->
+              record_diagnostic t Diagnostics.Canonical_freeze_failed
+          | Returned (Ok (body, schema_identity)) -> (
+              let body = enrich_event t body in
+              let operation =
+                if resolve_after_authoring then resolve_point_operation t
+                else operation
+              in
+              let sampling_basis = sampling_basis_of_operation operation in
+              let correlation = Option.bind operation operation_reference in
+              let kind = Log.Point { correlation } in
+              match create_log t level timestamp ~kind body with
+              | Ok log ->
+                  dispatch t ?schema_identity ~sampling_basis
+                    ~retained_early:(early_decision = Retained_early)
+                    log
+              | Error _ ->
+                  record_diagnostic t Diagnostics.Canonical_freeze_failed))
 
 type contribution =
   | Contribution of Snapshot.fragment * bool
@@ -518,8 +706,6 @@ type contribution =
    already active. The last reserved author claims [completing], after which
    all content is stable and can be published exactly once. No participant
    waits for a blocked callback or owns a spin lock. *)
-
-type annotations = { rev : Log.annotation list; count : int; bytes : int }
 
 let accepting = 0
 let closing = 1
@@ -536,23 +722,6 @@ let lifecycle_authors lifecycle = lifecycle lsr phase_bits
 let lifecycle_with_phase lifecycle phase =
   lifecycle land lnot phase_mask lor phase
 
-type wide = {
-  name : string;
-  origin : Log.structured_origin;
-  schema_identity : Schema.identity option;
-  engine : t option;
-  id : string option;
-  parent : Log.operation_reference option;
-  start_ns : int64 option;
-  lifecycle : int Atomic.t;
-  body : Snapshot.Object_accumulator.state Atomic.t;
-  explicit_level : Level.t option Atomic.t;
-  derived_level : Level.t Atomic.t;
-  annotations : annotations Atomic.t;
-}
-
-type current = Open of wide | Typed of wide * Schema.identity
-
 let empty_annotations = { rev = []; count = 0; bytes = 0 }
 
 let inert_wide () =
@@ -563,6 +732,7 @@ let inert_wide () =
     engine = None;
     id = None;
     parent = None;
+    sampling_basis = Independent;
     start_ns = None;
     lifecycle = Atomic.make finished;
     body = Atomic.make Snapshot.Object_accumulator.empty;
@@ -574,10 +744,7 @@ let inert_wide () =
 let contained_call t callback =
   contain ~is_control_exception:t.is_control_exception callback
 
-let wide_reference wide =
-  Option.map
-    (fun id -> Log.Producer.operation_reference ~name:wide.name ~id)
-    wide.id
+let wide_reference = operation_reference
 
 let wide_limits wide =
   match wide.engine with
@@ -651,14 +818,20 @@ let create_wide t ?parent ~name ~origin ?schema_identity () =
                     record_diagnostic t Diagnostics.Monotonic_clock_unavailable;
                     inert_wide ()
                 | Returned (Ok start_ns) ->
-                    let parent = Option.bind parent wide_reference in
+                    let parent_reference = Option.bind parent wide_reference in
+                    let sampling_basis =
+                      match parent with
+                      | None -> root_sampling_basis t
+                      | Some parent -> parent.sampling_basis
+                    in
                     {
                       name;
                       origin;
                       schema_identity;
                       engine = Some t;
                       id = Some id;
-                      parent;
+                      parent = parent_reference;
+                      sampling_basis;
                       start_ns = Some start_ns;
                       lifecycle = Atomic.make accepting;
                       body = Atomic.make Snapshot.Object_accumulator.empty;
@@ -739,50 +912,59 @@ let complete_wide wide engine =
       let body =
         Snapshot.Object_accumulator.as_fragment (Atomic.get wide.body)
       in
-      let annotations = List.rev (Atomic.get wide.annotations).rev in
       let level =
         match Atomic.get wide.explicit_level with
         | Some level -> level
         | None -> Atomic.get wide.derived_level
       in
-      match contained_call engine engine.monotonic_now with
-      | Raised -> record_diagnostic engine Diagnostics.Monotonic_clock_raised
-      | Returned (Error Io.Unavailable) ->
-          record_diagnostic engine Diagnostics.Monotonic_clock_unavailable
-      | Returned (Ok end_ns) -> (
-          match contained_call engine engine.clock with
-          | Raised -> record_diagnostic engine Diagnostics.Clock_raised
+      if admitted engine level then
+        let early_decision = early_decision engine wide.sampling_basis level in
+        if early_decision = Discarded_early then
+          record_sampling_discarded engine
+        else
+          match contained_call engine engine.monotonic_now with
+          | Raised ->
+              record_diagnostic engine Diagnostics.Monotonic_clock_raised
           | Returned (Error Io.Unavailable) ->
-              record_diagnostic engine Diagnostics.Clock_unavailable
-          | Returned (Ok timestamp) -> (
-              if admitted engine level then
-                match (wide.id, wide.start_ns) with
-                | Some id, Some start_ns -> (
-                    let body = enrich_fields engine body in
-                    let duration_ns =
-                      if Int64.compare end_ns start_ns < 0 then 0L
-                      else Int64.sub end_ns start_ns
-                    in
-                    let operation =
-                      Log.Producer.operation ~name:wide.name ~id
-                        ?parent:wide.parent ~duration_ns ()
-                    in
-                    match
-                      contained_call engine (fun () ->
-                          create_log engine level timestamp
-                            ~kind:(Log.Wide { operation; annotations })
-                            (Log.Producer.Structured
-                               { origin = wide.origin; fields = body }))
-                    with
-                    | Raised | Returned (Error _) ->
-                        record_diagnostic engine
-                          Diagnostics.Canonical_freeze_failed
-                    | Returned (Ok log) ->
-                        dispatch engine ?schema_identity:wide.schema_identity
-                          log)
-                | None, _ | _, None ->
-                    record_diagnostic engine Diagnostics.Canonical_freeze_failed
-              )))
+              record_diagnostic engine Diagnostics.Monotonic_clock_unavailable
+          | Returned (Ok end_ns) -> (
+              match contained_call engine engine.clock with
+              | Raised -> record_diagnostic engine Diagnostics.Clock_raised
+              | Returned (Error Io.Unavailable) ->
+                  record_diagnostic engine Diagnostics.Clock_unavailable
+              | Returned (Ok timestamp) -> (
+                  match (wide.id, wide.start_ns) with
+                  | Some id, Some start_ns -> (
+                      let body = enrich_fields engine body in
+                      let duration_ns =
+                        if Int64.compare end_ns start_ns < 0 then 0L
+                        else Int64.sub end_ns start_ns
+                      in
+                      let operation =
+                        Log.Producer.operation ~name:wide.name ~id
+                          ?parent:wide.parent ~duration_ns ()
+                      in
+                      let annotations =
+                        List.rev (Atomic.get wide.annotations).rev
+                      in
+                      match
+                        contained_call engine (fun () ->
+                            create_log engine level timestamp
+                              ~kind:(Log.Wide { operation; annotations })
+                              (Log.Producer.Structured
+                                 { origin = wide.origin; fields = body }))
+                      with
+                      | Raised | Returned (Error _) ->
+                          record_diagnostic engine
+                            Diagnostics.Canonical_freeze_failed
+                      | Returned (Ok log) ->
+                          dispatch engine ?schema_identity:wide.schema_identity
+                            ~sampling_basis:wide.sampling_basis
+                            ~retained_early:(early_decision = Retained_early)
+                            log)
+                  | None, _ | _, None ->
+                      record_diagnostic engine
+                        Diagnostics.Canonical_freeze_failed)))
 
 let release_reserved_author wide engine =
   let rec release () =

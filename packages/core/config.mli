@@ -25,6 +25,8 @@ val create :
   ?enrichers:Log_enricher.t list ->
   ?limits:Log_limits.t ->
   ?redaction:Log_redaction.t ->
+  ?sampling:Log_sampling.t ->
+  ?retention:Log_retention.t ->
   unit ->
   (t, error) result
 (** Construct validated logging behavior.
@@ -34,7 +36,7 @@ val create :
     absent, [dev], or [development], and NDJSON otherwise. [Pretty], [Ndjson],
     and [Silent] override that selection. Other defaults are [enabled=true],
     [console=Auto], [min_level=Info], no drains, no enrichers, and finite
-    default logging limits. *)
+    default logging limits, no sampling, and no completion retention. *)
 
 val create_exn :
   service:string ->
@@ -47,6 +49,8 @@ val create_exn :
   ?enrichers:Log_enricher.t list ->
   ?limits:Log_limits.t ->
   ?redaction:Log_redaction.t ->
+  ?sampling:Log_sampling.t ->
+  ?retention:Log_retention.t ->
   unit ->
   t
 (** Like {!create}, but raises [Invalid_configuration error]. *)
@@ -61,4 +65,6 @@ val drains : t -> Drain.t list
 val enrichers : t -> Log_enricher.t list
 val limits : t -> Log_limits.t
 val redaction : t -> Log_redaction.t
+val sampling : t -> Log_sampling.t option
+val retention : t -> Log_retention.t option
 val pp_error : Format.formatter -> error -> unit

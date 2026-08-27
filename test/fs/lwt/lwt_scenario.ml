@@ -9,6 +9,8 @@ let install drain =
       ~clock:(fun () -> Ok (Observe.Timestamp.of_unix_ns 0L))
       ~monotonic_now:(fun () -> Ok 0L)
       ~next_id:(fun () -> Ok "filesystem-operation")
+      ~sampling_draw:(fun () -> 0.)
+      ~create_stable_sampling_draw:(fun () -> fun () -> 0.)
       ~console_style:(fun () -> Observe.Formatter.Plain)
       ~offer_console:(fun _ -> Observe.IO.Rejected)
       ~can_lookup_context:(fun () -> true)

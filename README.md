@@ -33,6 +33,7 @@ operation without becoming part of its accumulated event.
 - Deterministic scoped capture for tests.
 - One bounded immutable completed observation shared by capture and every
   output branch.
+- Per-level base sampling, completion-aware retention, and safe drain routing.
 - A portable completed-I/O contract, plus a ready Lwt-Unix initializer.
 - Bounded daily NDJSON files through portable, Lwt, and ready Lwt-Unix
   filesystem packages.
@@ -302,6 +303,90 @@ choose a winner. If a dynamic matcher conflict or traversal failure remains at
 runtime, only the affected value or destination branch is failed closed and a
 bounded diagnostic is recorded; the raw observation is never delivered.
 
+## Sampling, retention, and routing
+
+Sampling is process configuration, not a logging-call option. Omitted sampling
+is inert. Within a configured policy, omitted levels retain every log, so
+`Error` remains at 100 percent unless explicitly changed:
+
+```ocaml
+module Sampling = Observe.Logs.Sampling
+
+let sampling =
+  Sampling.create
+    ~debug:(Sampling.Rate.percent_exn 5.)
+    ~info:(Sampling.Rate.percent_exn 25.)
+    ~warn:(Sampling.Rate.percent_exn 75.)
+    ~stability:Sampling.Correlation_stable
+    ()
+```
+
+`Correlation_stable` gives a parent wide log, its children, and correlated
+point logs the same base draw. They remain independent observations: different
+levels can compare that draw with different rates, and completion policy can
+rescue one without rescuing the others.
+
+Completion-aware retention sees one bounded log after the configured global
+redaction floor. Returning `true` rescues it before fan-out; returning `false`
+defers to base sampling and does not force a drop:
+
+```ocaml
+let retention =
+  Observe.Logs.Retention.create ~keep:(fun log ->
+      let slow_operation =
+        match Observe.Log.kind log with
+        | Observe.Log.Point _ -> false
+        | Observe.Log.Wide { operation; _ } ->
+            Int64.compare
+              (Observe.Log.operation_duration_ns operation)
+              500_000_000L >= 0
+      in
+      let priority_customer =
+        Observe.Value.find ["customer"; "priority"]
+          (Observe.Log.fields log)
+        |> Option.map Observe.Value.view
+        = Some (`Bool true)
+      in
+      slow_operation || priority_customer)
+```
+
+Routes select drains from that same safe immutable log. A destination may then
+strengthen redaction on its private branch:
+
+```ocaml
+let accept _ = Observe.Drain.Accepted
+let error_drain = Observe.Drain.create accept
+let analytics_drain = Observe.Drain.create accept
+
+let errors =
+  error_drain
+  |> Observe.Drain.with_route ~when_:(fun log ->
+         Observe.Level.equal (Observe.Log.level log) Observe.Level.Error)
+
+let restricted_analytics =
+  analytics_drain
+  |> Observe.Drain.with_route ~when_:(fun log ->
+         Option.is_some
+           (Observe.Value.find ["customer"] (Observe.Log.fields log)))
+  |> Observe.Drain.with_redaction ~redaction:restricted_policy
+
+let config =
+  Observe.Config.create_exn ~service:"orders"
+    ~sampling ~retention
+    ~drains:[errors; restricted_analytics]
+    ()
+```
+
+Ordinary point and wide authoring does not change. Level filtering remains the
+cheapest rejection. Base sampling can reject a point before its author callback
+runs when no completion policy is configured. Ordinary exceptions from
+completion policy and routes are contained; retention fails open, while a
+failing route skips only its drain. Route and drain callbacks run synchronously,
+may run concurrently for different observations, and must promptly return.
+Runtime control exceptions remain native. Scoped capture bypasses probabilistic
+retention and external routing but still applies level admission, finite
+materialization, and global redaction, which keeps tests deterministic.
+
 Identity generation is configured at the Unix composition boundary, not in the
 portable core:
 
@@ -318,6 +403,11 @@ let () =
 
 The callback is mainly useful for deterministic tests or an existing identity
 policy. Omitting it keeps the secure Unix UUID v4 default.
+
+The Unix runtime also owns the default random sampling source. Tests can pass
+`~sampling_draw` to `Observe_lwt_unix.init_exn`; the callback must promptly
+return a finite value in `[0, 1)`. Observe serializes custom draws. An invalid
+or raising draw is diagnosed and fails open for that observation.
 
 `Observe.Config.Auto` uses pretty output for an absent, `dev`, or `development`
 environment and NDJSON otherwise. Set `~console:Observe.Config.Pretty`,
@@ -385,8 +475,10 @@ Observe.Logs.info (fun m ->
   m.text ~tag:"auth" "user logged in")
 ```
 
-The callback runs only after route and level admission. Formatted text remains
-type-safe, and rejected logs do not evaluate their formatting arguments:
+The callback runs only after an active output path and level admission. A route
+predicate intentionally runs later because it inspects the completed safe log.
+Formatted text remains type-safe, and logs rejected early do not evaluate their
+formatting arguments:
 
 ```ocaml
 [%observe.debug text ~tag:"query" "%s" (explain_query query)]
@@ -782,17 +874,12 @@ Structured values can be traversed without parsing their JSON projection:
 
 ```ocaml
 let cart_id log =
-  let fields =
-    match Observe.Value.view (Observe.Log.fields log) with
-    | `Object fields | `Truncated_object (fields, _) -> fields
-    | _ -> []
-  in
-  List.find_map
-    (fun (name, value) ->
-      match name, Observe.Value.view value with
-      | "cart_id", `String id -> Some id
+  Option.bind
+    (Observe.Value.find ["cart_id"] (Observe.Log.fields log))
+    (fun value ->
+      match Observe.Value.view value with
+      | `String id -> Some id
       | _ -> None)
-    fields
 ```
 
 A third-party formatter or drain receives this same public immutable value:

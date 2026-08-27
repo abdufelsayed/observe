@@ -12,19 +12,33 @@ type id_generator = unit -> string
     Raised exceptions and invalid results are contained and diagnosed; the
     affected operation is not published. *)
 
+type sampling_draw = unit -> float
+(** A synchronous source of independent probabilistic draws. Each call must
+    return a finite value greater than or equal to zero and less than one.
+    Observe serializes a configured custom source. Raised exceptions and invalid
+    results are contained and cause the affected log to be retained. A source
+    that recursively emits a sampled Observe log is rejected instead of
+    deadlocking. *)
+
 val init :
   ?id_generator:id_generator ->
+  ?sampling_draw:sampling_draw ->
   Observe.Config.t ->
   (unit, Observe.init_error) result
 (** Install the process-wide Observe engine with Lwt dynamic context, the OS
     wall clock, cryptographically random UUID v4 operation identities, and
-    automatic standard-error output. A custom generator replaces only operation
-    identity and is useful for deterministic tests or an application-specific
-    identity policy. Importing this package allocates no writer or background
-    work. See {!type:id_generator} for its contract. Returns
-    [Error Runtime_closed] after shutdown has begun. *)
+    automatic standard-error output. Configured sampling uses runtime-owned
+    random draws. Custom identity and sampling sources are useful for
+    deterministic tests or application-specific policy. Importing this package
+    allocates no writer or background work. See {!type:id_generator} and
+    {!type:sampling_draw} for their contracts. Returns [Error Runtime_closed]
+    after shutdown has begun. *)
 
-val init_exn : ?id_generator:id_generator -> Observe.Config.t -> unit
+val init_exn :
+  ?id_generator:id_generator ->
+  ?sampling_draw:sampling_draw ->
+  Observe.Config.t ->
+  unit
 (** Like {!init}, but raises [Observe.Init_error] on failure. *)
 
 val with_operation :
