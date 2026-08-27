@@ -73,6 +73,9 @@ let create ?capacity () =
   | Ok writer -> writer
   | Error error -> fail "create failed: %a" Writer.pp_error error
 
+let check_facts writer expected message =
+  check (Writer.delivery_facts writer = expected) "%s" message
+
 let emit tag message = Observe.Logs.info (fun m -> m.text ~tag "%s" message)
 
 let daily () =
@@ -304,6 +307,7 @@ let coalesced_writes () =
 
 let failure () =
   let writer = create () in
+  check_facts writer Writer.No_problem "new writer reported delivery problems";
   let independent = ref 0 in
   let independent_drain =
     Observe.Drain.create (fun _ ->
@@ -319,11 +323,15 @@ let failure () =
   emit "failure" "fail";
   let outcome = Lwt_main.run (Writer.flush writer) in
   check (Result.is_error outcome) "write failure did not fail flush";
+  check_facts writer Writer.Delivery_lost
+    "write failure did not report accepted delivery loss";
   check
     (diagnostic_count Observe.Diagnostics.Drain_delivery_failed
     = failed_before + 1)
     "asynchronous failure was not diagnosed exactly once";
   emit "later" "reject";
+  check_facts writer Writer.Rejected_and_lost
+    "post-failure rejection did not combine with delivery loss";
   check
     (diagnostic_count Observe.Diagnostics.Drain_rejected = rejected_before + 1)
     "failed writer accepted a later record";
@@ -345,7 +353,15 @@ let failure_zero_progress () =
   expect_failure (fun () -> Observe_fs_test_support.Fs_fixture.set_max_write 0)
 
 let failure_flush () =
-  expect_failure Observe_fs_test_support.Fs_fixture.fail_next_flush
+  let writer = create () in
+  install [ 0L ] (Writer.drain writer);
+  Observe_fs_test_support.Fs_fixture.fail_next_flush ();
+  emit "failure" "fail";
+  check
+    (Result.is_error (Lwt_main.run (Writer.flush writer)))
+    "flush failure did not settle with an error";
+  check_facts writer Writer.No_problem
+    "flush failure falsely classified completed writes as lost"
 
 let failure_close () =
   let writer = create () in
@@ -354,7 +370,9 @@ let failure_close () =
   Observe_fs_test_support.Fs_fixture.fail_next_close ();
   check
     (Result.is_error (Lwt_main.run (Writer.shutdown writer)))
-    "close failure did not settle shutdown with an error"
+    "close failure did not settle shutdown with an error";
+  check_facts writer Writer.No_problem
+    "close failure falsely classified completed writes as lost"
 
 let invalid_write_count () =
   let writer = create () in
@@ -376,6 +394,8 @@ let projection_failure_releases_capacity () =
   check
     (diagnostic_count Observe.Diagnostics.Drain_raised = raised_before + 1)
     "path projection failure did not escape through the drain boundary";
+  check_facts writer Writer.Rejected
+    "projection exception did not record pre-acceptance rejection";
   emit "after-projection" "accepted";
   Lwt_main.run (Writer.shutdown writer) |> Result.get_ok;
   let output =

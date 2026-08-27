@@ -70,9 +70,30 @@ Shutdown first closes production admission, then drains accepted output work.
 It is terminal and idempotent, including when called before initialization.
 Official filesystem workers register with the same lifecycle, so these calls
 cover console and daily-file records accepted before their barriers. The
-{!module:Observe_lwt_unix.Lifecycle} module registers independently installed
-outputs; the filesystem package uses the same lifecycle when its drain is
-configured.
+ordinary calls use a finite 30-second caller wait and raise
+{!exception:Observe_lwt_unix.Lifecycle.Incomplete} when a participant rejects,
+loses, fails, or remains unresolved. A timeout stops only that caller's wait;
+the shared output work continues.
+
+{!module:Observe_lwt_unix.Lifecycle} is the advanced reporting surface. Its
+[flush] and [shutdown] return an abstract report with bounded, named problems:
+
+{[
+let within =
+  Observe_lwt_unix.Lifecycle.Duration.create_exn ~seconds:5.
+in
+let* report = Observe_lwt_unix.Lifecycle.shutdown ~within () in
+if not (Observe_lwt_unix.Lifecycle.complete report) then
+  inspect (Observe_lwt_unix.Lifecycle.problems report)
+]}
+
+An immediate custom output remains an {!Observe.Drain.t} and needs no lifecycle
+registration. An independently installed asynchronous output that really owns
+a worker and cleanup can use {!Observe_lwt_unix.Lifecycle.Integration} to
+register its finite cumulative rejection/loss facts plus flush and shutdown
+hooks. Independent flush boundaries can overlap; integration callbacks must be
+prompt and concurrency-safe. The ready filesystem package uses this seam
+internally while still returning its drain directly.
 
 {1 Operations}
 

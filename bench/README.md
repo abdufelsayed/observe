@@ -80,7 +80,11 @@ amortized. Report schema version 3 adds this field.
   wide JSON and pretty scenarios use the same worker and flush boundary. The
   stable-sampling fan-in probe is the exception: it uses a silent immediate
   drain and no flush so it isolates repeated access to one runtime-owned
-  correlation decision.
+  correlation decision. Lifecycle probes separately measure an empty flush, a
+  settled output hook, finite rejection/loss report construction, and the
+  idempotent already-settled shutdown path. The harness cannot repeatedly
+  measure first shutdown in one process because shutdown is intentionally
+  terminal; correctness and stress tests cover that transition instead.
 - `fs-lwt-unix` writes to a fresh temporary directory through the ready
   filesystem package. `completed` scenarios include one log and one shared
   lifecycle flush. `batch-100` scenarios write 100 logs and flush once; their

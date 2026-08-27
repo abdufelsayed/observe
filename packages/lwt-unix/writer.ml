@@ -1,4 +1,11 @@
 type offer = Accepted | Full | Closed
+
+type delivery_facts =
+  | No_problem
+  | Rejected
+  | Delivery_lost
+  | Rejected_and_lost
+
 type status = Running | Closing | Stopped of exn option
 
 type t = {
@@ -9,7 +16,8 @@ type t = {
   mutable accepted_sequence : int64;
   mutable completed_sequence : int64;
   mutable status : status;
-  mutable active : bool;
+  mutable rejected : bool;
+  mutable delivery_lost : bool;
   mutable worker_waiter : unit Lwt.u option;
   mutable notification_pending : bool;
   mutable flush_waiters : (int64 * unit Lwt.u) list;
@@ -82,7 +90,7 @@ let close_with_error t exn =
   let flush_waiters, shutdown =
     with_lock t (fun () ->
         t.status <- Stopped (Some exn);
-        t.active <- false;
+        t.delivery_lost <- true;
         Queue.clear t.queue;
         let waiters = t.flush_waiters in
         t.flush_waiters <- [];
@@ -108,11 +116,8 @@ let rec worker t =
   let next =
     with_lock t (fun () ->
         match Queue.take_opt t.queue with
-        | Some record ->
-            t.active <- true;
-            `Record record
+        | Some record -> `Record record
         | None -> (
-            t.active <- false;
             match t.status with
             | Closing -> `Close
             | Stopped _ -> `Stop
@@ -129,9 +134,7 @@ let rec worker t =
            (fun exn -> Lwt.return (Error exn)))
         (function
           | Ok () ->
-              with_lock t (fun () ->
-                  t.active <- false;
-                  t.completed_sequence <- sequence);
+              with_lock t (fun () -> t.completed_sequence <- sequence);
               complete_waiters t;
               worker t
           | Error exn ->
@@ -157,7 +160,8 @@ let create ~capacity descriptor =
       accepted_sequence = 0L;
       completed_sequence = 0L;
       status = Running;
-      active = false;
+      rejected = false;
+      delivery_lost = false;
       worker_waiter = None;
       notification_pending = false;
       flush_waiters = [];
@@ -185,8 +189,12 @@ let offer t record =
   let result =
     with_lock t (fun () ->
         match t.status with
-        | Closing | Stopped _ -> Closed
-        | Running when Queue.length t.queue >= t.capacity -> Full
+        | Closing | Stopped _ ->
+            t.rejected <- true;
+            Closed
+        | Running when Queue.length t.queue >= t.capacity ->
+            t.rejected <- true;
+            Full
         | Running ->
             let sequence = Int64.succ t.accepted_sequence in
             Queue.add (sequence, record) t.queue;
@@ -195,6 +203,14 @@ let offer t record =
   in
   (match result with Accepted -> notify t | Full | Closed -> ());
   result
+
+let delivery_facts t =
+  with_lock t (fun () ->
+      match (t.rejected, t.delivery_lost) with
+      | false, false -> No_problem
+      | true, false -> Rejected
+      | false, true -> Delivery_lost
+      | true, true -> Rejected_and_lost)
 
 let flush t =
   with_lock t (fun () ->

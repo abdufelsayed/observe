@@ -67,7 +67,7 @@ let with_directory callback =
       if Sys.file_exists root then remove root)
     (fun () -> callback root)
 
-let install timestamps drain =
+let install_drains timestamps drains =
   let timestamps = ref timestamps in
   let clock () =
     match !timestamps with
@@ -90,7 +90,9 @@ let install timestamps drain =
   let observer = Observer.create io in
   Observer.init_exn observer
     (Observe.Config.create_exn ~service:"ready-fs"
-       ~console:Observe.Config.Silent ~drains:[ drain ] ())
+       ~console:Observe.Config.Silent ~drains ())
+
+let install timestamps drain = install_drains timestamps [ drain ]
 
 let daily () =
   with_directory (fun root ->
@@ -186,7 +188,9 @@ let concurrency () =
               ())
       in
       List.iter Thread.join threads;
-      Lwt_main.run (Observe_lwt_unix.shutdown ());
+      ignore
+        (Lwt_main.run (Observe_lwt_unix.Lifecycle.shutdown ())
+          : Observe_lwt_unix.Lifecycle.report);
       let files = Sys.readdir root in
       check (Array.length files = 1) "concurrent output selected extra files";
       let output = read_file (Filename.concat root files.(0)) in
@@ -244,7 +248,9 @@ let bounded_concurrency () =
               ())
       in
       List.iter Thread.join threads;
-      Lwt_main.run (Observe_lwt_unix.shutdown ());
+      ignore
+        (Lwt_main.run (Observe_lwt_unix.Lifecycle.shutdown ())
+          : Observe_lwt_unix.Lifecycle.report);
       let rejected =
         diagnostic_count Observe.Diagnostics.Drain_rejected - rejected_before
       in
@@ -265,6 +271,48 @@ let bounded_concurrency () =
          <> %d"
         written rejected total)
 
+let distinct_lifecycle_identities () =
+  with_directory (fun root ->
+      let first =
+        Lwt_main.run
+          (Observe_fs_lwt_unix.create_exn
+             ~dir:(Filename.concat root "first")
+             ~capacity:1 ())
+      in
+      let second =
+        Lwt_main.run
+          (Observe_fs_lwt_unix.create_exn
+             ~dir:(Filename.concat root "second")
+             ~capacity:1 ())
+      in
+      install_drains [ 0L; 1L ] [ first; second ];
+      Observe.Logs.info (text ~tag:"first" "accepted");
+      Observe.Logs.info (text ~tag:"second" "rejected");
+      let report = Lwt_main.run (Observe_lwt_unix.Lifecycle.flush ()) in
+      let outputs =
+        Observe_lwt_unix.Lifecycle.problems report
+        |> List.filter_map (function
+          | Observe_lwt_unix.Lifecycle.Rejected { output } -> Some output
+          | _ -> None)
+      in
+      check
+        (List.length outputs = 2)
+        "two ready filesystem rejections collapsed into %d lifecycle entries"
+        (List.length outputs);
+      (match outputs with
+      | [ first; second ] ->
+          check
+            (not (String.equal first second))
+            "ready filesystem outputs shared lifecycle identity %S" first;
+          check
+            (String.starts_with ~prefix:"filesystem-" first
+            && String.starts_with ~prefix:"filesystem-" second)
+            "ready filesystem identities were not generated labels"
+      | _ -> assert false);
+      ignore
+        (Lwt_main.run (Observe_lwt_unix.Lifecycle.shutdown ())
+          : Observe_lwt_unix.Lifecycle.report))
+
 let () =
   match Array.to_list Sys.argv with
   | [ _; "daily" ] -> daily ()
@@ -273,4 +321,5 @@ let () =
   | [ _; "lifecycle-closed" ] -> lifecycle_closed ()
   | [ _; "concurrency" ] -> concurrency ()
   | [ _; "bounded-concurrency" ] -> bounded_concurrency ()
+  | [ _; "distinct-lifecycle-identities" ] -> distinct_lifecycle_identities ()
   | _ -> fail "unknown ready filesystem scenario"

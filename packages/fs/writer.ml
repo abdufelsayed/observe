@@ -10,6 +10,13 @@ module Make (IO : Io.S) = struct
   type record = { sequence : int64; path : string; bytes : string }
   type write = { path : string; bytes : string; length : int; through : int64 }
   type status = Running | Closing | Failed of error | Stopped
+
+  type delivery_facts =
+    | No_problem
+    | Rejected
+    | Delivery_lost
+    | Rejected_and_lost
+
   type write_buffer = { mutable bytes : Bytes.t; mutable view : string }
 
   type state = {
@@ -26,7 +33,8 @@ module Make (IO : Io.S) = struct
     mutable flush_barriers : int64 list;
     mutable flushed_sequence : int64;
     mutable status : status;
-    mutable terminal_error : error option;
+    mutable rejected : bool;
+    mutable delivery_lost : bool;
     mutable current_file : (string * IO.file) option;
     mutable worker_waiting : bool;
     write_buffer : write_buffer;
@@ -101,8 +109,9 @@ module Make (IO : Io.S) = struct
     match t.current_file with
     | None -> IO.return (Ok ())
     | Some (_, file) ->
+        (* A failed close has ambiguous ownership; never retry that handle. *)
+        t.current_file <- None;
         let* outcome = attempt (fun () -> IO.close file) in
-        (match outcome with Ok () -> t.current_file <- None | Error _ -> ());
         IO.return outcome
 
   let flush_current t =
@@ -159,7 +168,10 @@ module Make (IO : Io.S) = struct
           | Failed _ | Stopped -> false
           | Running | Closing ->
               t.status <- Failed error;
-              t.terminal_error <- Some error;
+              if
+                Queue.length t.queue > 0
+                || Int64.compare t.accepted_sequence t.completed_sequence > 0
+              then t.delivery_lost <- true;
               Queue.clear t.queue;
               true)
     in
@@ -298,18 +310,22 @@ module Make (IO : Io.S) = struct
   let reserve_projection t =
     IO.with_lock t.lock (fun () ->
         match t.status with
-        | Closing | Failed _ | Stopped -> false
+        | Closing | Failed _ | Stopped ->
+            t.rejected <- true;
+            false
         | Running when Queue.length t.queue + t.projecting >= t.capacity ->
+            t.rejected <- true;
             false
         | Running ->
             t.projecting <- t.projecting + 1;
             true)
 
-  let release_projection t =
+  let reject_projection t =
     let should_notify =
       IO.with_lock t.lock (fun () ->
           assert (t.projecting > 0);
           t.projecting <- t.projecting - 1;
+          t.rejected <- true;
           let should_notify = t.worker_waiting in
           if should_notify then t.worker_waiting <- false;
           should_notify)
@@ -322,6 +338,7 @@ module Make (IO : Io.S) = struct
         match t.status with
         | Closing | Failed _ | Stopped ->
             t.projecting <- t.projecting - 1;
+            t.rejected <- true;
             let should_notify = t.worker_waiting in
             if should_notify then t.worker_waiting <- false;
             (false, should_notify)
@@ -352,7 +369,7 @@ module Make (IO : Io.S) = struct
     else
       match project t log with
       | None ->
-          release_projection t;
+          reject_projection t;
           Observe.Drain.Rejected
       | Some (path, bytes) -> (
           match commit_projection t ~path ~bytes with
@@ -362,28 +379,34 @@ module Make (IO : Io.S) = struct
               else Observe.Drain.Rejected
           | exception raised ->
               let backtrace = Printexc.get_raw_backtrace () in
-              release_projection t;
+              reject_projection t;
               Printexc.raise_with_backtrace raised backtrace)
       | exception raised ->
           let backtrace = Printexc.get_raw_backtrace () in
-          release_projection t;
+          reject_projection t;
           Printexc.raise_with_backtrace raised backtrace
 
   let drain t = t.drain
 
+  let delivery_facts t =
+    IO.with_lock t.state.lock (fun () ->
+        match (t.state.rejected, t.state.delivery_lost) with
+        | false, false -> No_problem
+        | true, false -> Rejected
+        | false, true -> Delivery_lost
+        | true, true -> Rejected_and_lost)
+
   let rec flush_through t target =
     let state =
       IO.with_lock t.lock (fun () ->
-          match (t.status, t.terminal_error) with
-          | Failed error, _ -> `Error error
-          | _, Some error -> `Error error
-          | Stopped, None when Int64.compare t.flushed_sequence target >= 0 ->
-              `Done
-          | Stopped, None -> `Done
-          | (Running | Closing), None
+          match t.status with
+          | Failed error -> `Error error
+          | Stopped when Int64.compare t.flushed_sequence target >= 0 -> `Done
+          | Stopped -> `Done
+          | (Running | Closing)
             when Int64.compare t.flushed_sequence target >= 0 ->
               `Done
-          | (Running | Closing), None ->
+          | Running | Closing ->
               if not (List.exists (Int64.equal target) t.flush_barriers) then
                 t.flush_barriers <- target :: t.flush_barriers;
               `Wait (IO.await t.progress_notifier))
@@ -404,11 +427,10 @@ module Make (IO : Io.S) = struct
   let rec wait_for_shutdown t =
     let state =
       IO.with_lock t.lock (fun () ->
-          match (t.status, t.terminal_error) with
-          | Failed error, _ -> `Error error
-          | _, Some error -> `Error error
-          | Stopped, None -> `Done
-          | Running, None ->
+          match t.status with
+          | Failed error -> `Error error
+          | Stopped -> `Done
+          | Running ->
               t.status <- Closing;
               if
                 Int64.compare t.accepted_sequence t.flushed_sequence > 0
@@ -418,7 +440,7 @@ module Make (IO : Io.S) = struct
                         t.flush_barriers)
               then t.flush_barriers <- t.accepted_sequence :: t.flush_barriers;
               `Wait (IO.await t.progress_notifier)
-          | Closing, None -> `Wait (IO.await t.progress_notifier))
+          | Closing -> `Wait (IO.await t.progress_notifier))
     in
     match state with
     | `Done -> IO.return (Ok ())
@@ -454,7 +476,8 @@ module Make (IO : Io.S) = struct
               flush_barriers = [];
               flushed_sequence = 0L;
               status = Running;
-              terminal_error = None;
+              rejected = false;
+              delivery_lost = false;
               current_file = None;
               worker_waiting = false;
               write_buffer = create_write_buffer ();

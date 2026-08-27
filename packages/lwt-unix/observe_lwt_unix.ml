@@ -259,6 +259,7 @@ module Observer = Observe.Make (Observe_lwt.IO)
 
 type hook = {
   identity : Writer_registry.identity;
+  facts : unit -> Writer_registry.delivery_facts;
   flush : unit -> unit Lwt.t;
   shutdown : unit -> unit Lwt.t;
 }
@@ -277,8 +278,8 @@ type lifecycle =
   | Fresh of hook list
   | Prepared of context * hook list
   | Running of runtime
-  | Closing of context * unit Lwt.t
-  | Closed of context * (unit, exn) result
+  | Closing of context * Writer_registry.t
+  | Closed of context * (Writer_registry.report, exn) result
 
 let lifecycle = ref (Fresh [])
 let lifecycle_lock = Mutex.create ()
@@ -287,8 +288,15 @@ let with_lifecycle callback =
   Mutex.lock lifecycle_lock;
   Fun.protect ~finally:(fun () -> Mutex.unlock lifecycle_lock) callback
 
-let create_hook ~flush ~shutdown =
-  { identity = Writer_registry.create_identity (); flush; shutdown }
+let create_hook ?name
+    ?(facts = fun () -> Writer_registry.Delivery_facts.No_problem) ~flush
+    ~shutdown () =
+  {
+    identity = Writer_registry.create_identity ?name ();
+    facts;
+    flush;
+    shutdown;
+  }
 
 let create_context () =
   let identity = Identity.create () in
@@ -315,20 +323,31 @@ let create_context () =
 
 let register_hook writers (hook : hook) =
   match
-    Writer_registry.register writers ~identity:hook.identity ~flush:hook.flush
-      ~shutdown:hook.shutdown
+    Writer_registry.register_integration writers
+      ~label:(Writer_registry.identity_name hook.identity)
+      ~facts:hook.facts ~flush:hook.flush ~shutdown:hook.shutdown
   with
   | Ok () -> ()
-  | Error Closed -> assert false
+  | Error (Writer_registry.Closed | Writer_registry.Invalid_label) ->
+      assert false
 
 let create_registry ?writer pending =
   let writers = Writer_registry.create () in
   Option.iter
     (fun writer ->
+      let facts () =
+        match Writer.delivery_facts writer with
+        | Writer.No_problem -> Writer_registry.Delivery_facts.No_problem
+        | Writer.Rejected -> Writer_registry.Delivery_facts.Rejected
+        | Writer.Delivery_lost -> Writer_registry.Delivery_facts.Delivery_lost
+        | Writer.Rejected_and_lost ->
+            Writer_registry.Delivery_facts.Rejected_and_lost
+      in
       register_hook writers
-        (create_hook
+        (create_hook ~name:"console" ~facts
            ~flush:(fun () -> Writer.flush writer)
-           ~shutdown:(fun () -> Writer.shutdown writer)))
+           ~shutdown:(fun () -> Writer.shutdown writer)
+           ()))
     writer;
   List.iter (register_hook writers) (List.rev pending);
   writers
@@ -429,9 +448,29 @@ let fork ~name ?using ?error callback =
   | Some context -> Observer.fork context.observer ~name ?using ?error callback
   | None -> raise (Observe.Logs.Current_error Observe.Logs.Not_bound)
 
-let result_promise = function
-  | Ok () -> Lwt.return_unit
-  | Error raised -> Lwt.fail raised
+exception Lifecycle_incomplete of Writer_registry.report
+
+let result_promise report =
+  if Writer_registry.report_complete report then Lwt.return_unit
+  else Lwt.fail (Lifecycle_incomplete report)
+
+let protected_result promise = Lwt.bind (Lwt.protected promise) result_promise
+
+let start_global_shutdown context writers =
+  let report = Writer_registry.shutdown_report writers in
+  let settle outcome =
+    with_lifecycle (fun () ->
+        match !lifecycle with
+        | Closing (current, _) when current == context ->
+            lifecycle := Closed (context, outcome)
+        | Fresh _ | Prepared _ | Running _ | Closing _ | Closed _ -> ())
+  in
+  Lwt.on_any report
+    (fun report -> settle (Ok report))
+    (fun exn -> settle (Error exn));
+  report
+
+let default_lifecycle_duration = 30.0
 
 let flush () =
   let action =
@@ -439,59 +478,180 @@ let flush () =
         match !lifecycle with
         | Fresh pending | Prepared (_, pending) -> `Pending pending
         | Running runtime -> `Registry runtime.writers
-        | Closing (_, promise) -> `Promise promise
+        | Closing (_, writers) -> `Closing writers
         | Closed (_, outcome) -> `Outcome outcome)
   in
   match action with
-  | `Pending pending -> Writer_registry.flush (create_registry pending)
-  | `Registry writers -> Writer_registry.flush writers
-  | `Promise promise -> Lwt.protected promise
-  | `Outcome outcome -> result_promise outcome
-
-let settle_shutdown context promise wakener work =
-  Lwt.on_any work
-    (fun () ->
-      with_lifecycle (fun () -> lifecycle := Closed (context, Ok ()));
-      Lwt.wakeup_later wakener ())
-    (fun raised ->
-      with_lifecycle (fun () -> lifecycle := Closed (context, Error raised));
-      Lwt.wakeup_later_exn wakener raised);
-  Lwt.protected promise
+  | `Pending pending ->
+      protected_result
+        (Writer_registry.flush_within (create_registry pending)
+           default_lifecycle_duration)
+  | `Registry writers ->
+      protected_result
+        (Writer_registry.flush_within writers default_lifecycle_duration)
+  | `Closing writers ->
+      protected_result
+        (Writer_registry.shutdown_within writers default_lifecycle_duration)
+  | `Outcome (Ok report) -> result_promise report
+  | `Outcome (Error exn) -> Lwt.fail exn
 
 let shutdown () =
   let action =
     with_lifecycle (fun () ->
         match !lifecycle with
-        | Closing (_, promise) -> `Promise promise
+        | Closing (context, writers) -> `Join (context, writers)
         | Closed (_, outcome) -> `Outcome outcome
         | Fresh pending ->
             let context = create_context () in
             Observer.close context.observer;
-            let promise, wakener = Lwt.wait () in
-            lifecycle := Closing (context, promise);
-            `Start (context, create_registry pending, promise, wakener)
+            let writers = create_registry pending in
+            lifecycle := Closing (context, writers);
+            `Start (context, writers)
         | Prepared (context, pending) ->
             Observer.close context.observer;
-            let promise, wakener = Lwt.wait () in
-            lifecycle := Closing (context, promise);
-            `Start (context, create_registry pending, promise, wakener)
+            let writers = create_registry pending in
+            lifecycle := Closing (context, writers);
+            `Start (context, writers)
         | Running runtime ->
             Observer.close runtime.context.observer;
-            let promise, wakener = Lwt.wait () in
-            lifecycle := Closing (runtime.context, promise);
-            `Start (runtime.context, runtime.writers, promise, wakener))
+            lifecycle := Closing (runtime.context, runtime.writers);
+            `Start (runtime.context, runtime.writers))
   in
   match action with
-  | `Promise promise -> Lwt.protected promise
-  | `Outcome outcome -> result_promise outcome
-  | `Start (context, writers, promise, wakener) ->
-      settle_shutdown context promise wakener (Writer_registry.shutdown writers)
+  | `Join (_, writers) ->
+      protected_result
+        (Writer_registry.shutdown_within writers default_lifecycle_duration)
+  | `Outcome (Ok report) -> result_promise report
+  | `Outcome (Error exn) -> Lwt.fail exn
+  | `Start (context, writers) ->
+      ignore (start_global_shutdown context writers);
+      protected_result
+        (Writer_registry.shutdown_within writers default_lifecycle_duration)
 
 module Lifecycle = struct
   type error = Writer_registry.error = Closed
 
+  module Duration = struct
+    type t = float
+    type error = Negative | Non_finite
+
+    let create ~seconds =
+      if not (Float.is_finite seconds) then Error Non_finite
+      else if Float.compare seconds 0.0 < 0 then Error Negative
+      else Ok seconds
+
+    exception Invalid_duration of error
+
+    let create_exn ~seconds =
+      match create ~seconds with
+      | Ok duration -> duration
+      | Error error -> raise (Invalid_duration error)
+
+    let to_float duration = duration
+  end
+
+  type problem = Writer_registry.problem =
+    | Rejected of { output : string }
+    | Delivery_lost of { output : string }
+    | Destination_failed of { output : string }
+    | Timed_out of { output : string }
+    | Cancelled of { output : string }
+
+  type report = Writer_registry.report
+
+  let complete = Writer_registry.report_complete
+  let problems = Writer_registry.report_problems
+
+  exception Incomplete = Lifecycle_incomplete
+
+  module Integration = struct
+    type facts = No_problem | Rejected | Delivery_lost | Rejected_and_lost
+    type error = Closed | Invalid_label
+
+    let register ~label ~facts ~flush ~shutdown =
+      if not (Writer_registry.valid_label label) then Error Invalid_label
+      else
+        let facts () =
+          match facts () with
+          | No_problem -> Writer_registry.Delivery_facts.No_problem
+          | Rejected -> Writer_registry.Delivery_facts.Rejected
+          | Delivery_lost -> Writer_registry.Delivery_facts.Delivery_lost
+          | Rejected_and_lost ->
+              Writer_registry.Delivery_facts.Rejected_and_lost
+        in
+        let hook = create_hook ~name:label ~facts ~flush ~shutdown () in
+        with_lifecycle (fun () ->
+            match !lifecycle with
+            | Fresh pending ->
+                lifecycle := Fresh (hook :: pending);
+                Ok ()
+            | Prepared (context, pending) ->
+                lifecycle := Prepared (context, hook :: pending);
+                Ok ()
+            | Running runtime -> (
+                match
+                  Writer_registry.register_integration runtime.writers ~label
+                    ~facts ~flush ~shutdown
+                with
+                | Ok () -> Ok ()
+                | Error Writer_registry.Closed -> Error Closed
+                | Error Writer_registry.Invalid_label -> Error Invalid_label)
+            | Closing _ | Closed _ -> Error Closed)
+  end
+
+  let seconds = function
+    | Some duration -> Duration.to_float duration
+    | None -> default_lifecycle_duration
+
+  let flush ?within () =
+    let within = seconds within in
+    let action =
+      with_lifecycle (fun () ->
+          match !lifecycle with
+          | Fresh pending | Prepared (_, pending) ->
+              `Registry (create_registry pending)
+          | Running runtime -> `Registry runtime.writers
+          | Closing (_, writers) -> `Closing writers
+          | Closed (_, outcome) -> `Done outcome)
+    in
+    match action with
+    | `Registry writers -> Writer_registry.flush_within writers within
+    | `Closing writers -> Writer_registry.shutdown_within writers within
+    | `Done (Ok report) -> Lwt.return report
+    | `Done (Error exn) -> Lwt.fail exn
+
+  let shutdown ?within () =
+    let within = seconds within in
+    let action =
+      with_lifecycle (fun () ->
+          match !lifecycle with
+          | Closed (_, outcome) -> `Done outcome
+          | Closing (context, writers) -> `Join (context, writers)
+          | Fresh pending ->
+              let context = create_context () in
+              Observer.close context.observer;
+              let writers = create_registry pending in
+              lifecycle := Closing (context, writers);
+              `Start (context, writers)
+          | Prepared (context, pending) ->
+              Observer.close context.observer;
+              let writers = create_registry pending in
+              lifecycle := Closing (context, writers);
+              `Start (context, writers)
+          | Running runtime ->
+              Observer.close runtime.context.observer;
+              lifecycle := Closing (runtime.context, runtime.writers);
+              `Start (runtime.context, runtime.writers))
+    in
+    match action with
+    | `Done (Ok report) -> Lwt.return report
+    | `Done (Error exn) -> Lwt.fail exn
+    | `Join (context, writers) | `Start (context, writers) ->
+        ignore (start_global_shutdown context writers : report Lwt.t);
+        Writer_registry.shutdown_within writers within
+
   let register ~flush ~shutdown =
-    let hook = create_hook ~flush ~shutdown in
+    let hook = create_hook ~flush ~shutdown () in
     with_lifecycle (fun () ->
         match !lifecycle with
         | Fresh pending ->

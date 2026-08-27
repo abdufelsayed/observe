@@ -52,8 +52,20 @@ module Make (IO : IO.S) : sig
 
   type t
 
+  type delivery_facts =
+    | No_problem
+    | Rejected
+    | Delivery_lost
+    | Rejected_and_lost
+
   val create : dir:string -> ?capacity:int -> unit -> (t, error) result Lwt.t
   val drain : t -> Observe.Drain.t
+
+  val delivery_facts : t -> delivery_facts
+  (** Return finite cumulative facts about rejected offers and accepted records
+      later discarded by terminal delivery failure. This is observation of the
+      writer's owned delivery state, not a persistence or durability claim. *)
+
   val flush : t -> (unit, error) result Lwt.t
   val shutdown : t -> (unit, error) result Lwt.t
   val pp_error : Format.formatter -> error -> unit

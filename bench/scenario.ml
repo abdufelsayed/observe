@@ -203,6 +203,53 @@ let lwt_unix_operation config make_message =
   prepare_lwt_unix_operation config (fun () ->
       Observe.Logs.info (make_message ()))
 
+let prepare_lifecycle_flush ?facts () =
+  let restore = redirect_standard_error () in
+  try
+    Observe_lwt_unix.init_exn
+      (config ~console:Observe.Config.Silent ~drains:[ accepted_drain () ] ());
+    Option.iter
+      (fun facts ->
+        Observe_lwt_unix.Lifecycle.Integration.register ~label:"benchmark"
+          ~facts
+          ~flush:(fun () -> Lwt.return_unit)
+          ~shutdown:(fun () -> Lwt.return_unit)
+        |> Result.get_ok)
+      facts;
+    {
+      operation =
+        (fun () ->
+          ignore
+            (Lwt_main.run (Observe_lwt_unix.Lifecycle.flush ())
+              : Observe_lwt_unix.Lifecycle.report));
+      retained_bytes = no_size;
+      encoded_bytes = no_size;
+      cleanup =
+        (fun () ->
+          Fun.protect ~finally:restore (fun () ->
+              ignore
+                (Lwt_main.run (Observe_lwt_unix.Lifecycle.shutdown ())
+                  : Observe_lwt_unix.Lifecycle.report)));
+    }
+  with exception_raised ->
+    let backtrace = Printexc.get_raw_backtrace () in
+    restore ();
+    Printexc.raise_with_backtrace exception_raised backtrace
+
+let prepare_settled_shutdown () =
+  let prepared = prepare_lifecycle_flush () in
+  ignore
+    (Lwt_main.run (Observe_lwt_unix.Lifecycle.shutdown ())
+      : Observe_lwt_unix.Lifecycle.report);
+  {
+    prepared with
+    operation =
+      (fun () ->
+        ignore
+          (Lwt_main.run (Observe_lwt_unix.Lifecycle.shutdown ())
+            : Observe_lwt_unix.Lifecycle.report));
+  }
+
 let lwt_stable_fan_in () =
   let wide = Observe.Logs.create ~name:"stable-fan-in" () in
   for _ = 1 to 8 do
@@ -1579,6 +1626,23 @@ let core_scenarios =
 
 let lwt_unix_scenarios =
   [
+    make ~name:"lwt-unix/lifecycle/flush-empty" ~suite:Lwt_unix
+      ~boundary:"lifecycle-flush" ~payload:"no-output" (fun () ->
+        prepare_lifecycle_flush ());
+    make ~name:"lwt-unix/lifecycle/flush-one-output" ~suite:Lwt_unix
+      ~boundary:"lifecycle-flush" ~payload:"one-output" (fun () ->
+        prepare_lifecycle_flush
+          ~facts:(fun () -> Observe_lwt_unix.Lifecycle.Integration.No_problem)
+          ());
+    make ~name:"lwt-unix/lifecycle/flush-reported-loss" ~suite:Lwt_unix
+      ~boundary:"lifecycle-report" ~payload:"rejected-and-lost" (fun () ->
+        prepare_lifecycle_flush
+          ~facts:(fun () ->
+            Observe_lwt_unix.Lifecycle.Integration.Rejected_and_lost)
+          ());
+    make ~name:"lwt-unix/lifecycle/shutdown-settled" ~suite:Lwt_unix
+      ~boundary:"lifecycle-shutdown-idempotent" ~payload:"no-output" (fun () ->
+        prepare_settled_shutdown ());
     make ~name:"lwt-unix/json/tagged-text" ~suite:Lwt_unix ~boundary:"json"
       ~payload:"tagged-text" (fun () ->
         lwt_unix_operation (config ~console:Observe.Config.Ndjson ()) text);

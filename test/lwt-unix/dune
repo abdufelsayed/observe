@@ -43,6 +43,11 @@
    (run %{exe:ready_scenario.exe} lifecycle-flush)
    (run %{exe:ready_scenario.exe} lifecycle-init-transfer)
    (run %{exe:ready_scenario.exe} lifecycle-failure)
+   (run
+    %{exe:ready_scenario.exe}
+    lifecycle-flush-cancellation-and-concurrency)
+   (run %{exe:ready_scenario.exe} lifecycle-delivery-facts)
+   (run %{exe:ready_scenario.exe} lifecycle-advanced)
    (run %{exe:ready_scenario.exe} basic-capture)
    (run %{exe:ready_scenario.exe} operation-scope)
    (run %{exe:ready_scenario.exe} operation-lifecycle)

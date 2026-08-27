@@ -26,4 +26,5 @@ end
 
 module Writer = Observe_fs.Make (Direct)
 
-let _ = Writer.pp_error
+let facts writer = Writer.delivery_facts writer
+let _ = (Writer.pp_error, facts)

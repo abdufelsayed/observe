@@ -67,19 +67,94 @@ val fork :
 
 val flush : unit -> unit Lwt.t
 (** Resolve when all console and registered output records accepted before the
-    call have reached their effect boundary. Ordinary application-defined drains
-    are not registered automatically. *)
+    call have reached their effect boundary. On an incomplete finite wait or
+    participant outcome, raises [Lifecycle.Incomplete report]; preserves
+    [Lwt.Canceled]. A complete report means all participants settled without a
+    reported problem, but only to their owned effect boundaries, not durability.
+    This uses a 30-second finite caller wait; timed-out shared work continues.
+    Ordinary application-defined drains are not registered automatically. *)
 
 val shutdown : unit -> unit Lwt.t
 (** Close production logging admission, drain accepted records, and stop every
-    output worker. Repeated calls share the same completion. Shutdown is
-    terminal even when called before initialization. Logging after shutdown does
-    not evaluate author callbacks. *)
+    output worker. On an incomplete finite wait or participant outcome, raises
+    [Lifecycle.Incomplete report]; preserves [Lwt.Canceled]. A complete report
+    means all participants settled without a reported problem, but only to their
+    owned effect boundaries, not durability. This uses a 30-second finite caller
+    wait; timed-out shared work continues. Repeated calls share one idempotent
+    state machine. Shutdown is terminal even when called before initialization.
+    Logging after shutdown does not evaluate author callbacks. *)
 
 module Lifecycle : sig
-  (** Expert registration for independently installed Lwt-Unix outputs. *)
+  (** Expert registration for independently installed Lwt-Unix outputs. Reports
+      distinguish rejected, lost, failed, timed-out, and cancelled delivery;
+      problem output labels are bounded runtime identities. Duration bounds are
+      finite caller waits only; shared work continues after timeout. *)
 
   type error = Closed
+
+  module Duration : sig
+    type t
+    type error = Negative | Non_finite
+
+    val create : seconds:float -> (t, error) result
+    (** Rejects negative and non-finite durations; zero is valid. *)
+
+    exception Invalid_duration of error
+    (** Raised by {!create_exn} with the typed reason for invalid input. *)
+
+    val create_exn : seconds:float -> t
+  end
+
+  type problem =
+    | Rejected of { output : string }
+    | Delivery_lost of { output : string }
+    | Destination_failed of { output : string }
+    | Timed_out of { output : string }
+    | Cancelled of { output : string }
+
+  type report
+  (** An aggregate of hook settlement and bounded runtime-identity problems.
+      [complete report] means every participant settled without a reported
+      problem at its owned effect boundary; it does not assert durability.
+      Runtime control exceptions remain native rather than becoming reports. *)
+
+  val complete : report -> bool
+
+  val problems : report -> problem list
+  (** Participant problems, identified by bounded runtime output labels. *)
+
+  exception Incomplete of report
+  (** Raised by ordinary {!flush} and {!shutdown} when finite waiting or a
+      participant outcome is incomplete. *)
+
+  module Integration : sig
+    type facts = No_problem | Rejected | Delivery_lost | Rejected_and_lost
+    type error = Closed | Invalid_label
+
+    val register :
+      label:string ->
+      facts:(unit -> facts) ->
+      flush:(unit -> unit Lwt.t) ->
+      shutdown:(unit -> unit Lwt.t) ->
+      (unit, error) result
+    (** Register a ready output with a bounded safe label and finite cumulative
+        delivery facts. Fact callbacks are sampled synchronously when lifecycle
+        reports are produced, including timeout snapshots, and must be prompt,
+        side-effect free, and concurrency-safe. Independent flush boundaries may
+        overlap each other and an in-progress shutdown; repeated shutdown
+        callers share one shutdown invocation. Runtime control exceptions remain
+        native. *)
+  end
+
+  val flush : ?within:Duration.t -> unit -> report Lwt.t
+  (** Run an independent flush boundary and leave the lifecycle open. The finite
+      [within] bounds this caller's waiter only; cancellation preserves
+      [Lwt.Canceled], while shared work continues. *)
+
+  val shutdown : ?within:Duration.t -> unit -> report Lwt.t
+  (** Start or join the one shared idempotent shutdown; [within] bounds this
+      caller's waiter only, shared work continues, and shutdown closes admission
+      permanently. *)
 
   val register :
     flush:(unit -> unit Lwt.t) ->
@@ -87,7 +162,10 @@ module Lifecycle : sig
     (unit, error) result
   (** Join the process lifecycle while it is open. Registered hooks are owned
       until process shutdown. Every hook is attempted even when another hook
-      fails. *)
+      fails. Independent flush boundaries may overlap each other and an
+      in-progress shutdown, so callbacks must be prompt and concurrency-safe;
+      repeated shutdown callers share one shutdown invocation. Runtime control
+      exceptions remain native. *)
 end
 
 module Test : sig

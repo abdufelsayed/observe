@@ -21,7 +21,8 @@
    (run %{exe:ready_fs_scenario.exe} daily)
    (run %{exe:ready_fs_scenario.exe} recursive-directory)
    (run %{exe:ready_fs_scenario.exe} invalid-target)
-   (run %{exe:ready_fs_scenario.exe} lifecycle-closed))))
+   (run %{exe:ready_fs_scenario.exe} lifecycle-closed)
+   (run %{exe:ready_fs_scenario.exe} distinct-lifecycle-identities))))
 
 (alias
  (name runtest)

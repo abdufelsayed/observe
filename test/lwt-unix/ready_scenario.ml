@@ -513,7 +513,16 @@ let bounded_console () =
       check
         (process_diagnostic_count Observe.Diagnostics.Console_rejected = 1)
         "full console queue was not rejected exactly once";
-      Lwt_main.run (Observe_lwt_unix.flush ()))
+      match Lwt_main.run (Observe_lwt_unix.flush ()) with
+      | exception Observe_lwt_unix.Lifecycle.Incomplete report ->
+          check
+            (Observe_lwt_unix.Lifecycle.problems report
+            = [ Observe_lwt_unix.Lifecycle.Rejected { output = "console" } ])
+            "console rejection was not reflected in the lifecycle report"
+      | exception raised ->
+          fail "unexpected bounded console flush failure: %s"
+            (Printexc.to_string raised)
+      | () -> fail "bounded console rejection produced a complete flush")
 
 let serialized_console () =
   let (), output =
@@ -730,7 +739,9 @@ let lifecycle_failure () =
          (fun exn -> Lwt.return (Error exn)))
   in
   (match flush_outcome with
-  | Error (Failure message) when String.equal message "flush" -> ()
+  | Error (Observe_lwt_unix.Lifecycle.Incomplete report)
+    when not (Observe_lwt_unix.Lifecycle.complete report) ->
+      ()
   | Error exn -> fail "unexpected flush failure: %s" (Printexc.to_string exn)
   | Ok () -> fail "failing lifecycle hook did not fail flush");
   check (!flush_attempted = 2) "failure prevented another flush hook";
@@ -741,7 +752,9 @@ let lifecycle_failure () =
          (fun exn -> Lwt.return (Error exn)))
   in
   (match outcome with
-  | Error (Failure message) when String.equal message "first" -> ()
+  | Error (Observe_lwt_unix.Lifecycle.Incomplete report)
+    when not (Observe_lwt_unix.Lifecycle.complete report) ->
+      ()
   | Error exn ->
       fail "unexpected lifecycle failure: %s" (Printexc.to_string exn)
   | Ok () -> fail "failing lifecycle hook did not fail shutdown");
@@ -753,11 +766,279 @@ let lifecycle_failure () =
          (fun exn -> Lwt.return (Error exn)))
   in
   (match repeated with
-  | Error (Failure message) when String.equal message "first" -> ()
+  | Error (Observe_lwt_unix.Lifecycle.Incomplete report)
+    when not (Observe_lwt_unix.Lifecycle.complete report) ->
+      ()
   | Error exn ->
       fail "repeated shutdown changed failure: %s" (Printexc.to_string exn)
   | Ok () -> fail "repeated shutdown forgot the lifecycle failure");
   check (!attempted = 2) "repeated shutdown reran registered hooks"
+
+let lifecycle_flush_cancellation_and_concurrency () =
+  let duration seconds =
+    Observe_lwt_unix.Lifecycle.Duration.create_exn ~seconds
+  in
+  let started, start_wakener = Lwt.wait () in
+  let release, release_wakener = Lwt.wait () in
+  let calls = ref 0 in
+  Observe_lwt_unix.Lifecycle.register
+    ~flush:(fun () ->
+      incr calls;
+      if !calls = 1 then Lwt.wakeup_later start_wakener ();
+      release)
+    ~shutdown:(fun () -> Lwt.return_unit)
+  |> Result.get_ok;
+  let pending = Observe_lwt_unix.Lifecycle.flush ~within:(duration 1.) () in
+  Lwt_main.run started;
+  Lwt.cancel pending;
+  (match
+     Lwt_main.run
+       (Lwt.catch
+          (fun () -> Lwt.map (fun _ -> false) pending)
+          (function Lwt.Canceled -> Lwt.return true | _ -> Lwt.return false))
+   with
+  | true -> ()
+  | false -> fail "cancelled flush waiter did not preserve Lwt.Canceled");
+  Lwt.wakeup release_wakener ();
+  let settled = Lwt_main.run (Observe_lwt_unix.Lifecycle.flush ()) in
+  check
+    (Observe_lwt_unix.Lifecycle.complete settled)
+    "flush did not remain usable after caller cancellation";
+  check (!calls = 2) "later flush did not use a fresh operation boundary";
+  let calls = ref 0 in
+  let overlap_release, overlap_wakener = Lwt.wait () in
+  Observe_lwt_unix.Lifecycle.register
+    ~flush:(fun () ->
+      incr calls;
+      overlap_release)
+    ~shutdown:(fun () -> Lwt.return_unit)
+  |> Result.get_ok;
+  let first = Observe_lwt_unix.Lifecycle.flush ~within:(duration 1.) () in
+  let second = Observe_lwt_unix.Lifecycle.flush ~within:(duration 1.) () in
+  check (!calls = 2)
+    "concurrent flush boundaries did not overlap their callbacks";
+  Lwt.wakeup overlap_wakener ();
+  let first_report, second_report = Lwt_main.run (Lwt.both first second) in
+  check
+    (Observe_lwt_unix.Lifecycle.complete first_report)
+    "first concurrent flush did not settle";
+  check
+    (Observe_lwt_unix.Lifecycle.complete second_report)
+    "second concurrent flush did not settle";
+  check (!calls = 2)
+    "concurrent flush callers did not use separate operation boundaries";
+  Lwt_main.run (Observe_lwt_unix.shutdown ())
+
+let lifecycle_delivery_facts () =
+  let open Observe_lwt_unix.Lifecycle in
+  let preserves_sys_break promise =
+    Lwt_main.run
+      (Lwt.catch
+         (fun () -> Lwt.map (fun _ -> false) promise)
+         (function Sys.Break -> Lwt.return true | _ -> Lwt.return false))
+  in
+  check
+    (Integration.register ~label:""
+       ~facts:(fun () -> Integration.No_problem)
+       ~flush:(fun () -> Lwt.return_unit)
+       ~shutdown:(fun () -> Lwt.return_unit)
+    = Error Integration.Invalid_label)
+    "empty integration label was accepted";
+  let fail_hook = ref true in
+  register
+    ~flush:(fun () ->
+      if !fail_hook then (
+        fail_hook := false;
+        raise Sys.Break)
+      else Lwt.return_unit)
+    ~shutdown:(fun () -> Lwt.return_unit)
+  |> Result.get_ok;
+  check
+    (preserves_sys_break (flush ()))
+    "runtime control exception from lifecycle hook was contained";
+  let fail_facts = ref true in
+  Integration.register ~label:"control-facts"
+    ~facts:(fun () ->
+      if !fail_facts then (
+        fail_facts := false;
+        raise Sys.Break)
+      else Integration.No_problem)
+    ~flush:(fun () -> Lwt.return_unit)
+    ~shutdown:(fun () -> Lwt.return_unit)
+  |> Result.get_ok;
+  check
+    (preserves_sys_break (flush ()))
+    "runtime control exception from delivery facts was contained";
+  let register label facts =
+    Integration.register ~label ~facts
+      ~flush:(fun () -> Lwt.return_unit)
+      ~shutdown:(fun () -> Lwt.return_unit)
+    |> Result.get_ok
+  in
+  register "none" (fun () -> Integration.No_problem);
+  register "rejected" (fun () -> Integration.Rejected);
+  register "lost" (fun () -> Integration.Delivery_lost);
+  register "both" (fun () -> Integration.Rejected_and_lost);
+  register "broken-facts" (fun () -> failwith "facts");
+  Integration.register ~label:"broken-hook-and-facts"
+    ~facts:(fun () -> failwith "facts")
+    ~flush:(fun () -> Lwt.fail (Failure "flush"))
+    ~shutdown:(fun () -> Lwt.return_unit)
+  |> Result.get_ok;
+  let report = Lwt_main.run (flush ()) in
+  let problems = problems report in
+  let has expected = List.exists (( = ) expected) problems in
+  check
+    (List.length problems = 6)
+    "finite delivery facts produced %d problems instead of 6"
+    (List.length problems);
+  check (has (Rejected { output = "rejected" })) "rejection fact was lost";
+  check (has (Delivery_lost { output = "lost" })) "loss fact was lost";
+  check (has (Rejected { output = "both" })) "combined rejection was lost";
+  check (has (Delivery_lost { output = "both" })) "combined loss was lost";
+  check
+    (has (Destination_failed { output = "broken-facts" }))
+    "raising facts callback was not contained";
+  check
+    (List.fold_left
+       (fun count -> function
+         | Destination_failed { output = "broken-hook-and-facts" } -> count + 1
+         | _ -> count)
+       0 problems
+    = 1)
+    "one output failure was duplicated when its facts callback also raised";
+  ignore (Lwt_main.run (shutdown ()) : report)
+
+let lifecycle_advanced () =
+  let flush_attempted = ref 0 in
+  let register failing_flush =
+    Observe_lwt_unix.Lifecycle.register
+      ~flush:(fun () ->
+        incr flush_attempted;
+        if failing_flush then Lwt.fail (Failure "flush") else Lwt.return_unit)
+      ~shutdown:(fun () -> Lwt.return_unit)
+    |> Result.get_ok
+  in
+  register true;
+  register true;
+  let duration seconds =
+    Observe_lwt_unix.Lifecycle.Duration.create_exn ~seconds
+  in
+  check
+    (match Observe_lwt_unix.Lifecycle.Duration.create ~seconds:(-1.) with
+    | Error Observe_lwt_unix.Lifecycle.Duration.Negative -> true
+    | Error Observe_lwt_unix.Lifecycle.Duration.Non_finite | Ok _ -> false)
+    "negative lifecycle duration was accepted";
+  check
+    (match
+       Observe_lwt_unix.Lifecycle.Duration.create ~seconds:Float.infinity
+     with
+    | Error Observe_lwt_unix.Lifecycle.Duration.Non_finite -> true
+    | Error Observe_lwt_unix.Lifecycle.Duration.Negative | Ok _ -> false)
+    "non-finite lifecycle duration was accepted";
+  (try
+     ignore (Observe_lwt_unix.Lifecycle.Duration.create_exn ~seconds:Float.nan);
+     fail "invalid lifecycle duration did not raise"
+   with
+   | Observe_lwt_unix.Lifecycle.Duration.Invalid_duration
+       Observe_lwt_unix.Lifecycle.Duration.Non_finite
+   ->
+     ());
+  let report =
+    Lwt_main.run (Observe_lwt_unix.Lifecycle.flush ~within:(duration 1.) ())
+  in
+  check (!flush_attempted = 2) "advanced flush did not isolate hook failures";
+  check
+    (not (Observe_lwt_unix.Lifecycle.complete report))
+    "advanced flush reported failed hooks as complete";
+  check
+    (List.length (Observe_lwt_unix.Lifecycle.problems report) = 2)
+    "advanced flush did not aggregate both hook failures";
+  let ordinary =
+    Lwt.catch
+      (fun () -> Lwt.map (fun () -> false) (Observe_lwt_unix.flush ()))
+      (function
+        | Observe_lwt_unix.Lifecycle.Incomplete report ->
+            Lwt.return (not (Observe_lwt_unix.Lifecycle.complete report))
+        | _ -> Lwt.return false)
+  in
+  check (Lwt_main.run ordinary) "ordinary flush did not raise Incomplete";
+  Observe_lwt_unix.Lifecycle.register
+    ~flush:(fun () -> Lwt.return_unit)
+    ~shutdown:(fun () -> Lwt.fail (Failure "shutdown"))
+  |> Result.get_ok;
+  let shutdown_promise, shutdown_wakener = Lwt.wait () in
+  let shutdown_started = ref 0 in
+  Observe_lwt_unix.Lifecycle.register
+    ~flush:(fun () -> Lwt.return_unit)
+    ~shutdown:(fun () ->
+      incr shutdown_started;
+      shutdown_promise)
+  |> Result.get_ok;
+  let timed_out =
+    Lwt_main.run (Observe_lwt_unix.Lifecycle.shutdown ~within:(duration 0.) ())
+  in
+  check (!shutdown_started = 1) "shutdown did not start the protected hook";
+  check
+    (not (Observe_lwt_unix.Lifecycle.complete timed_out))
+    "shutdown timeout reported completion";
+  check
+    (List.exists
+       (function
+         | Observe_lwt_unix.Lifecycle.Timed_out { output = _ } -> true
+         | _ -> false)
+       (Observe_lwt_unix.Lifecycle.problems timed_out))
+    "shutdown timeout omitted the unresolved hook";
+  check
+    (List.exists
+       (function
+         | Observe_lwt_unix.Lifecycle.Destination_failed { output = _ } -> true
+         | _ -> false)
+       (Observe_lwt_unix.Lifecycle.problems timed_out))
+    "shutdown timeout omitted a settled hook failure";
+  let cancelled =
+    Observe_lwt_unix.Lifecycle.shutdown ~within:(duration 30.) ()
+  in
+  Lwt.cancel cancelled;
+  (match
+     Lwt_main.run
+       (Lwt.catch
+          (fun () -> Lwt.map (fun _ -> false) cancelled)
+          (function Lwt.Canceled -> Lwt.return true | _ -> Lwt.return false))
+   with
+  | true -> ()
+  | false -> fail "cancelled shutdown waiter did not preserve Lwt.Canceled");
+  Lwt.wakeup shutdown_wakener ();
+  let settled =
+    Lwt_main.run (Observe_lwt_unix.Lifecycle.shutdown ~within:(duration 1.) ())
+  in
+  check
+    (not (Observe_lwt_unix.Lifecycle.complete settled))
+    "shared shutdown hid its settled hook failure";
+  let repeated =
+    Lwt_main.run (Observe_lwt_unix.Lifecycle.shutdown ~within:(duration 1.) ())
+  in
+  check
+    (Observe_lwt_unix.Lifecycle.problems settled
+    = Observe_lwt_unix.Lifecycle.problems repeated)
+    "repeated shutdown lost stored problem details";
+  let ordinary_shutdown =
+    Lwt.catch
+      (fun () -> Lwt.map (fun () -> false) (Observe_lwt_unix.shutdown ()))
+      (function
+        | Observe_lwt_unix.Lifecycle.Incomplete report ->
+            Lwt.return (not (Observe_lwt_unix.Lifecycle.complete report))
+        | _ -> Lwt.return false)
+  in
+  check
+    (Lwt_main.run ordinary_shutdown)
+    "ordinary shutdown did not raise Incomplete";
+  check
+    (Observe_lwt_unix.Lifecycle.register
+       ~flush:(fun () -> Lwt.return_unit)
+       ~shutdown:(fun () -> Lwt.return_unit)
+    = Error Observe_lwt_unix.Lifecycle.Closed)
+    "registration remained open after shutdown began"
 
 let basic_capture () =
   let capture =
@@ -1187,6 +1468,10 @@ let scenarios =
     ("lifecycle-flush", lifecycle_flush);
     ("lifecycle-init-transfer", lifecycle_init_transfer);
     ("lifecycle-failure", lifecycle_failure);
+    ( "lifecycle-flush-cancellation-and-concurrency",
+      lifecycle_flush_cancellation_and_concurrency );
+    ("lifecycle-delivery-facts", lifecycle_delivery_facts);
+    ("lifecycle-advanced", lifecycle_advanced);
     ("basic-capture", basic_capture);
     ("operation-scope", operation_scope);
     ("operation-lifecycle", operation_lifecycle);

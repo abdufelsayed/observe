@@ -452,6 +452,27 @@ cannot enqueue after closure.
 Acceptance does not promise `fsync`, crash durability, retry, retention,
 compression, or cross-process coordination.
 
+The ordinary lifecycle calls keep the common path small and use a finite
+30-second caller wait. They raise `Observe_lwt_unix.Lifecycle.Incomplete` when
+an output rejected work, lost accepted work, failed, or did not settle before
+that boundary. The shared output work continues after a caller timeout. Code
+that needs to inspect rather than raise can use the advanced report:
+
+```ocaml
+let within =
+  Observe_lwt_unix.Lifecycle.Duration.create_exn ~seconds:5.
+in
+let* report = Observe_lwt_unix.Lifecycle.shutdown ~within () in
+if not (Observe_lwt_unix.Lifecycle.complete report) then
+  report_delivery_problems
+    (Observe_lwt_unix.Lifecycle.problems report)
+```
+
+Immediate custom outputs remain ordinary `Observe.Drain.t` values and need no
+lifecycle ceremony. Only a custom asynchronous output that owns a worker and
+cleanup uses `Observe_lwt_unix.Lifecycle.Integration`; the ready filesystem
+package does this internally and still returns `Observe.Drain.t` directly.
+
 Point and wide logs use the same files and worker. A completed wide log is one
 flat event: searchable package metadata and consumer fields share the root
 without an artificial payload envelope:
@@ -829,7 +850,9 @@ effect, and ready-composition boundaries:
 The core does not depend on Lwt or Unix. `Observe.Make (IO)` accepts one
 completed I/O implementation; `Observe_lwt_unix` is the ready path for
 ordinary Lwt applications. Call `Observe_lwt_unix.flush ()` for a sequence
-barrier or `Observe_lwt_unix.shutdown ()` before process exit.
+barrier or `Observe_lwt_unix.shutdown ()` before process exit. Both calls have
+a finite default wait and raise `Lifecycle.Incomplete` rather than silently
+claiming delivery when a registered output reports a problem.
 
 ## Drains And Capture
 
