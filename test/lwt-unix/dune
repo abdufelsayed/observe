@@ -7,7 +7,7 @@
   observe
   lwt
   lwt.unix
-  threads
+  threads.posix
   unix
   uuidm))
 
