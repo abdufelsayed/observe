@@ -11,6 +11,10 @@ for required in "$manifest" "$core_cmi" "$fs_cmi" "$positive_source"; do
   test -f "$required" || { printf 'portable FS artifact missing: %s\n' "$required" >&2; exit 1; }
 done
 grep -Fq '/lib/observe-fs/observe_fs.cmi"' "$manifest"
+if grep -Fq 'observe_fs_test_support' "$manifest"; then
+  printf 'portable observe-fs manifest contains test support\n' >&2
+  exit 1
+fi
 if grep -Eq '/lib/(lwt|unix)' "$manifest"; then
   printf 'portable observe-fs manifest contains an effect package\n' >&2
   exit 1

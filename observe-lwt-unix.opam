@@ -2,7 +2,7 @@
 opam-version: "2.0"
 synopsis: "Ready Lwt-Unix composition for Observe"
 description:
-  "Ready Observe initialization and scoped capture for Lwt programs on Unix."
+  "Ready Observe initialization for Lwt-Unix with bounded console delivery, UUID operation identity, scoped wide events, deterministic capture, flush, and shutdown."
 maintainer: ["Abdullah Elsayed <hey@abdufelsayed.dev>"]
 authors: ["Abdullah Elsayed <hey@abdufelsayed.dev>"]
 license: "MIT"

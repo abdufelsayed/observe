@@ -20,6 +20,11 @@ on:
         required: false
         default: "10000"
         type: string
+      repetitions:
+        description: Isolated child-process repetitions per scenario
+        required: false
+        default: "5"
+        type: string
 
 concurrency:
   group: ${{ github.workflow }}-${{ github.ref }}
@@ -32,6 +37,7 @@ env:
   BENCH_QUOTA_MS: ${{ github.event_name == 'workflow_dispatch' && inputs.quota_ms || '500' }}
   BENCH_SAMPLE_LIMIT: ${{ github.event_name == 'workflow_dispatch' && inputs.sample_limit || '2000' }}
   BENCH_ALLOCATION_RUNS: ${{ github.event_name == 'workflow_dispatch' && inputs.allocation_runs || '10000' }}
+  BENCH_REPETITIONS: ${{ github.event_name == 'workflow_dispatch' && inputs.repetitions || '5' }}
 
 jobs:
   bench:
@@ -60,6 +66,7 @@ jobs:
             --quota-ms "$BENCH_QUOTA_MS" \
             --limit "$BENCH_SAMPLE_LIMIT" \
             --allocation-runs "$BENCH_ALLOCATION_RUNS" \
+            --repetitions "$BENCH_REPETITIONS" \
             --commit "$GITHUB_SHA" \
             --output ".logs/benchmarks/observe-$GITHUB_SHA.json"
 

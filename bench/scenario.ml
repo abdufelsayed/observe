@@ -56,6 +56,8 @@ let config ?(environment = "production") ?(console = Observe.Config.Auto)
   Observe.Config.create_exn ~service:"benchmark" ~environment ~console
     ~min_level ~drains ?enrichers ?limits ?redaction ?sampling ?retention ()
 
+let default_config () = Observe.Config.create_exn ~service:"benchmark" ()
+
 let accepted_drain () =
   Observe.Drain.create (fun log ->
       consume log;
@@ -1151,6 +1153,9 @@ let fs_scenarios =
 let core_scenarios =
   let scenarios =
     [
+      make ~name:"core/default/tagged-text" ~suite:Core
+        ~boundary:"default-configuration" ~payload:"tagged-text" (fun () ->
+          core_operation (default_config ()) text);
       make ~name:"core/filtered/tagged-text" ~suite:Core ~boundary:"filtered"
         ~payload:"tagged-text" (fun () ->
           core_operation (config ~min_level:Observe.Level.Warn ()) filtered_text);

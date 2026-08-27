@@ -3,11 +3,13 @@ let suite = ref "all"
 let quota_ms = ref 500
 let limit = ref 2_000
 let allocation_runs = ref 10_000
+let repetitions = ref 5
 
 let commit =
   ref (Option.value (Sys.getenv_opt "GITHUB_SHA") ~default:"working-tree")
 
-let baseline = ref None
+let baselines = ref []
+let allow_scenario_drift = ref false
 let worker = ref None
 let scenario_filter = ref None
 let list_scenarios = ref false
@@ -30,12 +32,19 @@ let options =
     ( "--allocation-runs",
       Arg.Set_int allocation_runs,
       "RUNS Set the fixed batch size for GC allocation counters" );
+    ( "--repetitions",
+      Arg.Set_int repetitions,
+      "COUNT Run each scenario in COUNT isolated child processes" );
     ( "--commit",
       Arg.Set_string commit,
       "REVISION Record REVISION in report metadata" );
     ( "--compare",
-      Arg.String (fun path -> baseline := Some path),
-      "PATH Compare the new measurements with a prior JSON report" );
+      Arg.String (fun path -> baselines := path :: !baselines),
+      "PATH Compare with PATH; repeat to use the median of several reports" );
+    ( "--allow-scenario-drift",
+      Arg.Set allow_scenario_drift,
+      " Acknowledge and report intentional current-only or baseline-only \
+       scenarios" );
     ( "--scenario",
       Arg.String (fun name -> scenario_filter := Some name),
       "NAME Run one named scenario" );
@@ -195,6 +204,7 @@ let () =
   if !limit <= 1 then fail "--limit must be greater than one";
   if !allocation_runs <= 0 then
     fail "--allocation-runs must be a positive integer";
+  if !repetitions <= 0 then fail "--repetitions must be a positive integer";
   let configuration =
     Measurement.
       {
@@ -216,13 +226,21 @@ let () =
               (Scenario.payload scenario))
           scenarios
       else
-        let measurements = List.map (run_worker configuration) scenarios in
-        Report.print_table measurements;
-        let metadata =
-          Report.metadata ~commit:!commit ~suite:!suite configuration
+        let summaries =
+          List.map
+            (fun scenario ->
+              List.init !repetitions (fun _ ->
+                  run_worker configuration scenario)
+              |> Report.summarize)
+            scenarios
         in
-        Report.write_json ~path:!output_path metadata measurements;
+        Report.print_table summaries;
+        let metadata =
+          Report.metadata ~commit:!commit ~suite:!suite
+            ~repetitions:!repetitions configuration
+        in
+        Report.write_json ~path:!output_path metadata summaries;
         Format.printf "\nWrote %s\n%!" !output_path;
-        Option.iter
-          (fun path -> Report.print_comparison ~baseline:path measurements)
-          !baseline
+        if !baselines <> [] then
+          Report.print_comparison ~metadata ~baselines:(List.rev !baselines)
+            ~allow_scenario_drift:!allow_scenario_drift summaries

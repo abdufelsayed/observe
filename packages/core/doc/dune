@@ -1,3 +1,10 @@
 (documentation
  (package observe)
- (mld_files index))
+ (mld_files
+  index
+  getting_started
+  logging
+  production
+  outputs
+  testing
+  packages))

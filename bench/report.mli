@@ -1,8 +1,21 @@
 type metadata
+type summary
 
 val metadata :
-  commit:string -> suite:string -> Measurement.configuration -> metadata
+  commit:string ->
+  suite:string ->
+  repetitions:int ->
+  Measurement.configuration ->
+  metadata
 
-val print_table : Measurement.t list -> unit
-val print_comparison : baseline:string -> Measurement.t list -> unit
-val write_json : path:string -> metadata -> Measurement.t list -> unit
+val summarize : Measurement.t list -> summary
+val print_table : summary list -> unit
+
+val print_comparison :
+  metadata:metadata ->
+  baselines:string list ->
+  allow_scenario_drift:bool ->
+  summary list ->
+  unit
+
+val write_json : path:string -> metadata -> summary list -> unit

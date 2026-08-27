@@ -21,7 +21,7 @@
  (name observe)
  (synopsis "Structured logging for OCaml")
  (description
- "Portable structured logging with typed values and deterministic capture.")
+ "Portable bounded structured logging with typed and open point logs, wide events, explicit redaction, sampling, routing, pure formatters, drains, and deterministic capture.")
  (depends
   (ocaml
    (>= 4.14))
@@ -62,7 +62,7 @@
  (name observe-lwt)
  (synopsis "Configurable Lwt I/O for Observe")
  (description
-  "Lwt effects and dynamic context completed with caller-provided wall and monotonic clocks, occurrence identifiers, and console functions.")
+  "Lwt execution and dynamic context for Observe, completed with caller-provided clocks, occurrence identity, sampling decisions, and console capabilities.")
  (depends
   (ocaml
    (>= 4.14))
@@ -78,7 +78,7 @@
  (name observe-lwt-unix)
  (synopsis "Ready Lwt-Unix composition for Observe")
  (description
-  "Ready Observe initialization and scoped capture for Lwt programs on Unix.")
+  "Ready Observe initialization for Lwt-Unix with bounded console delivery, UUID operation identity, scoped wide events, deterministic capture, flush, and shutdown.")
  (depends
   (ocaml
    (>= 4.14))
@@ -97,7 +97,7 @@
  (name observe-fs)
  (synopsis "Portable daily filesystem delivery for Observe")
  (description
-  "Portable bounded daily NDJSON filesystem delivery with injectable I/O capabilities.")
+  "Portable bounded daily NDJSON delivery with prompt drain acceptance, finite writer state, barriers, and injectable filesystem capabilities.")
  (depends
   (ocaml
    (>= 4.14))
@@ -126,7 +126,7 @@
  (name observe-fs-lwt)
  (synopsis "Lwt execution for Observe filesystem delivery")
  (description
-  "Lwt completion of portable Observe filesystem delivery for injected filesystems.")
+  "Lwt execution and lifecycle completion for portable Observe filesystem delivery over caller-provided capabilities.")
  (depends
   (ocaml
    (>= 4.14))
@@ -146,7 +146,7 @@
  (name observe-fs-lwt-unix)
  (synopsis "Ready Lwt-Unix daily filesystem delivery for Observe")
  (description
-  "Ready bounded daily NDJSON files for Observe applications using Lwt-Unix.")
+  "Ready bounded daily NDJSON files for Lwt-Unix with recursive directory setup and automatic Observe lifecycle registration.")
  (depends
   (ocaml
    (>= 4.14))

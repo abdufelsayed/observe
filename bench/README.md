@@ -18,13 +18,31 @@ opam exec -- dune exec bench/observe_bench.exe -- \
 opam exec -- dune exec bench/observe_bench.exe -- --suite fs
 opam exec -- dune exec bench/observe_bench.exe -- --suite fs-lwt-unix
 opam exec -- dune exec bench/observe_bench.exe -- \
+  --repetitions 5 \
   --compare .logs/benchmarks/baseline.json
 ```
 
+Repeat `--compare PATH` to compare against the median of several independently
+recorded reports. Comparisons refuse incompatible engine, runtime, platform,
+measurement settings, scenario descriptions, or workload scales. They also
+compare allocation and retained or encoded sizes when both reports provide
+them. Scenario additions and removals fail comparison by default. Pass
+`--allow-scenario-drift` only after inspecting the complete current-only and
+baseline-only lists.
+
 The tool prints a table and writes a compact typed JSON report under
 `.logs/benchmarks/` by default. Use `--output PATH` to select another location.
-Every scenario runs in a fresh child process because Observe initialization is
-process-wide and one-shot.
+Every repetition of every scenario runs in a fresh child process because
+Observe initialization is process-wide and one-shot. The report stores the
+median and observed latency range across five repetitions by default; use
+`--repetitions COUNT` to select another positive count. Allocation and
+retained-size columns are medians of the same isolated repetitions. Report
+schema version 4 groups the central measurements and observed spread. It
+records latency standard deviation, min/max ranges for latency and allocation,
+optional retained/encoded min/max, and the scenario's logical-operation scale.
+Legacy schema-3 reports remain readable. They contain scenario descriptions,
+latency, allocation, and optional sizes, but no logical-operation scale. The
+comparison prints that limitation instead of implying that scale was validated.
 
 Bechamel estimates operation latency from monotonic-clock samples. A separate
 fixed-size batch reads the OCaml GC counters for allocation and collection
@@ -41,7 +59,9 @@ retained size as unavailable.
 Formatter scenarios report the stable encoded byte count beside latency,
 throughput, and allocation. Other boundaries report encoded size as
 unavailable because console and filesystem byte ownership is asynchronous or
-amortized. Report schema version 3 adds this field.
+amortized. Schema version 4 preserves that field and adds isolated-repetition
+spread and workload scale; the comparison reader remains able to consume the
+retained schema-3 E2 reports.
 
 ## Suites
 

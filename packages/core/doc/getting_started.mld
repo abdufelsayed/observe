@@ -1,0 +1,101 @@
+{0 Getting started}
+
+This guide gets one Lwt-Unix program from installation to its first point and
+wide logs.
+
+{1 Install}
+
+Install the ready runtime package:
+
+{[
+opam install observe-lwt-unix
+]}
+
+Add the libraries and optional PPX to the executable:
+
+{[
+(executable
+ (name main)
+ (libraries observe observe-lwt-unix lwt.unix)
+ (preprocess
+  (pps observe.ppx)))
+]}
+
+{1 Initialize once}
+
+{[
+let config =
+  Observe.Config.create_exn ~service:"orders"
+    ~environment:"development" ()
+
+let () = Observe_lwt_unix.init_exn config
+]}
+
+[service] is the only required configuration value. With everything else
+omitted, Observe:
+
+- admits [Info], [Warn], and [Error];
+- chooses pretty output for an absent, [dev], or [development] environment and
+  NDJSON otherwise;
+- applies finite canonical-materialization defaults;
+- installs no caller-defined enrichment or redaction;
+- performs no sampling; and
+- adds no filesystem output.
+
+Use {!val:Observe.Config.create} when initialization errors belong in an
+explicit result. [create_exn] raises a typed
+{!exception:Observe.Config.Invalid_configuration} at the composition root.
+
+{1 Log}
+
+{[
+[%observe.info text ~tag:"startup" "service ready"];
+
+[%observe.info
+  untyped { action = "order_created"; order_id = "ord-42"; items = 3 }]
+]}
+
+Point authoring is admission-first: if no active route accepts the selected
+level, the author callback and its formatting arguments do not run.
+
+{1 Run an operation}
+
+{[
+let checkout () =
+  let log = Observe.Logs.current () in
+  [%observe.set log { cart_id = "cart-42"; phase = "started" }];
+  authorize_payment ()
+
+let app () =
+  Observe_lwt_unix.with_operation ~name:"checkout" checkout
+]}
+
+[with_operation] creates a wide event, binds it as current, and makes one final
+publication attempt when the callback returns, raises, or is cancelled. An
+ordinary escaping exception is interpreted into the wide event and then
+re-raised with its original backtrace. If error interpretation or final
+materialization fails, Observe withholds the operation and reports the failure.
+Cancellation and other runtime control exceptions complete without inferred
+error meaning and remain native. The default interpreter is
+{!val:Observe.Error.exn}; pass [~error] when the domain has a richer reusable
+interpretation.
+
+{1 Finish output}
+
+{[
+let () =
+  Observe_lwt_unix.init_exn config;
+  Lwt_main.run (Lwt.finalize app Observe_lwt_unix.shutdown)
+]}
+
+Console and ready filesystem outputs are asynchronous. Call [shutdown] at the
+process composition boundary so accepted work gets a final attempt and owned
+workers and resources are released. [flush] is the non-terminal accepted-work
+boundary when logging must remain open. See {!page-outputs} for exact claims and
+advanced reports.
+
+{1 Next}
+
+- {!page-logging} for every authoring shape.
+- {!page-production} for production policy.
+- {!page-testing} for deterministic capture.

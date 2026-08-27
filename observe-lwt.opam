@@ -2,7 +2,7 @@
 opam-version: "2.0"
 synopsis: "Configurable Lwt I/O for Observe"
 description:
-  "Lwt effects and dynamic context completed with caller-provided wall and monotonic clocks, occurrence identifiers, and console functions."
+  "Lwt execution and dynamic context for Observe, completed with caller-provided clocks, occurrence identity, sampling decisions, and console capabilities."
 maintainer: ["Abdullah Elsayed <hey@abdufelsayed.dev>"]
 authors: ["Abdullah Elsayed <hey@abdufelsayed.dev>"]
 license: "MIT"

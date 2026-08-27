@@ -1,0 +1,53 @@
+{0 Packages and extension boundaries}
+
+Observe is one suite split by dependency and effect ownership.
+
+{1 Package chooser}
+
+- [observe] owns portable logging meaning, policy, state transitions,
+  canonical snapshots, pure formatting, drains, diagnostics, and capture.
+- [observe-lwt] supplies Lwt dynamic scope and effect settlement through
+  caller-provided capabilities.
+- [observe-lwt-unix] supplies ready clocks, UUID v4 identity, random sampling,
+  terminal-aware console output, scoped operations, capture, flush, and
+  shutdown.
+- [observe-fs] owns portable daily filename selection, NDJSON projection,
+  finite admission, writer transitions, and barriers over injected filesystem
+  effects.
+- [observe-fs-lwt] completes that portable writer with Lwt and supplied
+  filesystem capabilities.
+- [observe-fs-lwt-unix] supplies ready Unix directories and files and registers
+  the worker with the ready lifecycle.
+
+[observe.ppx] is a sublibrary of [observe], not a separate opam package.
+
+These lines do not describe privileged kinds of user. Choose the smallest
+package set that supplies the effects the program already uses.
+
+{1 Custom runtime composition}
+
+{!module-type:Observe.IO.S} defines the complete capability contract consumed
+by {!module:Observe.Make}. It covers effect observation and repropagation,
+dynamic keys, cleanup, runtime control exceptions, wall and monotonic clocks,
+occurrence identity, sampling decisions, terminal style, and console offers.
+
+The core does not recover concrete behavior from partial callbacks or depend on
+Lwt or Unix. A new runtime supplies this contract without redefining logging
+meaning.
+
+{1 Custom formatters and drains}
+
+{!val:Observe.Formatter.create} receives one completed {!type:Observe.Log.t} and
+returns pure formatted bytes or a typed formatting error. Inspect
+{!val:Observe.Log.fields} through {!val:Observe.Value.view}; do not parse an
+official formatter's JSON to rediscover semantic meaning.
+
+{!val:Observe.Drain.create} is the immediate ownership-transfer seam for
+additional destinations. A custom asynchronous destination keeps its queue,
+worker, effects, failure accounting, and lifecycle in the package that owns
+those behaviors.
+
+The ready Lwt-Unix package exposes an expert
+[Observe_lwt_unix.Lifecycle.Integration] seam for a genuinely
+independently installed asynchronous output. Immediate drains and the ready
+filesystem package require no such ceremony in ordinary configuration.

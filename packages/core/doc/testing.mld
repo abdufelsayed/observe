@@ -1,0 +1,51 @@
+{0 Testing}
+
+Use deterministic capture to test semantic logs without depending on console
+layout, files, randomness, or global production delivery.
+
+{[
+let test_config =
+  Observe.Config.create_exn ~service:"orders-test" ()
+
+let captured =
+  Lwt_main.run
+    (Observe_lwt_unix.Test.with_capture_exn ~config:test_config (fun capture ->
+       let open Lwt.Syntax in
+       let* () = Checkout.run () in
+       Lwt.return (Observe.Capture.logs capture)))
+]}
+
+Capture installs an isolated Lwt-local route for the callback, suppresses
+production delivery, restores the previous route on return, exception, or
+cancellation, and closes exactly once. It bypasses probabilistic retention and
+external routing while preserving level admission, finite materialization, and
+global redaction.
+
+Inspect package meaning directly:
+
+{[
+let operation_name log =
+  match Observe.Log.kind log with
+  | Observe.Log.Point _ -> None
+  | Observe.Log.Wide { operation; _ } ->
+      Some (Observe.Log.operation_name operation)
+
+let cart_id log =
+  Option.bind
+    (Observe.Value.find [ "cart_id" ] (Observe.Log.fields log))
+    (fun value ->
+      match Observe.Value.view value with
+      | `String value -> Some value
+      | _ -> None)
+]}
+
+Do not parse pretty or JSON output to assert domain meaning. Formatter snapshots
+are appropriate only when the presentation itself is under test.
+
+For deterministic operation identity and sampling, ready initialization accepts
+[~id_generator] and [~sampling_draw]. The portable {!module:Observe.Make}
+accepts a complete injected {!module-type:Observe.IO.S} for controlled clocks,
+identity, sampling, dynamic scope, console behavior, and control exceptions.
+
+The repository's correctness and stress profiles are documented in
+[test/README.md].

@@ -1,0 +1,166 @@
+{0 Point logs and wide events}
+
+Observe exposes one logging facility. Point logs automatically emit one event;
+wide events accumulate context and emit once.
+
+{1 Point logs}
+
+Tagged text is the smallest form:
+
+{[
+[%observe.info text ~tag:"auth" "user logged in"]
+]}
+
+Format arguments remain lazy until admission:
+
+{[
+[%observe.debug text ~tag:"query" "%s" (explain_query query)]
+]}
+
+Open structured literals are concise for local event shapes:
+
+{[
+[%observe.info
+  untyped
+    {
+      action = "cart_validated";
+      cart_id = "cart-42";
+      items = 2;
+      customer = { plan = "team"; returning = true };
+      coupons = [ "WELCOME"; "TEAM" ];
+    }]
+]}
+
+Literals describe themselves. A dynamic expression supplies its normal type
+description because PPX expansion occurs before OCaml type checking:
+
+{[
+[%observe.info
+  untyped { action = "cart_validated"; items = Observe.Type.int item_count }]
+]}
+
+For reusable declared shapes, derive a type description and record schema:
+
+{[
+type phase = Started | Authorized of string [@@deriving observe]
+
+type checkout = { cart_id : string; phase : phase } [@@deriving observe]
+
+[%observe.info
+  typed ~using:checkout_schema
+    { cart_id = "cart-42"; phase = Authorized "auth-7" }]
+]}
+
+The annotation-free typed record is checked by OCaml. Variants preserve their
+constructor meaning in pretty output while JSON uses the documented structural
+projection.
+
+{1 Manual point authoring}
+
+The PPX shortens this ordinary admission-first API:
+
+{[
+Observe.Logs.info (fun m -> m.text ~tag:"auth" "user logged in");
+
+Observe.Logs.info (fun m ->
+  let open Observe.Logs in
+  m.untyped
+  |+ m.field "action" Observe.Type.string "cart_validated"
+  |+ m.field "items" Observe.Type.int item_count
+  |> m.seal);
+
+Observe.Logs.info (fun m ->
+  m.typed ~using:checkout_schema
+    { cart_id = "cart-42"; phase = Started })
+]}
+
+Use {!val:Observe.Logs.log} for a level computed at runtime. The fixed-level
+PPX forms intentionally remain [debug], [info], [warn], and [error].
+
+{1 Manual wide events}
+
+An open wide event accepts sparse object contributions:
+
+{[
+let checkout = Observe.Logs.create ~name:"checkout" () in
+[%observe.set checkout { cart_id = "cart-42"; phase = "started" }];
+[%observe.set checkout { phase = "authorized"; authorization_id = "auth-7" }];
+[%observe.info checkout "payment context completed"];
+Observe.Logs.emit checkout
+]}
+
+Successive objects merge recursively. A later scalar or variant replaces the
+earlier value at that field. [annotate] adds timestamped messages to the final
+wide event; it is not a point log. The first [emit] seals and attempts
+publication at most once.
+
+A schema-locked wide event accepts generated sparse record patches:
+
+{[
+let checkout =
+  Observe.Logs.create_typed ~name:"checkout" ~using:checkout_schema ()
+in
+[%observe.set checkout typed { cart_id = "cart-42"; phase = Started }];
+[%observe.set checkout typed { phase = Authorized "auth-7" }];
+Observe.Logs.emit checkout
+]}
+
+No record field is mandatory at completion. The schema constrains every field
+that is contributed; it does not turn a wide event into one eagerly constructed
+complete record.
+
+{1 Scoped operations and children}
+
+{[
+let capture_payment () =
+  let child = Observe.Logs.current () in
+  [%observe.set child { provider = "example-pay"; status = "authorized" }];
+  Lwt.return_unit
+
+let checkout () =
+  let parent = Observe.Logs.current () in
+  [%observe.set parent { cart_id = "cart-42"; phase = "authorizing" }];
+  Observe_lwt_unix.fork ~name:"capture-payment" capture_payment
+
+let run () =
+  Observe_lwt_unix.with_operation ~name:"checkout" checkout
+]}
+
+The child has its own occurrence identifier, fields, level, duration, and
+lifecycle. It records the parent's name and occurrence identifier but copies no
+parent payload. Parent, child, and correlated point logs remain independent
+observations and retention units. The ready Lwt-Unix package generates UUID v4
+identifiers by default; another runtime composition may choose a different
+valid identity scheme.
+
+Outside a valid scope, [current] raises
+{!exception:Observe.Logs.Current_error}; it never returns a process fallback.
+
+{1 Explicit errors}
+
+An error interpreter keeps the consumer's own error type:
+
+{[
+let payment_error =
+  Observe.Error.create (function
+    | Payment_declined code ->
+        Observe.Error.roles ~kind:"payment_declined" ~code ()
+    | exn ->
+        Observe.Error.roles ~kind:(Printexc.exn_slot_name exn)
+          ~message:(Printexc.to_string exn) ())
+]}
+
+Use it as a point event:
+
+{[
+[%observe.error error ~using:payment_error ~backtrace exn]
+]}
+
+Or pass [~error:payment_error] to a scoped operation. Error contribution derives
+[Error] unless an explicit wide level was selected. Observe interprets only an
+error supplied at an explicit operation boundary; it installs no ambient
+exception hook.
+
+The complete generated syntax, manual schema construction, containers,
+recursion, variants, and Repr interoperability are documented in the source
+PPX reference.

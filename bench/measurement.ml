@@ -8,6 +8,7 @@ type t = {
   suite : string;
   boundary : string;
   payload : string;
+  logical_operations : int;
   nanoseconds_per_operation : float;
   operations_per_second : float;
   minor_bytes_per_operation : float;
@@ -102,6 +103,7 @@ let run configuration scenario operation retained_size encoded_size =
     suite = Scenario.suite_name (Scenario.suite scenario);
     boundary = Scenario.boundary scenario;
     payload = Scenario.payload scenario;
+    logical_operations;
     nanoseconds_per_operation;
     operations_per_second = 1_000_000_000. /. nanoseconds_per_operation;
     minor_bytes_per_operation;

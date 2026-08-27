@@ -7,8 +7,8 @@ type ppx_bounded_child = { first : string; second : string }
 type ppx_bounded_parent = { child : ppx_bounded_child; tail : string }
 [@@deriving observe]
 
-let ppx_bounded_parent_schema =
-  Observe.Schema.record ppx_bounded_parent_t ~builder:(fun _ -> ())
+type ppx_compaction_event = { first : int; second : int; third : int }
+[@@deriving observe]
 
 module Observer = Observe.Make (Test_io.IO)
 
@@ -55,6 +55,42 @@ let test_generated_record_respects_total_bytes_prefix () =
             "generated record did not retain its prefix with a size marker")
   | logs ->
       Alcotest.failf "expected one bounded generated record, received %d"
+        (List.length logs)
+
+let test_generated_wide_truncation_compacts () =
+  let limits =
+    Observe.Logs.Limits.create_exn ~max_object_fields:2 ~max_total_bytes:100_000
+      ()
+  in
+  let capture =
+    match
+      Observer.with_capture observer
+        ~config:(Test_io.config ~console:Observe.Config.Silent ~limits "s")
+        (fun capture ->
+          let wide =
+            Observe.Logs.create_typed ~name:"bounded-wide"
+              ~using:ppx_compaction_event_schema ()
+          in
+          Observe.Logs.set wide (fun m ->
+              m.typed
+                (ppx_compaction_event_patch ~first:1 ~second:2 ~third:3 ()));
+          Observe.Logs.emit wide;
+          Test_io.Direct.return capture)
+    with
+    | Ok capture -> capture
+    | Error _ -> Alcotest.fail "capture rejected bounded generated wide record"
+  in
+  match Observe.Capture.logs capture with
+  | [ log ] -> (
+      match Observe.Value.view (Observe.Log.fields log) with
+      | `Truncated_object (fields, Observe.Value.Object_fields) ->
+          Alcotest.(check (list string))
+            "generated wide prefix" [ "first"; "second" ] (List.map fst fields)
+      | _ ->
+          Alcotest.fail
+            "generated wide record did not retain a bounded truncated prefix")
+  | logs ->
+      Alcotest.failf "expected one bounded generated wide record, received %d"
         (List.length logs)
 
 let test_logging_extensions_lower_to_admitted_builders () =
@@ -239,6 +275,8 @@ let () =
         [
           Alcotest.test_case "generated records retain bounded prefixes" `Quick
             test_generated_record_respects_total_bytes_prefix;
+          Alcotest.test_case "generated wide truncation compacts" `Quick
+            test_generated_wide_truncation_compacts;
           Alcotest.test_case "admission and all body forms" `Quick
             test_logging_extensions_lower_to_admitted_builders;
           Alcotest.test_case "parameterized sparse patch identity" `Quick

@@ -562,6 +562,82 @@ let test_open_and_typed_wide_forms () =
   | actual ->
       Alcotest.failf "expected two wide logs, received %d" (List.length actual)
 
+let test_non_string_matchers_transform_matching_scalars () =
+  let source_bytes = Bytes.of_string "secret-bytes" in
+  let safe_bytes = Bytes.of_string "safe-bytes" in
+  let replace matcher value =
+    Redaction.Rule.matching matcher (Redaction.Action.replace value)
+  in
+  let policy =
+    Redaction.create_exn
+      ~rules:
+        [
+          replace (Redaction.Matcher.bool true) (Observe.Value.bool false);
+          replace (Redaction.Matcher.int 41) (Observe.Value.int 42);
+          replace
+            (Redaction.Matcher.int32 43l)
+            (Observe.Value.embed Observe.Type.int32 44l);
+          replace
+            (Redaction.Matcher.int64 45L)
+            (Observe.Value.embed Observe.Type.int64 46L);
+          replace (Redaction.Matcher.float 47.5) (Observe.Value.float 48.5);
+          replace
+            (Redaction.Matcher.bytes_equal source_bytes)
+            (Observe.Value.embed Observe.Type.bytes safe_bytes);
+          replace Redaction.Matcher.null
+            (Observe.Value.string "[null-redacted]");
+        ]
+      ()
+  in
+  let log =
+    one_log
+      (capture ~redaction:policy (fun _ ->
+           Observe.Logs.info (fun m ->
+               let open Observe.Logs in
+               m.untyped
+               |+ m.field "bool" Observe.Type.bool true
+               |+ m.field "int" Observe.Type.int 41
+               |+ m.field "int32" Observe.Type.int32 43l
+               |+ m.field "int64" Observe.Type.int64 45L
+               |+ m.field "float" Observe.Type.float 47.5
+               |+ m.field "bytes" Observe.Type.bytes source_bytes
+               |+ m.field "null" (Observe.Type.option Observe.Type.string) None
+               |> m.seal)))
+  in
+  let output = json_fields log in
+  List.iter
+    (fun secret ->
+      Alcotest.(check bool)
+        ("scalar source removed: " ^ secret)
+        false (contains output secret))
+    [
+      "secret-bytes";
+      "\"bool\":true";
+      "\"int\":41";
+      "\"int32\":43";
+      "\"int64\":45";
+      "\"float\":47.5";
+      "\"null\":null";
+    ];
+  List.iter
+    (fun replacement ->
+      Alcotest.(check bool)
+        ("scalar replacement present: " ^ replacement)
+        true
+        (contains output replacement))
+    [
+      "safe-bytes";
+      "\"bool\":false";
+      "\"int\":42";
+      "\"int32\":44";
+      "\"int64\":46";
+      "\"float\":48.5";
+      "\"null\":\"[null-redacted]\"";
+    ];
+  Alcotest.(check int)
+    "every non-string matcher reports one transformation" 7
+    (List.length (Observe.Log.redactions log))
+
 let test_replacement_rechecked_and_rule_composition () =
   let token_path = path [ "token" ] in
   let matcher =
@@ -937,6 +1013,8 @@ let () =
             test_opaque_typed_schema_defers_path_validation;
           Alcotest.test_case "open and typed wide" `Quick
             test_open_and_typed_wide_forms;
+          Alcotest.test_case "non-string matchers" `Quick
+            test_non_string_matchers_transform_matching_scalars;
           Alcotest.test_case "replacement and composition" `Quick
             test_replacement_rechecked_and_rule_composition;
           Alcotest.test_case "lazy authoring" `Quick test_lazy_authoring;

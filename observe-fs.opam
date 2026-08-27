@@ -2,7 +2,7 @@
 opam-version: "2.0"
 synopsis: "Portable daily filesystem delivery for Observe"
 description:
-  "Portable bounded daily NDJSON filesystem delivery with injectable I/O capabilities."
+  "Portable bounded daily NDJSON delivery with prompt drain acceptance, finite writer state, barriers, and injectable filesystem capabilities."
 maintainer: ["Abdullah Elsayed <hey@abdufelsayed.dev>"]
 authors: ["Abdullah Elsayed <hey@abdufelsayed.dev>"]
 license: "MIT"

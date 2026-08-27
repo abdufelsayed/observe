@@ -141,6 +141,10 @@ val singleton_object_from_owned :
 val object_from_owned :
   ?limits:Log_limits.t -> (string * fragment) list -> (fragment, error) result
 
+val compact_fragment : fragment -> fragment
+(** Drop persistent update indexes after authoring while preserving the
+    fragment's conservative resource accounting. *)
+
 val complete : fragment -> t
 
 (* Recover owned resource accounting for an immutable completed value. *)

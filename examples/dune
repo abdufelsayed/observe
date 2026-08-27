@@ -21,4 +21,11 @@
 (alias
  (name observe-fs-examples)
  (package observe-fs-lwt-unix)
- (deps filesystem.exe))
+ (deps filesystem.exe production.exe))
+
+(executable
+ (name production)
+ (modules production)
+ (libraries observe observe-lwt-unix observe-fs-lwt-unix lwt lwt.unix)
+ (preprocess
+  (pps observe.ppx)))

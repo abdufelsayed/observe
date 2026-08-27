@@ -37,7 +37,6 @@ type t = {
   level : Level.t;
   event : event;
   fields_fragment : Snapshot.fragment;
-  fields : Value.frozen;
   kind : kind;
   redactions : redaction list;
 }
@@ -48,7 +47,7 @@ let version log = log.version
 let timestamp log = log.timestamp
 let level log = log.level
 let event log = log.event
-let fields log = log.fields
+let fields log = Snapshot.complete log.fields_fragment
 let kind log = log.kind
 let redactions log = log.redactions
 let redaction_effect redaction = redaction.redaction_effect
@@ -288,6 +287,7 @@ module Producer = struct
       with
       | Error _ as error -> error
       | Ok fields_fragment -> (
+          let fields_fragment = Snapshot.compact_fragment fields_fragment in
           let fields = Snapshot.complete fields_fragment in
           match own_event fields event with
           | Error _ as error -> error
@@ -304,7 +304,6 @@ module Producer = struct
                   level;
                   event = completed_event;
                   fields_fragment;
-                  fields;
                   kind;
                   redactions;
                 })

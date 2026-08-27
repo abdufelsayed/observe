@@ -8,11 +8,20 @@
  (modules test_materialization_boundaries)
  (libraries observe observe_test_support alcotest))
 
+(executable
+ (name test_enrichment_configured_drain)
+ (modules test_enrichment_configured_drain)
+ (libraries observe observe_test_support alcotest))
+
 (rule
  (alias observe-enrichment-contracts)
  (package observe)
- (deps test_enrichment_contracts.exe test_materialization_boundaries.exe)
+ (deps
+  test_enrichment_contracts.exe
+  test_enrichment_configured_drain.exe
+  test_materialization_boundaries.exe)
  (action
   (progn
    (run %{exe:test_enrichment_contracts.exe})
+   (run %{exe:test_enrichment_configured_drain.exe})
    (run %{exe:test_materialization_boundaries.exe}))))

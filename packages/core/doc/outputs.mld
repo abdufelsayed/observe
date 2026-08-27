@@ -1,0 +1,98 @@
+{0 Outputs and lifecycle}
+
+{1 Drain acceptance}
+
+{!type:Observe.Drain.t} is the portable immediate output seam:
+
+{[
+let drain =
+  Observe.Drain.create (fun log ->
+    enqueue_owned log;
+    Observe.Drain.Accepted)
+]}
+
+The callback receives one immutable globally safe completed log. It must return
+promptly and be concurrency-safe. [Accepted] means only that this drain took
+immediate ownership; it does not claim formatting, queueing, persistence,
+durability, or acknowledgement. Exceptions are contained for that branch.
+
+An immediate drain needs no worker or lifecycle registration. A custom
+asynchronous output owns its own finite queue, worker, loss accounting, and
+resource cleanup behind this acceptance seam.
+
+{1 Ready console}
+
+[Observe_lwt_unix.init] installs automatic standard-error delivery unless
+{!type:Observe.Config.console} is [Silent]. [Auto] chooses pretty development
+output or NDJSON production output. Submission is prompt and a finite private
+worker serializes writes.
+
+Console writes continue partial writes and retry only interrupted system calls.
+There is no fictional cross-destination retry policy.
+
+{1 Ready daily files}
+
+Install [observe-fs-lwt-unix] and create one drain before initialization:
+
+{[
+let* files =
+  Observe_fs_lwt_unix.create_exn ~dir:".observe/logs" ~capacity:1024 ()
+in
+let config =
+  Observe.Config.create_exn ~service:"orders" ~drains:[ files ] ()
+in
+Observe_lwt_unix.init_exn config
+]}
+
+The ready package recursively prepares the directory, starts one finite worker,
+registers it with the process lifecycle, and returns its drain directly. Point
+and wide logs append as flat NDJSON to daily UTC [.jsonl] files.
+
+The queue rejects the newest record when full. Once accepted, older append work
+is not silently evicted to admit newer records. Writes continue partial writes
+and interrupted syscalls; other failures stop that output, report bounded loss,
+and do not break application control flow or another output.
+
+Local write completion does not imply [fsync], crash durability, compression,
+retention, or cross-process coordination.
+
+{1 Flush and shutdown}
+
+{[
+let* () = Observe_lwt_unix.flush () in
+continue_running ()
+]}
+
+[flush] settles work accepted before its boundary and leaves logging open.
+
+{[
+let () =
+  Observe_lwt_unix.init_exn config;
+  Lwt_main.run (Lwt.finalize app Observe_lwt_unix.shutdown)
+]}
+
+[shutdown] is terminal and idempotent. It closes production admission, attempts
+accepted work, and releases registered output workers and resources. Ordinary
+calls use a finite 30-second caller wait and raise
+[Observe_lwt_unix.Lifecycle.Incomplete] when a participant reports
+rejection, loss, failure, timeout, or cancellation.
+
+The advanced surface returns the report instead:
+
+{[
+let within =
+  Observe_lwt_unix.Lifecycle.Duration.create_exn ~seconds:5.
+in
+let* report = Observe_lwt_unix.Lifecycle.shutdown ~within () in
+if not (Observe_lwt_unix.Lifecycle.complete report) then
+  inspect (Observe_lwt_unix.Lifecycle.problems report)
+]}
+
+A timeout or caller cancellation stops only that caller's finite wait; shared
+work continues. Independent flushes may overlap. Concurrent and repeated
+shutdown callers join the same transition.
+
+The problem identities are bounded runtime labels. A complete report means the
+registered participants settled without a reported problem at their owned
+effect boundaries. It still does not upgrade local delivery into durability or
+remote acknowledgement.

@@ -86,6 +86,7 @@ type context = {
   mutable byte_bytes : int;
   mutable retained_bytes : int;
   mutable height : int;
+  mutable requires_compaction : bool;
   mutable steps : int;
   mutable last_limit : truncation;
 }
@@ -161,6 +162,7 @@ let create_context ?(limits = Log_limits.default) () =
     byte_bytes = 0;
     retained_bytes = 0;
     height = 0;
+    requires_compaction = false;
     steps = 0;
     last_limit = Total_bytes;
   }
@@ -225,6 +227,7 @@ type checkpoint = {
   checkpoint_byte_bytes : int;
   checkpoint_retained_bytes : int;
   checkpoint_height : int;
+  checkpoint_requires_compaction : bool;
 }
 
 let checkpoint context =
@@ -234,6 +237,7 @@ let checkpoint context =
     checkpoint_byte_bytes = context.byte_bytes;
     checkpoint_retained_bytes = context.retained_bytes;
     checkpoint_height = context.height;
+    checkpoint_requires_compaction = context.requires_compaction;
   }
 
 let rollback context checkpoint =
@@ -241,7 +245,8 @@ let rollback context checkpoint =
   context.string_bytes <- checkpoint.checkpoint_string_bytes;
   context.byte_bytes <- checkpoint.checkpoint_byte_bytes;
   context.retained_bytes <- checkpoint.checkpoint_retained_bytes;
-  context.height <- checkpoint.checkpoint_height
+  context.height <- checkpoint.checkpoint_height;
+  context.requires_compaction <- checkpoint.checkpoint_requires_compaction
 
 let copy_string value = Bytes.unsafe_to_string (Bytes.of_string value)
 let valid_text = Utf8.is_valid
@@ -280,6 +285,7 @@ let localize_apply context ~depth materialize value =
   let before_byte_bytes = context.byte_bytes in
   let before_retained_bytes = context.retained_bytes in
   let before_height = context.height in
+  let before_requires_compaction = context.requires_compaction in
   match materialize context ~depth value with
   | Ok value -> Ok value
   | Error Limit_exceeded ->
@@ -289,6 +295,7 @@ let localize_apply context ~depth materialize value =
       context.byte_bytes <- before_byte_bytes;
       context.retained_bytes <- before_retained_bytes;
       context.height <- before_height;
+      context.requires_compaction <- before_requires_compaction;
       truncated context ~depth reason
   | Error _ as error -> error
 
@@ -487,7 +494,9 @@ let rec measure_value value =
   | Truncated { partial = Some partial; _ } ->
       let partial = measure_value partial in
       let resources = resources_of partial in
-      snapshot value
+      snapshot
+        ~requires_compaction:(requires_compaction partial)
+        value
         { resources with retained_bytes = resources.retained_bytes + 16 }
         (fragment_height partial)
   | Integer (Decimal decimal) ->
@@ -596,6 +605,7 @@ type 'entry container = {
   mutable last_byte_bytes : int;
   mutable last_retained_bytes : int;
   mutable last_height : int;
+  mutable last_requires_compaction : bool;
   mutable pending_name : string;
   mutable name_index : (string, unit) Hashtbl.t option;
 }
@@ -620,6 +630,7 @@ let create_container context ~depth ~limit =
           last_byte_bytes = context.byte_bytes;
           last_retained_bytes = context.retained_bytes;
           last_height = context.height;
+          last_requires_compaction = context.requires_compaction;
           pending_name = "";
           name_index = None;
         }
@@ -630,7 +641,8 @@ let remember_before_entry container =
   container.last_string_bytes <- context.string_bytes;
   container.last_byte_bytes <- context.byte_bytes;
   container.last_retained_bytes <- context.retained_bytes;
-  container.last_height <- context.height
+  container.last_height <- context.height;
+  container.last_requires_compaction <- context.requires_compaction
 
 let rollback_last container =
   let context = container.context in
@@ -641,6 +653,7 @@ let rollback_last container =
       context.byte_bytes <- container.last_byte_bytes;
       context.retained_bytes <- container.last_retained_bytes;
       context.height <- container.last_height;
+      context.requires_compaction <- container.last_requires_compaction;
       container.entries_rev <- rest;
       container.count <- container.count - 1
   | [] -> ()
@@ -806,6 +819,7 @@ let build_object_single context ~depth name materialize =
   let before_byte_bytes = context.byte_bytes in
   let before_retained_bytes = context.retained_bytes in
   let before_height = context.height in
+  let before_requires_compaction = context.requires_compaction in
   match materialize () with
   | Error _ as error -> error
   | Ok value -> (
@@ -829,6 +843,7 @@ let build_object_single context ~depth name materialize =
           context.byte_bytes <- before_byte_bytes;
           context.retained_bytes <- before_retained_bytes;
           context.height <- before_height;
+          context.requires_compaction <- before_requires_compaction;
           truncated_object context ~depth reason []
       | Error _ as error -> error)
 
@@ -852,14 +867,19 @@ let seal (context : context) value =
     string_bytes = context.string_bytes;
     byte_bytes = context.byte_bytes;
     retained_bytes = context.retained_bytes;
-    shape = context.height;
+    shape =
+      shape ~height:context.height
+        ~requires_compaction:context.requires_compaction;
   }
 
 let import context ~depth fragment =
   let height = depth + fragment_height fragment in
   match reserve context ~depth:height (resources_of fragment) with
   | Error _ as error -> error
-  | Ok () -> Ok fragment.value
+  | Ok () ->
+      context.requires_compaction <-
+        context.requires_compaction || requires_compaction fragment;
+      Ok fragment.value
 
 let fragment value = measure_value value
 let fragment_retained_bytes (fragment : fragment) = fragment.retained_bytes
@@ -979,6 +999,9 @@ let empty_object =
   snapshot ~requires_compaction:true (Object (Packed packed)) resources 0
 
 let completed_empty_object = Object (Flat [])
+
+let completed_empty_fragment =
+  { empty_object with value = completed_empty_object; shape = 0 }
 
 let rec fold_indexed indexed callback accumulator = function
   | [] -> accumulator
@@ -1408,6 +1431,14 @@ let fit_object_extension ?(limits = Log_limits.default) (fragment : fragment)
           in
           fit fields_rev
 
+let rec map_sharing map = function
+  | [] -> []
+  | item :: rest as original ->
+      let mapped_item = map item in
+      let mapped_rest = map_sharing map rest in
+      if mapped_item == item && mapped_rest == rest then original
+      else mapped_item :: mapped_rest
+
 (* Persistent object indexes exist to make repeated wide-event contribution
    cheap.  Once an event is sealed they are dead update machinery, so project
    the snapshot back to the compact immutable value representation before the
@@ -1415,23 +1446,40 @@ let fit_object_extension ?(limits = Log_limits.default) (fragment : fragment)
    payloads are already package-owned and remain shared. *)
 let rec compact_value = function
   | (Null | Bool _ | Integer _ | Float _ | String _ | Bytes _) as value -> value
-  | Truncated ({ partial = None; _ } as truncated) -> Truncated truncated
-  | Truncated ({ partial = Some partial; _ } as truncated) ->
-      Truncated { truncated with partial = Some (compact_value partial) }
-  | List values -> List (List.map compact_value values)
-  | Object object_ -> Object (compact_object object_)
-  | Variant ({ payload = None; _ } as variant) -> Variant variant
-  | Variant ({ payload = Some payload; _ } as variant) ->
-      Variant { variant with payload = Some (compact_value payload) }
+  | Truncated { partial = None; _ } as value -> value
+  | Truncated ({ partial = Some partial; _ } as truncated) as value ->
+      let compacted = compact_value partial in
+      if compacted == partial then value
+      else Truncated { truncated with partial = Some compacted }
+  | List values as value ->
+      let compacted = map_sharing compact_value values in
+      if compacted == values then value else List compacted
+  | Object object_ as value ->
+      let compacted = compact_object object_ in
+      if compacted == object_ then value else Object compacted
+  | Variant { payload = None; _ } as value -> value
+  | Variant ({ payload = Some payload; _ } as variant) as value ->
+      let compacted = compact_value payload in
+      if compacted == payload then value
+      else Variant { variant with payload = Some compacted }
 
 and compact_fragment_value fragment =
   if requires_compaction fragment then compact_value fragment.value
   else fragment.value
 
 and compact_object = function
-  | Single (name, value) -> Single (name, compact_value value)
-  | Flat fields ->
-      Flat (List.map (fun (name, value) -> (name, compact_value value)) fields)
+  | Single (name, value) as object_ ->
+      let compacted = compact_value value in
+      if compacted == value then object_ else Single (name, compacted)
+  | Flat fields as object_ ->
+      let compacted =
+        map_sharing
+          (fun ((name, value) as field) ->
+            let compacted = compact_value value in
+            if compacted == value then field else (name, compacted))
+          fields
+      in
+      if compacted == fields then object_ else Flat compacted
   | Packed packed -> (
       match packed.fields with
       | [ (name, child) ] -> Single (name, compact_fragment_value child)
@@ -1447,6 +1495,16 @@ and compact_object = function
              let child = Int_map.find slot indexed.values in
              (name, compact_fragment_value child))
            indexed.order_rev)
+
+let compact_fragment fragment =
+  if fragment == empty_object then completed_empty_fragment
+  else if requires_compaction fragment then
+    {
+      fragment with
+      value = compact_fragment_value fragment;
+      shape = fragment_height fragment;
+    }
+  else fragment
 
 let complete fragment =
   if fragment == empty_object then completed_empty_object

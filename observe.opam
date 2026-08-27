@@ -2,7 +2,7 @@
 opam-version: "2.0"
 synopsis: "Structured logging for OCaml"
 description:
-  "Portable structured logging with typed values and deterministic capture."
+  "Portable bounded structured logging with typed and open point logs, wide events, explicit redaction, sampling, routing, pure formatters, drains, and deterministic capture."
 maintainer: ["Abdullah Elsayed <hey@abdufelsayed.dev>"]
 authors: ["Abdullah Elsayed <hey@abdufelsayed.dev>"]
 license: "MIT"

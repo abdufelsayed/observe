@@ -2,7 +2,7 @@
 opam-version: "2.0"
 synopsis: "Lwt execution for Observe filesystem delivery"
 description:
-  "Lwt completion of portable Observe filesystem delivery for injected filesystems."
+  "Lwt execution and lifecycle completion for portable Observe filesystem delivery over caller-provided capabilities."
 maintainer: ["Abdullah Elsayed <hey@abdufelsayed.dev>"]
 authors: ["Abdullah Elsayed <hey@abdufelsayed.dev>"]
 license: "MIT"

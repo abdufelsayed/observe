@@ -5,6 +5,7 @@ type t = {
   suite : string;
   boundary : string;
   payload : string;
+  logical_operations : int;
   nanoseconds_per_operation : float;
   operations_per_second : float;
   minor_bytes_per_operation : float;

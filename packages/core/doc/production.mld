@@ -1,0 +1,161 @@
+{0 Production policy}
+
+Production behavior is selected once in {!module:Observe.Config}. Logging sites
+remain ordinary point or wide authoring.
+
+{1 Pipeline}
+
+One completed log moves through these distinct decisions:
+
+1. level and active-route admission;
+2. caller authoring and configured enrichment;
+3. finite materialization into package-owned meaning;
+4. global caller-defined redaction;
+5. one final sampling and retention decision;
+6. per-drain routing and optional stricter redaction;
+7. prompt acceptance or rejection by each selected drain; and
+8. output-owned bounded delivery, flush, and shutdown.
+
+Filtering is not sampling. Retention is not routing. Drain acceptance is not
+delivery. Canonical safety is the shared floor, while a destination may choose
+a stricter immutable projection.
+
+{1 Enrichment}
+
+{[
+let deployment =
+  Observe.Logs.Enricher.create_exn ~name:"deployment" (fun () ->
+    Observe.Value.object_
+      [ "region", Observe.Value.string "eu-west-1"
+      ; "revision", Observe.Value.string release_revision
+      ])
+]}
+
+The callback is lazy and runs only for an admitted completed log. It must
+return an object contribution. Caller-authored fields win ordinary collisions.
+[~authoritative_fields] grants one enricher authority over named non-reserved
+root fields; configuration rejects overlapping authority, so list order never
+selects a winner.
+
+Callbacks are synchronous and may run concurrently for different logs. Ordinary
+exceptions are contained and omit only that contribution; runtime control
+exceptions remain native. A callback that recursively emits Observe logs owns
+termination of that recursion.
+
+{1 Finite materialization}
+
+Finite defaults always apply. Select tighter workload-specific bounds when
+needed:
+
+{[
+let limits =
+  Observe.Logs.Limits.create_exn
+    ~max_depth:16
+    ~max_object_fields:128
+    ~max_collection_length:256
+    ~max_string_bytes:16_384
+    ~max_bytes_length:16_384
+    ~max_nodes:4_096
+    ~max_total_bytes:262_144
+    ()
+]}
+
+Limits apply to typed and open point and wide values, nested structures,
+embedded typed values, recursion, strings, bytes, annotations, and required log
+metadata. Local exhaustion preserves a safe prefix or sibling and records
+package-owned truncation. Observe withholds the whole log only when it cannot
+isolate the invalid region or guarantee the disclosure boundary.
+
+[max_total_bytes] is deterministic Observe accounting, not an OCaml heap or wire
+size. See {!val:Observe.Logs.Limits.create} for the stable charged units.
+
+{1 Explicit redaction}
+
+Observe supplies mechanics; the application supplies meaning. There are no
+built-in PII, payment, credential, email, token, regex, or field-name presets.
+
+{[
+module R = Observe.Logs.Redaction
+
+let disclosure =
+  R.create_exn
+    ~rules:
+      [ R.Rule.at
+          (R.Path.fields [ "customer"; "email" ])
+          (R.Action.mask
+             (R.Mask.keep_suffix ~characters:3
+                ~hidden:(R.Mask.Collapse "***") ()))
+      ; R.Rule.at
+          (R.Path.fields [ "payment"; "access_token" ])
+          R.Action.remove
+      ]
+    ()
+]}
+
+Exact paths can address fields, list indexes, and variant cases. Matching rules
+can replace or mask matching structured scalars, point-text messages, and wide
+annotations. A schema-associated policy validates known typed paths when it is
+constructed.
+
+The global policy runs before capture and every output. Failure is local and
+fail-closed: an affected unsafe branch is replaced, removed, or withheld rather
+than delivering the original. Redaction does not rewrite package metadata.
+
+{1 Sampling and completion-aware retention}
+
+{[
+module S = Observe.Logs.Sampling
+
+let sampling =
+  S.create
+    ~debug:(S.Rate.percent_exn 5.)
+    ~info:(S.Rate.percent_exn 25.)
+    ~stability:S.Correlation_stable
+    ()
+
+let retention =
+  Observe.Logs.Retention.create ~keep:(fun log ->
+    Observe.Level.equal (Observe.Log.level log) Observe.Level.Error)
+]}
+
+Omitted sampling is inert. Omitted per-level rates retain all logs, so errors
+remain retained unless [~error] is explicitly configured. Exact zero and 100%
+consume no random draw.
+
+[Correlation_stable] aligns the base draw for related observations but does not
+make a causal tree one buffered unit. Each point, parent, and child completes and
+is retained independently.
+
+Retention sees the completed bounded globally redacted {!type:Observe.Log.t}.
+Returning [true] rescues it from base sampling; [false] defers to the base
+decision and cannot force a drop. Failures are diagnosed and fail open.
+
+{1 Routing and stricter destinations}
+
+{[
+let incidents =
+  incident_drain
+  |> Observe.Drain.with_route ~when_:(fun log ->
+       Observe.Level.equal (Observe.Log.level log) Observe.Level.Error)
+  |> Observe.Drain.with_redaction ~redaction:incident_redaction
+
+let config =
+  Observe.Config.create_exn ~service:"checkout"
+    ~environment:"production"
+    ~min_level:Observe.Level.Debug
+    ~enrichers:[ deployment ]
+    ~limits
+    ~redaction:disclosure
+    ~sampling
+    ~retention
+    ~drains:[ all_logs; incidents ]
+    ()
+]}
+
+Routing sees only the safe completed log and selects one drain. Nested routes
+form conjunctions. A failing route skips only its drain. Destination redaction
+can strengthen the global policy but cannot recover removed source values.
+
+The compiled [examples/production.ml] program combines these policies with two
+ready filesystem drains, deliberate queue pressure, visible lifecycle loss,
+flush, and shutdown.

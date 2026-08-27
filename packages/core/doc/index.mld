@@ -1,220 +1,35 @@
 {0 Observe}
 
-Observe is a portable structured logging core for OCaml. It owns point and
-wide-log authoring, admission, canonical completion, formatting, diagnostics,
-additional drains, and deterministic capture without performing I/O.
+Observe is structured logging for OCaml. The portable [observe] package owns
+point and wide-event meaning, typed and open structured authoring, policy,
+bounded canonical completion, pure formatting, drains, diagnostics, and
+deterministic capture without performing concrete I/O.
 
-Point logs auto-emit one text, anonymous structured, or declared record event.
-Wide logs use the same field and schema meaning but accept successive lazy
-contributions before one explicit or scope-bounded completion. The core owns
-current-handle meaning and operation behavior; runtime compositions supply the
-dynamic binding and effect settlement required to execute them.
-Drains that accept work for later effectful delivery can report a terminal
-worker failure through {!val:Observe.Drain.Integration.report_failure} without
-recursing through normal logging.
+{1 Start here}
 
-{1 Installation}
+- {!page-getting_started} installs and initializes the ready Lwt-Unix path.
+- {!page-logging} covers text, open, typed, manual, and PPX authoring.
+- {!page-production} composes enrichment, bounds, redaction, sampling,
+  retention, and routing without changing call sites.
+- {!page-outputs} explains drains, ready filesystem delivery, flush, shutdown,
+  and visible loss.
+- {!page-testing} shows deterministic capture and semantic inspection.
+- {!page-packages} explains the portable, runtime, and facility boundaries.
 
-Link the portable core with [(libraries observe)]. Add
-[(preprocess (pps observe.ppx))] when using the deriver or untyped-value extension.
-Configurable Lwt I/O and the ready Unix composition are distributed in the
-[observe-lwt] and [observe-lwt-unix] packages.
+The complete installed interface is {!module:Observe}. The concise PPX forms
+are optional; every logging operation also has a manual public equivalent.
 
-{1 Authoring}
+{1 Core model}
 
-Ordinary code logs through {!module:Observe.Logs}:
+A point log is one auto-emitting text, open structured, typed structured, or
+explicit-error event. A wide log uses the same logging facility but accepts
+successive lazy contributions before one explicit or scope-bounded completion.
 
-{[
-[%observe.info text ~tag:"auth" "User logged in"];
+Every published log starts from one finite package-owned immutable canonical
+snapshot. Capture, formatters, and drains inspect that stable meaning. A drain
+may apply an additional redaction policy and therefore receive an immutable
+derived projection; it can never recover globally removed source data.
 
-[%observe.debug text ~tag:"query" "%s" (explain_query query)];
-
-[%observe.info
-  untyped { action = "user_login"; user_id = 42 }];
-
-[%observe.info typed ~using:event_schema event]
-]}
-
-The callback and every text, untyped, or typed value constructed inside it run
-only after an active output path and level admission. A configured drain route
-predicate runs later because it inspects the completed safe log. Before production
-initialization, logs outside an active capture are withheld and counted rather
-than raising an initialization exception.
-
-A portable wide log is explicit:
-
-{[
-let log = Observe.Logs.create ~name:"checkout" () in
-[%observe.set log { cart_id = string cart_id }];
-[%observe.set log { phase = "authorized" }];
-[%observe.info log "authorization completed"];
-Observe.Logs.emit log
-]}
-
-For a record derived with [@@deriving observe], [event_schema] locks complete
-point values and sparse wide patches to the same declared root. The deriver also
-generates [event_patch] and one-layer
-[[%observe.set log typed { ... }]] authoring.
-
-{1 Configuration and output}
-
-{!val:Observe.Config.create} returns a validated result;
-{!val:Observe.Config.create_exn} raises
-{!exception:Observe.Config.Invalid_configuration}. Automatic console output is
-automatic formatted output. {!module:Observe.Drain} values are additional
-application-owned outputs that receive completed {!type:Observe.Log.t} values.
-[Config.Silent] suppresses the console, not drains. [Config.Auto] chooses
-pretty development output or production NDJSON from the environment.
-[Config.create] accepts each configured behavior as a named value of its own
-type. Omitting [~min_level] admits [Info] and above. The default does not guess
-which application values are sensitive or activate sensitivity rules.
-
-{!module:Observe.Logs.Enricher} values contribute reusable structured context
-to the same canonical fields as caller authoring. Their callbacks run only for
-admitted completion. Caller fields win ordinary collisions; composition may
-grant one enricher authority over named non-reserved root fields. Duplicate
-enricher names and overlapping authority are configuration errors. Enricher
-callbacks are synchronous and may run concurrently for different observations,
-so they must be safe for concurrent invocation. An admitted Observe log emitted
-by a callback can invoke the same enricher again; the callback owns termination
-of that recursion. Ordinary failures are contained, configured limit exhaustion
-becomes bounded truncation or omission, and runtime control exceptions propagate
-unchanged.
-
-{!module:Observe.Logs.Limits} owns finite canonical-materialization bounds.
-{!val:Observe.Logs.Limits.default} is active when [~limits] is omitted;
-configuration may choose another validated finite value, but cannot disable
-the bounds. Total-size accounting charges canonical nodes, object fields, list
-entries, payload bytes, truncation markers, and required completed-log metadata;
-the exact public units are documented on {!val:Observe.Logs.Limits.create}.
-
-{1 Sampling, completion retention, and routing}
-
-{!module:Observe.Logs.Sampling} configures validated per-level base rates.
-Omitting [~sampling] is inert, and omitted rates retain every log. Errors are
-therefore retained by default unless [~error] is explicitly configured.
-[Correlation_stable] aligns the base draw for related parent, child, and point
-observations without turning them into one atomic retention unit.
-
-{!module:Observe.Logs.Retention} can rescue one completed log before fan-out.
-Its callback receives only the bounded log after global disclosure safety.
-Returning [false] defers to base sampling and cannot force a drop. Ordinary
-callback failures are diagnosed and fail open; runtime control exceptions remain
-native.
-
-{!val:Observe.Drain.with_route} selects one drain from that same safe immutable
-log. Nested routes form a conjunction. A route failure skips only its drain, and
-{!val:Observe.Drain.with_redaction} can then strengthen disclosure policy on the
-selected branch. Ordinary route exceptions are contained; runtime control
-exceptions remain native. Route and drain callbacks run synchronously, may run
-concurrently for different observations, and must promptly return. Capture
-bypasses probabilistic retention and external routing while preserving level
-admission, finite materialization, and global redaction.
-
-{1 Disclosure-safe redaction}
-
-Redaction is an explicit caller policy. Omitting [~redaction] leaves values
-unchanged; Observe does not infer sensitivity from names, values, or the
-environment. A policy is inert until selected by [Config] or a destination
-drain.
-
-Exact paths address the canonical structured root, including nested objects,
-list positions, and variant cases. A policy associated with [~using] is checked
-against one declared schema and can be reused by typed point logs and
-schema-locked wide logs:
-
-{[
-module R = Observe.Logs.Redaction
-
-let typed_redaction =
-  R.create_exn
-    ~using:checkout_event_schema
-    ~rules:
-      [ R.Rule.at
-          (R.Path.root
-          |> R.Path.field "payment"
-          |> R.Path.case "Authorized"
-          |> R.Path.field "authorization_id")
-          (R.Action.mask
-             (R.Mask.keep_suffix ~characters:4 ~hidden:(R.Mask.Fill "*") ()))
-      ; R.Rule.at
-          (R.Path.root |> R.Path.field "item_count")
-          R.Action.remove
-      ]
-    ()
-
-let config =
-  Observe.Config.create_exn ~service:"orders"
-    ~redaction:typed_redaction ()
-]}
-
-The same hierarchy supports open structured paths and value matchers. Matching
-rules can replace or mask matching structured scalars, point-text messages, and
-wide annotation messages; structural removal is available only for an exact
-structured path. Known typed paths and string-mask targets are validated during
-policy construction. Opaque custom mapped descriptions defer exact lookup to
-safe runtime traversal, while unstable positions such as hash-table iteration
-indexes are rejected. String masks are finite and operate on UTF-8 scalar boundaries.
-The finite prefix, suffix, and ends masks always hide at least one scalar from a
-non-empty source. A custom mask receives only the already bounded matched
-string. Ordinary callback failures and invalid or over-budget results use the
-safe fallback or withhold the affected branch; a callback that never returns
-cannot be preempted by portable OCaml, so custom callback termination remains
-the caller's responsibility. Runtime control exceptions remain native.
-
-Redaction cannot rewrite package metadata such as service, version, timestamp,
-level, tag, schema identity, operation names or identifiers, parent identity, or
-annotation timestamps. The effective policy runs after canonical
-materialization and before capture, presentation, or drains. JSON and pretty
-output render a successful replacement as its ordinary safe value, while
-capture can inspect bounded effect and location evidence through
-{!val:Observe.Log.redactions} without receiving the removed source.
-
-{!val:Observe.Drain.with_redaction} adds a stricter policy to one destination
-branch. The destination receives only the already globally safe observation and
-cannot recover an earlier removal. Conflicting exact actions are rejected when
-the policy is built; identical rules are deduplicated and declaration order is
-not semantic. A dynamic conflict or traversal failure fails closed locally and
-records a bounded diagnostic rather than delivering the raw observation.
-Use {!val:Observe.Logs.Redaction.combine} or
-{!val:Observe.Logs.Redaction.combine_exn} to select typed and global reusable
-policies together; composition rejects known conflicts and does not make list
-order semantic.
-
-{1 I/O composition and capture}
-
-{!module-type:Observe.IO.S} owns effects, dynamic binding, cleanup, native
-control exceptions, the wall clock, occurrence identity, sampling draws,
-console presentation capability, and console offers. {!module:Observe.Make}
-consumes that completed contract without adding a runtime or operating-system
-dependency to the core.
-
-{!val:Observe.Make.with_capture} installs capture as the innermost
-dynamic route, suppresses production delivery for the callback, restores the
-previous binding, and closes the capture exactly once.
-
-{1 Safety boundary}
-
-Every published point or wide log contains one package-owned immutable
-snapshot. Canonical freezing applies finite configured limits to depth, object
-width, collection length, nodes, individual strings and byte values, and
-deterministic total size before capture or output. Safe prefixes and siblings
-survive localized truncation. Caller mutation after emission cannot change
-later inspection or delivery. Unsafe, cyclic, unsupported, invalid, or raising
-projection paths are withheld and diagnosed without a live-value fallback.
-Runtime control exceptions remain native.
-
-Descriptions generated by [@@deriving observe] retain presentation distinctions
-that JSON intentionally collapses, including strings versus nullary
-constructors and ordinary versus polymorphic constructors. Their bounded direct
-freezer creates format-neutral canonical meaning; official formatters consume
-only that result. Decoding, comparison, binary encoding, and the remaining
-machine operations stay with Repr.
-{!val:Observe.Type.repr} exposes that machine for Repr consumers. Raw Repr
-descriptions are not lifted into [Observe.Type.t] because they do not prove a
-bounded canonical freezer.
-
-The portable core owns no background writer or durability guarantee. The ready
-Lwt-Unix package owns a bounded serialized console worker and exposes explicit
-[flush] and [shutdown] lifecycle operations. See the repository README for
-ready, test-capture, and custom-integration examples.
+The portable core owns no scheduler, background worker, random generator,
+wall clock, filesystem, console, or durability claim. Runtime and facility
+packages supply those effects through core-defined capabilities.
